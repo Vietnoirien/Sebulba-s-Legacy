@@ -1,0 +1,1193 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.distributions import Normal
+import numpy as np
+from collections import deque
+import random
+import time
+import os
+import asyncio
+import json
+import aiohttp
+import uuid
+from typing import List, Tuple, Dict, Optional
+import copy
+
+# Import Env and Constants
+from simulation.env import (
+    PodRacerEnv, 
+    RW_WIN, RW_LOSS, RW_CHECKPOINT, RW_CHECKPOINT_SCALE, 
+    RW_VELOCITY, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
+    RW_STEP_PENALTY, RW_ORIENTATION, RW_WRONG_WAY,
+    DEFAULT_REWARD_WEIGHTS
+)
+from models.deepsets import PodAgent
+from training.self_play import LeagueManager
+from training.normalization import RunningMeanStd
+from training.evolution import calculate_novelty, fast_non_dominated_sort, calculate_crowding_distance
+from training.rnd import RNDModel
+from config import *
+
+# Hyperparameters
+LR = 1e-4
+GAMMA = 0.994
+GAE_LAMBDA = 0.95
+CLIP_RANGE = 0.2
+ENT_COEF = 0.01
+VF_COEF = 0.5
+MAX_GRAD_NORM = 0.5
+TOTAL_TIMESTEPS = 2_000_000_000
+NUM_ENVS = 4096
+NUM_STEPS = 256
+# PBT Settings
+POP_SIZE = 32
+ENVS_PER_AGENT = NUM_ENVS // POP_SIZE # 128
+assert NUM_ENVS % POP_SIZE == 0, "NUM_ENVS must be divisible by POP_SIZE"
+EVOLVE_INTERVAL = 2 # Updates between evolutions
+
+# Batch Size per Agent
+BATCH_SIZE = 2 * ENVS_PER_AGENT * NUM_STEPS 
+MINIBATCH_SIZE = 16384 # 12GB VRAM can handle this easily
+UPDATE_EPOCHS = 4
+REPORT_INTERVAL = 1 
+
+class PPOTrainer:
+
+    def __init__(self, device='cuda', logger_callback=None):
+        self.device = torch.device(device)
+        self.env = PodRacerEnv(NUM_ENVS, device=device)
+        self.logger_callback = logger_callback
+        
+        # Population Initialization
+        self.population = []
+        self.generation = 0
+        self.iteration = 0
+        
+        # Reward Tensors [4096, 10]
+        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 10), device=self.device)
+        
+        # Normalization
+        self.rms_self = RunningMeanStd((14,), device=self.device)
+        self.rms_ent = RunningMeanStd((13,), device=self.device)
+        self.rms_cp = RunningMeanStd((6,), device=self.device)
+        
+        # RND Intrinsic Curiosity
+        # Input: Normalized Self Obs (14)
+        self.rnd = RNDModel(input_dim=14, device=self.device)
+        self.rnd_coef = 0.01 # PPO Intrinsic Coefficient
+        
+        # Reward Normalization
+        self.rms_ret = RunningMeanStd((1,), device=self.device)
+        self.returns_buffer = torch.zeros(NUM_ENVS, device=self.device)
+        
+        for i in range(POP_SIZE):
+            agent = PodAgent().to(self.device)
+            optimizer = optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
+            
+            # Initial Reward Config (Clone Default)
+            # Add some noise for initial diversity?
+            weights = DEFAULT_REWARD_WEIGHTS.copy()
+            # Randomize slightly?
+            if i > 0:
+                 # Mutate orientation and velocity slightly
+                 weights[RW_ORIENTATION] *= random.uniform(0.8, 1.2)
+                 weights[RW_VELOCITY] *= random.uniform(0.8, 1.2)
+            
+            self.population.append({
+                'id': i,
+                'agent': agent,
+                'optimizer': optimizer,
+                'weights': weights, # Python Dict for mutation logic
+                'lr': LR,
+                'ent_coef': ENT_COEF, # Individual Entropy Coefficient
+                'laps_score': 0,
+                'checkpoints_score': 0,
+                'reward_score': 0.0,
+                'efficiency_score': 999.0,
+                'wins': 0, # Track wins for League stage
+                'max_streak': 0,
+                'total_cp_steps': 0,
+                'total_cp_hits': 0,
+                'avg_steps': 0.0,
+                
+                # --- GA Robustness (EMA Stats) ---
+                'ema_efficiency': None, # Lower is better? We will invert or handle logic.
+                'ema_consistency': None, # Checkpoint Score
+                'ema_wins': None,
+                'ema_laps': None,
+                'ema_dist': None, # Novelty Distance
+                
+                # --- Behavior Characterization ---
+                # Buffer to accumulate [Speed, Steering] per step: [SumSpeed, SumSteering, Count]
+                'behavior_buffer': torch.zeros(3, device=self.device)
+            })
+            
+            # Fill Tensor
+            start_idx = i * ENVS_PER_AGENT
+            end_idx = start_idx + ENVS_PER_AGENT
+            for k, v in weights.items():
+                self.reward_weights_tensor[start_idx:end_idx, k] = v
+
+        # Default Pointer for API compatibility (Leader)
+        self.leader_idx = 0
+
+        # League & Opponent
+        self.league = LeagueManager()
+        self.opponent_agent = PodAgent().to(self.device)
+        
+        self.match_id = str(uuid.uuid4())
+        self.active_model_name = "scratch"
+        self.curriculum_mode = "auto" 
+        
+        # Telemetry
+        # Track 2 distinct streams for visualization continuity
+        self.telemetry_env_indices = [0, 128] # Start with disparate indices (Agent 0 and Agent ~2)
+        self.stats_interval = 100 
+        self.last_telemetry_time = time.time()
+        
+        # EMA Alpha (Smoothing Factor)
+        # 0.3 means 30% new, 70% old. 
+        # ~3 generations memory.
+        self.ema_alpha = 0.3
+    
+    def log(self, msg):
+        print(msg)
+        if self.logger_callback:
+            self.logger_callback(msg)
+
+    @property
+    def agent(self):
+        return self.population[self.leader_idx]['agent']
+
+    @property
+    def reward_config(self):
+        # Compatibility property returning Leader's config
+        w = self.population[self.leader_idx]['weights']
+        return {
+             "tau": 0.0, "beta": 0.0, "weights": {
+                 "win": w[RW_WIN], "loss": w[RW_LOSS], 
+                 "checkpoint": w[RW_CHECKPOINT], "checkpoint_scale": w[RW_CHECKPOINT_SCALE],
+                 "velocity": w[RW_VELOCITY], "collision_runner": w[RW_COLLISION_RUNNER],
+                 "collision_blocker": w[RW_COLLISION_BLOCKER], "step_penalty": w[RW_STEP_PENALTY],
+                 "orientation": w[RW_ORIENTATION], "wrong_way_alpha": w[RW_WRONG_WAY]
+             }
+        }
+
+    async def send_telemetry(self, step, fps_phys, fps_train, reward, win_rate, env_idx=0):
+        # Identify Agent
+        agent_idx = env_idx // ENVS_PER_AGENT
+        pop_member = self.population[agent_idx]
+        
+        # Extract state
+        try:
+            pods = []
+            for i in range(4):
+                pos = self.env.physics.pos[env_idx, i]
+                angle = self.env.physics.angle[env_idx, i]
+                pods.append({
+                    "id": i, "team": i // 2, "x": float(pos[0]), "y": float(pos[1]),
+                    "angle": float(angle), "boost": 1, "shield": 0 
+                })
+            
+            checkpoints = []
+            n_cps = self.env.num_checkpoints[env_idx]
+            for i in range(n_cps):
+                cp = self.env.checkpoints[env_idx, i]
+                checkpoints.append({"x": float(cp[0]), "y": float(cp[1]), "id": i, "radius": 600})
+
+            payload = {
+                "type": "telemetry",
+                "step": step,
+                "match_id": self.match_id,
+                "stats": {
+                    "fps_physics": float(fps_phys),
+                    "fps_training": float(fps_train),
+                    "reward_mean": float(reward),
+                    "win_rate": float(win_rate),
+                    "active_model": f"Generaton {self.generation} | Agent {agent_idx}",
+                    "curriculum_stage": int(self.env.curriculum_stage),
+                    "generation": self.generation,
+                    "agent_id": agent_idx
+                },
+                "race_state": {"pods": pods, "checkpoints": checkpoints}
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                await session.post('http://localhost:8000/api/telemetry', json=payload)
+        except Exception:
+            pass
+
+    def check_curriculum(self):
+        if self.curriculum_mode == "manual": return
+        metrics = self.env.stage_metrics
+        stage = self.env.curriculum_stage
+        
+        if stage == STAGE_SOLO:
+            # Strategy A: Proficiency & Consistency
+            # Thresholds: Eff < 30.0, Consistency > 2000.0 (Sum of CPs)
+            
+            # Top 5 Agents by Consistency (Sum of CPs)
+            # Consistency is stored as 'ema_consistency'
+            sorted_by_consistency = sorted(self.population, key=lambda x: x.get('ema_consistency') or 0.0, reverse=True)
+            elites = sorted_by_consistency[:5]
+            
+            avg_eff = np.mean([p.get('efficiency_score') if p.get('efficiency_score') is not None else 999.0 for p in elites])
+            avg_cons = np.mean([p.get('ema_consistency') if p.get('ema_consistency') is not None else 0.0 for p in elites])
+            
+            # Log progress periodically
+            if self.iteration % 10 == 0:
+                 self.log(f"Stage 0 Status: Top 5 Avg Eff {avg_eff:.1f} (Goal < {STAGE_SOLO_EFFICIENCY_THRESHOLD}), Cons {avg_cons:.1f} (Goal > {STAGE_SOLO_CONSISTENCY_THRESHOLD})")
+            
+            if avg_eff < STAGE_SOLO_EFFICIENCY_THRESHOLD and avg_cons > STAGE_SOLO_CONSISTENCY_THRESHOLD:
+                self.log(f">>> GRADUATION: Top Agents Avg Eff {avg_eff:.1f}, Cons {avg_cons:.1f} <<<")
+                self.env.curriculum_stage = STAGE_DUEL
+                self.env.bot_difficulty = 0.0
+
+        elif stage == STAGE_DUEL:
+            # Dynamic Difficulty
+            rec_games = metrics["recent_games"]
+            if rec_games > 1000: # Check every 1k games
+                rec_wins = metrics["recent_wins"]
+                rec_wr = rec_wins / rec_games
+                
+                # Reset Recent
+                metrics["recent_games"] = 0
+                metrics["recent_wins"] = 0
+                
+                self.log(f"Stage 1 Check: Recent WR {rec_wr:.2f} (Diff: {self.env.bot_difficulty:.2f})")
+                
+                if rec_wr < 0.40:
+                    # Regression: Model is struggling, make it easier
+                    self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
+                    self.log(f"-> Regression: Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                elif rec_wr > 0.90:
+                    # Turbo Progression: Crushing it
+                    self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.10)
+                    self.log(f"-> Turbo: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                elif rec_wr > 0.70:
+                    # Standard Progression
+                    self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.05)
+                    self.log(f"-> Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                
+                # Graduation Check
+                if self.env.bot_difficulty >= 1.0 and rec_wr > 0.85:
+                     self.log(f">>> UPGRADING TO STAGE 3: LEAGUE (WR: {rec_wr:.2f}) <<<")
+                     self.env.curriculum_stage = STAGE_LEAGUE
+
+    def get_active_pods(self):
+        stage = self.env.curriculum_stage
+        if stage == STAGE_SOLO: return [0]
+        elif stage == STAGE_DUEL: return [0]
+        else: return [0, 1]
+
+    def evolve_population(self):
+        self.log(f"--- Evolution Step (Gen {self.generation}) ---")
+        
+        # 1. Update Metrics & EMA Calculation
+        # Proficiency = AvgSteps + Penalty/(Sqrt(Hits)+1). Lower is Better.
+        PENALTY_CONST = 50.0 
+        
+        # Collect raw values for debug logging
+        debug_raw_fitness = []
+        
+        for p in self.population:
+            # Efficiency (Avg Steps per Checkpoint)
+            if p['total_cp_hits'] > 0:
+                raw_avg = p['total_cp_steps'] / p['total_cp_hits']
+            else:
+                raw_avg = 999.0 # Penalty
+            
+            # Proficiency Score (Raw)
+            prof_score = raw_avg + (PENALTY_CONST / (np.sqrt(p['total_cp_hits'] + 1)))
+            p['efficiency_score'] = prof_score # Store raw for logs
+            
+            # Extract other raw metrics
+            wins = p['wins']
+            laps = p['laps_score']
+            checkpoints = p['checkpoints_score']
+            
+            # Calculate Behavior Vector [Speed, Steer]
+            buf = p['behavior_buffer']
+            count = buf[2].item()
+            if count > 0:
+                avg_speed = buf[0].item() / count
+                avg_steer = buf[1].item() / count
+            else:
+                avg_speed = 0.0
+                avg_steer = 0.0
+            
+            # Update Behavior Vector
+            # We treat this as EMA too for smoothness
+            p_beh = torch.tensor([avg_speed, avg_steer], dtype=torch.float32)
+            p['behavior'] = p_beh # Store current gen behavior
+            
+            # --- Update EMAs ---
+            # Helper to update
+            def update_ema(current_val, old_ema, alpha):
+                if old_ema is None: return current_val
+                return alpha * current_val + (1.0 - alpha) * old_ema
+                
+            p['ema_efficiency'] = update_ema(prof_score, p['ema_efficiency'], self.ema_alpha)
+            p['ema_wins'] = update_ema(float(wins), p['ema_wins'], self.ema_alpha)
+            p['ema_consistency'] = update_ema(float(checkpoints), p['ema_consistency'], self.ema_alpha)
+            p['ema_laps'] = update_ema(float(laps), p['ema_laps'], self.ema_alpha)
+            
+            # EMA Behavior is tricky (Vector)
+            # Just overwrite for now or EMA vector? EMA vector is better.
+            # p['behavior'] contains current.
+            # We need p['ema_behavior']
+            if p.get('ema_behavior') is None:
+                p['ema_behavior'] = p_beh
+            else:
+                p['ema_behavior'] = self.ema_alpha * p_beh + (1.0 - self.ema_alpha) * p['ema_behavior']
+            
+            # Store in 'behavior' for novelty calc (using EMA behavior)
+            p['behavior'] = p['ema_behavior']
+            
+
+        # 2. Calculate Diversity (Novelty)
+        # Uses p['behavior'] which is now the EMA behavior
+        novelty_scores = calculate_novelty(self.population, k=5)
+        for i, p in enumerate(self.population):
+            p['novelty_score'] = novelty_scores[i]
+            p['ema_dist'] = novelty_scores[i] # Just log it
+            
+        # 3. Define Objectives for NSGA-II
+        # We need to format objective matrix [N, M]
+        # We assume HIGHER IS BETTER for all columns passed to sort.
+        # So we invert Efficiency (Lower is better).
+        
+        stage = self.env.curriculum_stage
+        
+        objectives_list = []
+        
+        if stage == STAGE_SOLO:
+            # Objectives: 
+            # 1. Consistency (EMA Checkpoints) -> Max
+            # 2. Efficiency (EMA Proficiency) -> Minimize (So Maximize -EMA)
+            # 3. Novelty -> Max
+            
+            for p in self.population:
+                obj = [
+                    p['ema_consistency'],
+                    -p['ema_efficiency'], 
+                    p['novelty_score'] * 100.0 # Scale up slightly to be comparable magnitude? Normalized sort handles it.
+                ]
+                objectives_list.append(obj)
+                
+        elif stage == STAGE_DUEL:
+            # Objectives:
+            # 1. Wins (EMA Wins) -> Max
+            # 2. Efficiency -> Minimize
+            # 3. Novelty -> Max
+            
+            for p in self.population:
+                obj = [
+                    p['ema_wins'],
+                    -p['ema_efficiency'],
+                    p['novelty_score'] * 100.0
+                ]
+                objectives_list.append(obj)
+        else: # LEAGUE
+             # Wins, Laps, Efficiency
+             for p in self.population:
+                obj = [
+                    p['ema_wins'],
+                    p['ema_laps'],
+                    -p['ema_efficiency']
+                ]
+                objectives_list.append(obj)
+
+        objectives_np = np.array(objectives_list)
+        
+        # 4. NSGA-II Sort
+        fronts = fast_non_dominated_sort(objectives_np)
+        
+        # Calculate Crowding Distance
+        crowding = calculate_crowding_distance(objectives_np, fronts)
+        
+        # Assign Fronts and Rank to Agents for Logging
+        for rank, front in enumerate(fronts):
+            for pid in front:
+                self.population[pid]['rank'] = rank
+                self.population[pid]['crowding'] = crowding[pid]
+                
+        # 5. Select Elites (Front 0)
+        # Sort Front 0 by Crowding Distance Descending
+        front0_indices = fronts[0]
+        front0_indices.sort(key=lambda x: crowding[x], reverse=True)
+        
+        elites = [self.population[i] for i in front0_indices[:2]]
+        # Fallback if front 0 is small (unlikely)
+        if len(elites) < 2:
+            # Pick from Front 1
+             remaining = [self.population[i] for i in range(POP_SIZE) if i not in front0_indices]
+             # Sort remaining by Rank ASC, Crowding DESC
+             remaining.sort(key=lambda x: (x['rank'], -x['crowding']))
+             elites.extend(remaining[: 2 - len(elites)])
+        
+        # Logging
+        elite_ids = [p['id'] for p in elites]
+        self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
+        self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
+        self.log(f"Top Stats: Eff {elites[0]['ema_efficiency']:.1f}, Wins {elites[0]['ema_wins']:.1f}, Nov {elites[0]['novelty_score']:.2f}")
+
+        # 6. Tournament Selection & Replacement
+        # Identify Culls (Bottom 25% by Rank/Crowding)
+        # Full sort of population
+        # Key: (Rank ASC, Crowding DESC)
+        
+        # We want to keep Lower Rank (0 is best), Higher Crowding.
+        sorted_pop_indices = list(range(POP_SIZE))
+        sorted_pop_indices.sort(key=lambda i: (self.population[i]['rank'], -self.population[i]['crowding']))
+        
+        num_culls = max(2, int(POP_SIZE * 0.25))
+        cull_indices = sorted_pop_indices[-num_culls:]
+        parent_candidates = sorted_pop_indices[:-num_culls]
+        
+        # Replacement Logic
+        for idx in cull_indices:
+            loser = self.population[idx]
+            
+            # Tournament Selection from candidates
+            # Pick 3, choose Best (lowest rank, highest crowding)
+            competitors = random.sample(parent_candidates, 3)
+            competitors.sort(key=lambda i: (self.population[i]['rank'], -self.population[i]['crowding']))
+            parent_idx = competitors[0]
+            parent = self.population[parent_idx]
+            
+            # Clone Logic
+            loser['agent'].load_state_dict(parent['agent'].state_dict())
+            loser['lr'] = parent['lr']
+            loser['ent_coef'] = parent.get('ent_coef', ENT_COEF)
+            
+            # Clone EMAs! (Robustness Inheritance)
+            loser['ema_efficiency'] = parent['ema_efficiency']
+            loser['ema_wins'] = parent['ema_wins']
+            loser['ema_consistency'] = parent['ema_consistency']
+            loser['ema_laps'] = parent['ema_laps']
+            loser['ema_behavior'] = parent['ema_behavior'].clone() if parent.get('ema_behavior') is not None else None
+            
+            # Mutate Rewards (Still useful for PPO inner loop)
+            new_weights = parent['weights'].copy()
+            keys = list(new_weights.keys())
+            num_mutations = random.choice([1, 2])
+            for _ in range(num_mutations):
+                k = random.choice(keys)
+                factor = random.uniform(0.7, 1.3)
+                new_weights[k] *= factor
+            loser['weights'] = new_weights
+            
+            # Mutate Hyperparams
+            if random.random() < 0.3:
+                loser['lr'] *= random.uniform(0.8, 1.2)
+                for param_group in loser['optimizer'].param_groups:
+                    param_group['lr'] = loser['lr']
+            
+            if random.random() < 0.3:
+                loser['ent_coef'] *= random.uniform(0.8, 1.2)
+                loser['ent_coef'] = max(0.0001, min(0.1, loser['ent_coef']))
+                
+            self.log(f"Agent {loser['id']} (Rank {loser['rank']}) replaced by clone of {parent['id']} (Rank {parent['rank']})")
+             # Update Global Tensor
+            start_idx = loser['id'] * ENVS_PER_AGENT
+            end_idx = start_idx + ENVS_PER_AGENT
+            for k, v in new_weights.items():
+                self.reward_weights_tensor[start_idx:end_idx, k] = v
+                 
+        # 5. Save & Reset
+        self.save_generation()
+        
+        for p in self.population:
+            # Reset Current Gen Counters
+            p['laps_score'] = 0
+            p['checkpoints_score'] = 0
+            p['reward_score'] = 0.0
+            p['wins'] = 0
+            p['max_streak'] = 0
+            p['total_cp_steps'] = 0
+            p['total_cp_hits'] = 0
+            # Reset Behavior Buffer
+            p['behavior_buffer'].zero_()
+            
+        self.generation += 1
+        # Leader is Elite 0
+        self.leader_idx = elites[0]['id']
+
+    def save_generation(self):
+        gen_dir = f"data/generations/gen_{self.generation}"
+        os.makedirs(gen_dir, exist_ok=True)
+        self.log(f"Saving generation {self.generation} to {gen_dir}...")
+        
+        # Identify Top 2 for League (Consistent with evolve logic)
+        sorted_pop = sorted(self.population, key=lambda x: (x['laps_score'], x['checkpoints_score'], x['reward_score']), reverse=True)
+        top_2 = sorted_pop[:2]
+        
+        for p in self.population:
+            agent_id = p['id']
+            save_path = os.path.join(gen_dir, f"agent_{agent_id}.pt")
+            torch.save(p['agent'].state_dict(), save_path)
+            
+            # Register Top Agents to League
+            if p in top_2:
+                league_name = f"gen_{self.generation}_agent_{agent_id}"
+                metrics = {
+                    "laps_score": p['laps_score'],
+                    "checkpoints_score": p['checkpoints_score'],
+                    "reward_score": p['reward_score']
+                }
+                self.league.register_agent(league_name, save_path, 0, metrics=metrics)
+                
+        # Save Normalization Stats (Global)
+        rms_path = os.path.join(gen_dir, "rms_stats.pt")
+        torch.save({
+            'self': self.rms_self.state_dict(),
+            'ent': self.rms_ent.state_dict(),
+            'cp': self.rms_cp.state_dict()
+        }, rms_path)
+    def log_iteration_summary(self, global_step, sps, current_tau, avg_loss):
+        leader = self.population[self.leader_idx]
+        
+        # Calculate Pop Stats
+        effs = [p.get('ema_efficiency', 999.0) for p in self.population if p.get('ema_efficiency') is not None]
+        cons = [p.get('ema_consistency', 0.0) for p in self.population if p.get('ema_consistency') is not None]
+        wins = [p.get('ema_wins', 0.0) for p in self.population if p.get('ema_wins') is not None]
+        novs = [p.get('novelty_score', 0.0) for p in self.population]
+        
+        avg_eff = np.mean(effs) if effs else 999.0
+        avg_con = np.mean(cons) if cons else 0.0
+        avg_win = np.mean(wins) if wins else 0.0
+        avg_nov = np.mean(novs) if novs else 0.0
+        
+        # Leader Stats
+        l_eff = leader.get('ema_efficiency')
+        if l_eff is None: l_eff = 999.0
+        
+        l_con = leader.get('ema_consistency')
+        if l_con is None: l_con = 0.0
+        
+        l_win = leader.get('ema_wins')
+        if l_win is None: l_win = 0.0
+        
+        l_nov = leader.get('novelty_score')
+        if l_nov is None: l_nov = 0.0
+        
+        # Format Table
+        border = "=" * 80
+        self.log(border)
+        self.log(f" ITERATION {self.iteration} | Gen {self.generation} | Step {global_step} | SPS {sps}")
+        self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f}")
+        self.log("-" * 80)
+        self.log(f" {'Metric':<15} | {'Leader':<10} | {'Pop Avg':<10} | {'Best':<10}")
+        self.log("-" * 80)
+        self.log(f" {'Efficiency':<15} | {l_eff:<10.1f} | {avg_eff:<10.1f} | {min(effs) if effs else 0:<10.1f}")
+        self.log(f" {'Consistency':<15} | {l_con:<10.1f} | {avg_con:<10.1f} | {max(cons) if cons else 0:<10.1f}")
+        self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1f} | {avg_win:<10.1f} | {max(wins) if wins else 0:<10.1f}")
+        self.log(f" {'Novelty':<15} | {l_nov:<10.2f} | {avg_nov:<10.2f} | {max(novs) if novs else 0:<10.2f}")
+        self.log("-" * 80)
+        self.log(f" Loss: {avg_loss:.4f}")
+        self.log(border)
+        
+    def train_loop(self, stop_event=None, telemetry_callback=None):
+        self.log(f"Starting Evolutionary PPO (Pop: {POP_SIZE}, Envs/Agent: {ENVS_PER_AGENT})...")
+        self.running = True
+        
+        # Save Initial Generation (Gen 0)
+        self.save_generation()
+        
+        global_step = 0
+        
+        obs_data = self.env.get_obs()
+        start_time = time.time()
+        sps = 0 # Initialize to avoid unbound error on first steps
+        
+        # Helper stacker REMOVED - using direct tensor slicing
+
+        while global_step < TOTAL_TIMESTEPS:
+            if stop_event and stop_event.is_set(): break
+
+            self.iteration += 1
+            if self.iteration % 1 == 0:
+                self.log(f"Starting iteration {self.iteration}")
+            self.check_curriculum()
+            
+            active_pods = self.get_active_pods()
+            num_active_per_agent = len(active_pods) * ENVS_PER_AGENT
+            
+            # --- Collection Phase (Parallel) ---
+            # Batches for each agent
+            agent_batches = []
+            for _ in range(POP_SIZE):
+                 agent_batches.append({
+                     'self_obs': torch.zeros((NUM_STEPS, num_active_per_agent, 14), device=self.device),
+                     'entity_obs': torch.zeros((NUM_STEPS, num_active_per_agent, 3, 13), device=self.device),
+                     'cp_obs': torch.zeros((NUM_STEPS, num_active_per_agent, 6), device=self.device),
+                     'actions': torch.zeros((NUM_STEPS, num_active_per_agent, 4), device=self.device),
+                     'logprobs': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device),
+                     'rewards': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device),
+                     'dones': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device),
+                     'values': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device)
+                 })
+                 
+            # Unpack Obs
+            # obs_data is tuple (self, ent, cp) tensors [4, NUM_ENVS, ...]
+            all_self, all_ent, all_cp = obs_data
+            
+            for step in range(NUM_STEPS):
+                # --- Global Normalization ---
+                # Normalize ALL active observations at once for efficiency
+                # Source: [4, NUM_ENVS, ...]
+                
+                # Active Pods Slicing
+                # active_pods is list [0] or [0, 1] etc.
+                # all_self[active_pods] returns [N_Active, NUM_ENVS, 14]
+                # It copies and stacks them. Since all_self[i] is [NUM_ENVS, 14] contiguous, this is fast.
+                
+                raw_self = all_self[active_pods].view(-1, 14) # [N_Active * NUM_ENVS, 14]
+                raw_ent = all_ent[active_pods].view(-1, 3, 13)
+                raw_cp = all_cp[active_pods].view(-1, 6)
+                
+                # Normalize & Update Stats
+                norm_self = self.rms_self(raw_self)
+                
+                # Flatten ent for norm
+                total_rows_ent, N_others, D_ent = raw_ent.shape
+                norm_ent = self.rms_ent(raw_ent.view(-1, D_ent)).view(total_rows_ent, N_others, D_ent)
+                
+                norm_cp = self.rms_cp(raw_cp)
+                
+                # 1. Inference per Agent
+                full_actions = []
+                
+                # The normalized tensors are flat [N_Active * NUM_ENVS, ...]
+                # Order: Pod 0 Envs... Pod 1 Envs...
+                # BUT wait.
+                # all_self[active_pods] behavior:
+                # If active_pods = [0, 1, 2, 3]
+                # Result is [4, 4096, 14]
+                # .view(-1, 14) -> Pod 0 (all envs), Pod 1 (all envs)...
+                
+                # Batch Slicing Needs to match this.
+                # Agent i owns envs start:end
+                # We need [Pod 0 start:end, Pod 1 start:end...]
+                # This is tricky if flattened this way.
+                
+                # Actually, simpler:
+                # Keep normalized as [N_Active, NUM_ENVS, D]
+                
+                norm_self = norm_self.view(len(active_pods), NUM_ENVS, 14)
+                norm_ent = norm_ent.view(len(active_pods), NUM_ENVS, 3, 13)
+                norm_cp = norm_cp.view(len(active_pods), NUM_ENVS, 6)
+                
+                # Now Agent i needs envs i*128 : (i+1)*128
+                # across ALL active pods.
+                # So we slice dim 1.
+                
+                for i in range(POP_SIZE):
+                    start_env = i * ENVS_PER_AGENT
+                    end_env = start_env + ENVS_PER_AGENT
+                    
+                    # Slice Normalized Tensors [N_Active, Batch, D]
+                    # We want [N_Active * Batch, D] for input to network
+                    # But careful with ordering. DeepSets treats input as Batch independent.
+                    # Flattening [N_A, B, D] -> [N_A*B, D] stacks pods: Pod0(Batch), Pod1(Batch).
+                    # This is fine.
+                    
+                    t0_self = norm_self[:, start_env:end_env, :].reshape(-1, 14)
+                    t0_ent = norm_ent[:, start_env:end_env, :, :].reshape(-1, 3, 13)
+                    t0_cp = norm_cp[:, start_env:end_env, :].reshape(-1, 6)
+                    
+                    with torch.no_grad():
+                        agent = self.population[i]['agent']
+                        action0, logprob0, _, value0 = agent.get_action_and_value(t0_self, t0_ent, t0_cp)
+                        
+                    # Store
+                    # Agent batch storage expectation:
+                    # 'self_obs': [NUM_STEPS, n_active_per_agent, 14]
+                    # n_active_per_agent = N_Active * ENVS_PER_AGENT
+                    # t0_self matches this size.
+                    
+                    
+                    batch = agent_batches[i]
+                    batch['self_obs'][step] = t0_self.detach()
+                    batch['entity_obs'][step] = t0_ent.detach()
+                    batch['cp_obs'][step] = t0_cp.detach()
+                    batch['actions'][step] = action0.detach()
+                    batch['logprobs'][step] = logprob0.detach()
+                    batch['values'][step] = value0.flatten().detach()
+                    
+                    full_actions.append(action0)
+
+                # 2. Step Environment (Global)
+                # We need to construct [4096, 4, 4] action tensor
+                # full_actions is list of [N_Active * 512, 4]
+                # We need to map back to env structure
+                
+                # Simple logic:
+                # If Solo: Active=[0]. full_actions[i] is [512, 4].
+                # Combine to [4096, 4] for Pod 0.
+                combined_act0 = torch.cat(full_actions, dim=0) # [4096 * n_pods, 4]
+                
+                # Reshape/Split to separate pods
+                chunks = torch.chunk(combined_act0, len(active_pods), dim=0)
+                act_map = { pid: c for pid, c in zip(active_pods, chunks) }
+                
+                env_actions = torch.zeros((NUM_ENVS, 4, 4), device=self.device)
+                
+                for pid in active_pods:
+                    env_actions[:, pid] = act_map[pid]
+                    
+                # Opponents? For PBT, let's just use simple bot or mirror?
+                # Simpler: In Duel, Opponent is Bot (handled in env) or Self-Play.
+                # If League enabled, we need to handle opponents.
+                # For now, let's assume Env handles Bot in Duel, or we don't act for them (zeros).
+                
+                # Calculate Tau (Dense Reward Annealing)
+                # 0.0 (Full Dense) -> 1.0 (Full Sparse/Shaped)
+                # Stage 0: 0.0
+                # Stage 1: 0.5
+                # Stage 2: 0.9
+                current_tau = 0.0
+                if self.env.curriculum_stage == STAGE_DUEL:
+                    current_tau = 0.5
+                elif self.env.curriculum_stage == STAGE_LEAGUE:
+                    current_tau = 0.9
+                
+                # STEP
+                # Pass Global Reward Tensor
+                # info is dictionary now
+                # rewards is [NUM_ENVS, 2] (Team 0, Team 1)
+                # dones is [NUM_ENVS]
+                rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau)
+                
+                # Extract Team 0 Reward for Training
+                # We assume we are training Team 0.
+                rewards = rewards_all[:, 0]
+                
+                # --- Reward Normalization ---
+                # Based on SB3 implementation: Normalize rewards by dividing by std(returns).
+                # We track returns: ret = r + gamma * ret * (1-dones)
+                # Then update RMS(ret).
+                # Then r_norm = r / sqrt(var + epsilon)
+                
+                # 1. Update Returns Buffer
+                # rewards, dones are [NUM_ENVS].
+                self.returns_buffer = rewards + GAMMA * self.returns_buffer * (~dones).float()
+                
+                # 2. Update RMS
+                self.rms_ret.update(self.returns_buffer)
+                
+                # 3. Normalize
+                # Scale between 0.01 and 10 to avoid explosions or vanishing
+                # We use the std (sqrt(var))
+                # clamp min var to 1e-4
+                rew_var = torch.clamp(self.rms_ret.var, min=1e-4)
+                rew_std = torch.sqrt(rew_var)
+                
+                # Clip max scaling to avoid massive rewards early on
+                # But typically we just divide.
+                # Normalize:
+                norm_rewards = torch.clamp(rewards / rew_std, -10.0, 10.0)
+                
+                # --- Intrinsic Curiosity Update ---
+                # Calculate RND Reward on Normalized Observations
+                # We need normalized obs for CURRENT step.
+                # norm_self is [N_Active, NUM_ENVS, 14]. We need active slice?
+                # Actually, norm_self contains ALL active agents' obs.
+                # But we only want to optimize RND for active agents?
+                # RND update usually done on Mini-Batches during Optimization Phase to match Policy?
+                # Or Online?
+                # Standard RND: Update Predictor on collection batch or minibatch.
+                # Usually Minibatch for stability.
+                # But computing intrinsic reward must happen HERE for collection.
+                
+                # We need normalized 'self' obs for the active pods corresponding to 'rewards' (team 0).
+                # active_pods could be [0] (Solo) or [0, 1] (League)
+                # norm_self structure: [N_Active_Pods, NUM_ENVS, 14]
+                # If Solo (active=[0]), norm_self is [1, 4096, 14].
+                # If League (active=[0,1]), norm_self is [2, 4096, 14].
+                
+                # We combine all active experiences for RND reward calculation
+                rnd_input = norm_self.reshape(-1, 14).detach() # [N_Active * NUM_ENVS, 14]
+                
+                # Compute Intrinsic Reward
+                intrinsic_rewards = self.rnd.compute_intrinsic_reward(rnd_input) # [N_Active * NUM_ENVS]
+                
+                # Normalize Intrinsic Reward? RND paper suggests normalizing by running std of intrinsic.
+                # For simplicity, we just scale by coefficient.
+                # But typically intrinsic rewards decay.
+                # For now: Raw RND * Coef.
+                
+                # We need to map intrinsic rewards back to Agents [POP_SIZE]
+                # intrinsic_rewards matches the flattening of norm_self.
+                # norm_self was ordered: Pod0(EnableEnvs), Pod1(EnableEnvs)...
+                # agent_batches logic:
+                # for i in range(POP_SIZE): start..end.
+                # But wait, norm_self was [N_Active, NUM_ENVS, 14].
+                # If we flattened to [N*E, 14], it's Pod 0 (All Envs), Pod 1 (All Envs).
+                
+                # We need to slice per agent.
+                # This is tricky if we have multiple pods per agent.
+                # Let's keep it simple: Add to extrinsic.
+                
+                # Re-shape intrinsic to [N_Active, NUM_ENVS]
+                r_int = intrinsic_rewards.view(len(active_pods), NUM_ENVS)
+                
+                # We want to add this to 'norm_rewards' which is [NUM_ENVS] (Team Reward).
+                # If multiple pods, we Average or Sum intrinsic? 
+                # Team Intrinsic = Sum(Pod Intrinsic).
+                team_intrinsic = r_int.sum(dim=0) # [NUM_ENVS]
+                
+                # Add to Extrinsic (Weighted)
+                # Note: norm_rewards is ALREADY normalized extrinsic.
+                # Adding unnormalized intrinsic might be unbalanced.
+                # But typically RND is auxiliary.
+                # Let's add it.
+                
+                # Optimize: only apply during Stage 0 (Solo)? 
+                # User asked to "speed up Solver phase of Stage 0".
+                # RND is expensive. Let's apply only if Stage == 0?
+                # User: "Missing Intrinsic Curiosity... could speed up... Stage 0".
+                # Let's enabled it always or just Stage 0?
+                # Safe to enable always but maybe decay coef.
+                
+                if self.env.curriculum_stage == STAGE_SOLO:
+                     norm_rewards += team_intrinsic * self.rnd_coef
+
+                
+                # Split rewards back to agents
+                for i in range(POP_SIZE):
+                    start_env = i * ENVS_PER_AGENT
+                    end_env = start_env + ENVS_PER_AGENT
+                    
+                    r_slice = norm_rewards[start_env:end_env]  # Normalized
+                    raw_r_slice = rewards[start_env:end_env]   # For logging score
+                    d_slice = dones[start_env:end_env]
+                    
+                    # Store in batch
+                    # Filter for active team/pods
+                    # If multiple active pods, we replicate the TEAM reward/done signal.
+                    # Because env.step returns TEAM reward.
+                    
+                    if len(active_pods) > 1:
+                        flat_r = torch.cat([r_slice] * len(active_pods), dim=0)
+                        flat_d = torch.cat([d_slice] * len(active_pods), dim=0)
+                    else:
+                        flat_r = r_slice
+                        flat_d = d_slice
+                        
+                    agent_batches[i]['rewards'][step] = flat_r.detach()
+                    agent_batches[i]['dones'][step] = flat_d.float().detach()
+                    
+                    # Track Score for Evolution (Use RAW rewards)
+                    self.population[i]['reward_score'] += raw_r_slice.mean().item()
+                    
+                    # Track Cumulative Metrics (Laps & Checkpoints)
+                    # infos['laps_completed'] is [4096, 4]
+                    # We only care about active pods for this agent
+                    # Since evolution is based on "Agent Performance", we sum ALL events by pods controlled by this agent.
+                    
+                    # Checkpoints
+                    # active_pods are [0], [0,2] or [0,1,2,3]
+                    # Filter infos first
+                    agent_infos_laps = infos['laps_completed'][start_env:end_env] # [128, 4]
+                    agent_infos_cps = infos['checkpoints_passed'][start_env:end_env] # [128, 4]
+                    
+                    # Mask by active pods
+                    active_laps = 0
+                    active_cps = 0
+                    for pid in active_pods:
+                         active_laps += agent_infos_laps[:, pid].sum().item()
+                         active_cps += agent_infos_cps[:, pid].sum().item()
+                         
+                    self.population[i]['laps_score'] += active_laps
+                    self.population[i]['checkpoints_score'] += active_cps
+                    
+                    # Track New Metrics
+                    start_streak = infos['current_streak'][start_env:end_env] # [128, 4]
+                    start_steps = infos['cp_steps'][start_env:end_env] # [128, 4]
+                    
+                    # Max Streak
+                    current_max = start_streak.max().item()
+                    if current_max > self.population[i]['max_streak']:
+                        self.population[i]['max_streak'] = current_max
+                        
+                    # Efficiency
+                    mask = (start_steps > 0) & (start_streak > 0)
+                    if mask.any():
+                        self.population[i]['total_cp_steps'] += start_steps[mask].sum().item()
+                        self.population[i]['total_cp_hits'] += mask.sum().item()
+                    
+                    # Wins (Track from env.winners on Reset)
+                    # winners is [4096] containing winner team index (0 or 1) or -1.
+                    # We need to attribute this to the agent.
+                    # This happens only when Done is True.
+                    # The env.winners is updated in env.step? 
+                    # Actually env.winners is usually set when 'dones' is set. 
+                    # Taking a look at logic, we might need to rely on the fact that 
+                    # if done[e] is true, we check winners[e].
+                    
+                    # Filter for done envs in this agent's batch
+                    agent_dones = d_slice.bool()
+                    if agent_dones.any():
+                        # Global indices
+                        # start + relative indices of dones
+                        done_indices_rel = torch.nonzero(agent_dones).flatten()
+                        done_indices_global = start_env + done_indices_rel
+                        
+                        current_winners = self.env.winners[done_indices_global] # [N_Done]
+                        
+                        # My pods:
+                        # If Solo: Pod 0 is Team 0.
+                        # If Duel: Pod 0 is Team 0.
+                        # If I am Team 0 (which I am, as Agent control Pod 0/1)
+                        # We just check if winner == 0.
+                        
+                        # Note: self.env.winners returns TEAM index (0 or 1).
+                        # In Solo/Duel, 'Agent' controls Team 0.
+                        # So a win is if winner == 0.
+                        
+                        win_count = (current_winners == 0).sum().item()
+                        self.population[i]['wins'] += win_count
+                    
+                # Telemetry (Capture BEFORE Reset to see Finish Line state)
+                if telemetry_callback:
+                    current_time = time.time()
+                    # Throttle to 20 Hz (0.05s) to avoid killing performance
+                    if (current_time - self.last_telemetry_time) > 0.05:
+                        self.last_telemetry_time = current_time
+                        
+                        for t_idx, t_env in enumerate(self.telemetry_env_indices):
+                             # Get Data for CURRENT t_env
+                             # If Done, this is the Finish Line state.
+                             telemetry_callback(global_step + step, sps, 0, 0, 0, t_env, 0, None, dones[t_env].item(), 
+                                                rewards_all[t_env].cpu().numpy(), env_actions[t_env].cpu().numpy())
+                             
+                             # Update stream target if current one finished (for NEXT step)
+                             if dones[t_env]:
+                                 done_indices = torch.nonzero(dones).flatten()
+                                 if len(done_indices) > 0:
+                                     candidates = done_indices.tolist()
+                                     new_idx = random.choice(candidates)
+                                     self.telemetry_env_indices[t_idx] = new_idx
+                
+                # --- Behavior Characterization Tracking ---
+                # Track Avg Speed and Steering Variance per Agent
+                # self.env.physics.vel [N, 4, 2]
+                # self.env.physics.angle [N, 4]
+                
+                # We need to map back to agents.
+                # Speed scalar
+                vel_active = self.env.physics.vel[:, active_pods] # [N, Active, 2]
+                speed_active = torch.norm(vel_active, dim=2) # [N, Active]
+                
+                # Steering Action (proxy for behavior style)
+                # We can track actual angle change or input action. Input action is cleaner.
+                # env_actions [N, 4, 4]. 
+                # Angle action is index 1.
+                steer_active = torch.abs(env_actions[:, active_pods, 1]) # [N, Active]
+                
+                # Flatten to Env -> Agg per agent
+                # Sum over Active pods
+                sum_speed = speed_active.sum(dim=1) # [N]
+                sum_steer = steer_active.sum(dim=1) # [N]
+                
+                for i in range(POP_SIZE):
+                    start_env = i * ENVS_PER_AGENT
+                    end_env = start_env + ENVS_PER_AGENT
+                    
+                    # Sum for this agent across its envs
+                    agent_speed = sum_speed[start_env:end_env].sum()
+                    agent_steer = sum_steer[start_env:end_env].sum()
+                    count = ENVS_PER_AGENT * len(active_pods)
+                    
+                    self.population[i]['behavior_buffer'][0] += agent_speed
+                    self.population[i]['behavior_buffer'][1] += agent_steer
+                    self.population[i]['behavior_buffer'][2] += count
+
+                # Manual Reset
+                if dones.any():
+                    reset_ids = torch.nonzero(dones).squeeze(-1)
+                    self.env.reset(reset_ids)
+
+                # Next Obs (New Start State)
+                obs_data = self.env.get_obs()
+                all_self, all_ent, all_cp = obs_data
+
+            # 3. Update Phase (Per Agent)
+            # Bootstrapping & Training
+            total_loss = 0
+            
+            # Global Normalize Next Obs (Fixed=True)
+            # Source: [4, NUM_ENVS, ...]
+            
+            next_raw_self = all_self[active_pods].view(-1, 14)
+            next_raw_ent = all_ent[active_pods].view(-1, 3, 13)
+            next_raw_cp = all_cp[active_pods].view(-1, 6)
+            
+            next_norm_self = self.rms_self(next_raw_self, fixed=True)
+            B_e, N_e, D_e = next_raw_ent.shape
+            next_norm_ent = self.rms_ent(next_raw_ent.view(-1, D_e), fixed=True).view(B_e, N_e, D_e)
+            next_norm_cp = self.rms_cp(next_raw_cp, fixed=True)
+            
+            # View as [N_Act, NUM_ENVS, ...]
+            next_norm_self = next_norm_self.view(len(active_pods), NUM_ENVS, 14)
+            next_norm_ent = next_norm_ent.view(len(active_pods), NUM_ENVS, 3, 13)
+            next_norm_cp = next_norm_cp.view(len(active_pods), NUM_ENVS, 6)
+            
+            for i in range(POP_SIZE):
+                batch = agent_batches[i]
+                agent = self.population[i]['agent']
+                optimizer = self.population[i]['optimizer']
+                
+                # Slice Next Val
+                start_env = i * ENVS_PER_AGENT
+                end_env = start_env + ENVS_PER_AGENT
+                
+                t0_self = next_norm_self[:, start_env:end_env, :].reshape(-1, 14)
+                t0_ent = next_norm_ent[:, start_env:end_env, :, :].reshape(-1, 3, 13)
+                t0_cp = next_norm_cp[:, start_env:end_env, :].reshape(-1, 6)
+                
+                with torch.no_grad():
+                    next_val = agent.get_value(t0_self, t0_ent, t0_cp).flatten()
+                
+                # GAE
+                b_rewards = batch['rewards']
+                b_dones = batch['dones']
+                b_values = batch['values']
+                
+                adv = torch.zeros_like(b_rewards)
+                lastgaelam = 0
+                for t in reversed(range(NUM_STEPS)):
+                    if t == NUM_STEPS - 1:
+                        nextnonterminal = 1.0 - b_dones[t]
+                        nextvalues = next_val
+                    else:
+                        nextnonterminal = 1.0 - b_dones[t+1]
+                        nextvalues = b_values[t+1]
+                    delta = b_rewards[t] + GAMMA * nextvalues * nextnonterminal - b_values[t]
+                    adv[t] = lastgaelam = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                
+                returns = adv + b_values
+                
+                # Flatten
+                # stored batches were [NUM_STEPS, rows_per_agent, ...]
+                b_obs_s = batch['self_obs'].reshape(-1, 14)
+                b_obs_e = batch['entity_obs'].reshape(-1, 3, 13)
+                b_obs_c = batch['cp_obs'].reshape(-1, 6)
+                b_act   = batch['actions'].reshape(-1, 4)
+                b_logp  = batch['logprobs'].reshape(-1)
+                b_adv   = adv.reshape(-1)
+                b_ret   = returns.reshape(-1)
+                
+                # PPO Update
+                agent_samples = b_obs_s.size(0)
+                inds = np.arange(agent_samples)
+                
+                for _ in range(UPDATE_EPOCHS):
+                    np.random.shuffle(inds)
+                    for st in range(0, agent_samples, MINIBATCH_SIZE):
+                        ed = st + MINIBATCH_SIZE
+                        mb = inds[st:ed]
+                        
+                        
+                        # Already Normalised in Collection phase!
+                        # Verify: t0_self = norm_self... -> Batch stores normalized.
+                        # So we do NOT normalize again here.
+                        
+                        b_s_norm = b_obs_s[mb]
+                        b_e_norm = b_obs_e[mb]
+                        b_c_norm = b_obs_c[mb]
+                        
+
+                        
+                        # Get Values (for RND logging if needed, but mainly for PPO)
+                        
+                        _, newlog, ent, newval = agent.get_action_and_value(
+                            b_s_norm, b_e_norm, b_c_norm, b_act[mb]
+                        )
+                        newval = newval.flatten()
+                        ratio = (newlog - b_logp[mb]).exp()
+                        
+                        mb_adv = b_adv[mb]
+                        mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                        
+                        pg1 = -mb_adv * ratio
+                        pg2 = -mb_adv * torch.clamp(ratio, 1-CLIP_RANGE, 1+CLIP_RANGE)
+                        pg_loss = torch.max(pg1, pg2).mean()
+                        
+                        v_loss = 0.5 * ((newval - b_ret[mb])**2).mean()
+
+                        
+                        # Use Agent's Specific Entropy Coefficient
+                        current_ent_coef = self.population[i].get('ent_coef', ENT_COEF)
+                        loss = pg_loss - current_ent_coef * ent.mean() + VF_COEF * v_loss
+                        
+                        optimizer.zero_grad()
+                        loss.backward()
+                        nn.utils.clip_grad_norm_(agent.parameters(), MAX_GRAD_NORM)
+                        optimizer.step()
+                        
+                        # Update RND (Intrinsic Curiosity)
+                        # We use the normalized observations of this batch to update the predictor
+                        # CRITICAL: Detach b_s_norm to prevent backward() from trying to access PPO graph nodes already freed.
+                        rnd_loss = self.rnd.update(b_s_norm.detach())
+                        
+                total_loss += loss.item()
+
+            # Stats & Evolution
+            global_step += NUM_ENVS * NUM_STEPS
+            elapsed = time.time() - start_time
+            sps = int((NUM_ENVS * NUM_STEPS) / (elapsed + 1e-6))
+            
+            # Record Laps
+            for i in range(POP_SIZE):
+                # Count laps for this agent's chunk
+                # laps tensor is [4096, 4]
+                start = i * ENVS_PER_AGENT
+                end = start + ENVS_PER_AGENT
+                # Sum laps of Pod 0 in this chunk
+                laps = self.env.laps[start:end, 0].sum().item()
+                # BUT this is cumulative laps.
+                # We want *new* laps or total progress?
+                # PBT usually checks performance over the interval.
+                # Let's track 'current laps' vs 'prev laps'?
+                # Or just raw laps count if we reset often.
+                # Actually, env laps are cumulative since reset.
+                pass
+                
+                # Simpler: Use the stage metrics which are cumulative, but that's global.
+                # We need per-agent metrics.
+                # Let's read directly from env.
+                # self.population[i]['laps_score'] = laps # Cumulative -> REMOVED (Now tracking incrementally)
+                pass
+
+            # Evolution Check
+            if self.iteration % EVOLVE_INTERVAL == 0:
+                self.evolve_population()
+            
+            # Logging
+            self.log_iteration_summary(global_step, sps, current_tau, total_loss/POP_SIZE)
+            
+            # Construct simple line for telemetry log/frontend if needed (backward compat)
+            leader = self.population[self.leader_idx]
+            l_eff = leader.get('ema_efficiency')
+            if l_eff is None: l_eff = 0.0
+            log_line = f"Step: {global_step} | SPS: {sps} | Gen: {self.generation} | Leader Eff: {l_eff:.1f}"
+            # self.log(log_line) # Suppressed to avoid double printing
+            
+            if telemetry_callback:
+                telemetry_callback(global_step, sps, 0, 0, 0, self.telemetry_env_indices[0], total_loss/POP_SIZE, log_line, False)
+
+            start_time = time.time()
+            
+            # Save Checkpoint (Leader)
+            if self.iteration % 50 == 0:
+                # Save leader
+                leader_agent = self.population[self.leader_idx]['agent']
+                torch.save(leader_agent.state_dict(), f"data/checkpoints/model_gen{self.generation}_best.pt")
+
+if __name__ == "__main__":
+    trainer = PPOTrainer()
+    trainer.train_loop()
