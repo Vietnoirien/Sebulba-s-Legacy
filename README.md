@@ -43,14 +43,14 @@ The training process is automated through distinct stages of difficulty:
 ```mermaid
 graph TD
     subgraph GPU [GPU Acceleration]
-        Sim[Vectorized Simulation (4096 Envs)]
+        Sim["Vectorized Simulation (4096 Envs)"]
         Physics[Custom Physics Engine]
-        Models[Agent Population (DeepSets)]
+        Models["Agent Population (DeepSets)"]
     end
     
     subgraph CPU [CPU Orchestration]
         PPO[PPO Trainer]
-        GA[Evolutionary Controller (NSGA-II)]
+        GA["Evolutionary Controller (NSGA-II)"]
         API[FastAPI Backend]
     end
     
@@ -70,22 +70,30 @@ graph TD
 
 ### Prerequisites
 *   **OS**: Linux (Recommended) or Windows (WSL2)
-*   **Python**: 3.8+
-*   **Node.js**: 16+
+*   **Python**: 3.12+
+*   **Node.js**: 20+
 *   **GPU**: NVIDIA GPU with CUDA support (Required for simulation)
 
 ### Setup
 
 1.  **Clone the Repository**
     ```bash
-    git clone https://github.com/yourusername/sebulbas-legacy.git
+    git clone https://github.com/Vietnoirien/Sebulba-s-Legacy.git
     cd sebulbas-legacy
     ```
 
 2.  **Install Python Dependencies**
+
+    > [!IMPORTANT]
+    > To compute with Torch on an NVIDIA GPU, it must be installed from [pytorch.org](https://pytorch.org/get-started/locally/) first.
+
     ```bash
     python -m venv .venv
-    source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+    source .venv/bin/activate  # or .venv\Scripts\activate.ps1 on Windows
+
+    # Example: Install PyTorch with CUDA support (Visit website for your specific command)
+    # pip3 install torch --index-url https://download.pytorch.org/whl/cu118
+
     pip install -r requirements.txt
     pip install aiohttp # For telemetry
     ```
@@ -109,10 +117,41 @@ python launcher.py
 *   **Dashboard**: Open `http://localhost:5173`
 *   **API**: `http://localhost:8000`
 
-### Controls
-*   **Init Sequence**: Starts the training loop.
-*   **Halt**: Pauses training securely.
-*   **Export Submission**: Generates a standalone `submission.py` file ready for Codingame.
+### Dashboard Interface (Web UI)
+
+**1. Operations Panel**
+*   **Start With...**: Choose to start training from scratch, resume a previous generation, or load a specific checkpoint.
+*   **Progression Mode**:
+    *   **AUTO**: Automatically advances stages based on graduation thresholds (Efficiency & Consistency).
+    *   **MANUAL**: Force a specific stage (Solo, Duel, League).
+*   **Stage Selector**: Manually override the current curriculum stage (when in Manual mode).
+
+**2. Control Buttons**
+*   **INIT SEQUENCE**: Starts or resumes the training loop with the selected configuration.
+*   **HALT**: Safely pauses the training loop (waits for current step to finish).
+*   **RESET**: Resets the environment state without clearing the model.
+*   **SNAPSHOT**: Manually saves a checkpoint of the current leader.
+*   **EXPORT SUBMISSION**: Generates a `submission.py` from the current active model, ready for upload to Codingame.
+*   **WIPE ALL CHECKPOINTS**: ⚠️ Destructive action. Deletes all saved models and generations to start fresh.
+
+**3. Hyperparameters (Real-time)**
+*   **Learning Rate**: Adjust the PPO learning rate on the fly.
+*   **Entropy Coef**: Tune exploration vs. exploitation dynamically.
+
+### Headless / CLI Usage
+You can run the components individually without the Launcher/UI:
+
+**1. Training Loop (`ppo.py`)**
+Run the training logic directly. Useful for debugging or server environments.
+```bash
+python -m training.ppo
+```
+
+**2. Export Submission (`export.py`)**
+Convert a trained model checkpoint into a standalone `submission.py` for Codingame.
+```bash
+python export.py --model data/generations/gen_X/agent_Y.pt --out submission.py
+```
 
 ## ⚙️ Configuration
 
@@ -131,4 +170,4 @@ Key configurations can be found in `config.py` and `simulation/env.py`.
 *   **Inspiration**: DeepMind's AlphaStar (League Training) and OpenAI's PPO (Proximal Policy Optimization).
 
 ---
-*Built with ❤️ by [Your Name]*
+*Built with ❤️ by Vietnoirien*
