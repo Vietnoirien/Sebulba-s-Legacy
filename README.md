@@ -73,6 +73,8 @@ graph TD
 *   **Python**: 3.12+
 *   **Node.js**: 20+
 *   **GPU**: NVIDIA GPU with CUDA support (Required for simulation)
+    > [!WARNING]
+    > **Strict GPU Requirement**: This project relies on a custom GPU-based physics engine (`gpu_physics.py`) for massive parallelism. There is **NO CPU fallback**. Attempting to run this on a CPU-only machine will fail.
 
 ### Setup
 
