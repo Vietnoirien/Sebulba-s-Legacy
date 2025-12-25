@@ -18,19 +18,28 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
 *   **PPO + GAE**: Utilizes Proximal Policy Optimization with Generalized Advantage Estimation for stable and sample-efficient learning.
 *   **DeepSets Architecture**: Agents use a **Permutation-Invariant** neural network to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
 *   **Intrinsic Curiosity (RND)**: Incorporates **Random Network Distillation** to encourage exploration in sparse reward scenarios, preventing premature convergence.
+*   **Prioritized Fictitious Self-Play (PFSP)**: Instead of random opponents, the system prioritizes "High Regret" opponents (win rate ~50%) from the League registry to maximize the learning signal.
 
 ### 🧬 Evolutionary Strategy (GA + RL)
 *   **Population-Based Training (PBT)**: Evolves a population of 32 distinct agents. Agents don't just learn a policy; they evolve their hyperparameters (Learning Rate, Entropy Coefficient) and reward weights over time.
-*   **NSGA-II Selection**: Uses **Non-Dominated Sorting Genetic Algorithm II** to select elite agents based on multiple conflicting objectives:
-    *   **Efficiency**: Minimizing steps per checkpoint.
-    *   **Consistency**: Maximizing checkpoint streak.
-    *   **Novelty**: Maximizing behavioral diversity to prevent population collapse.
+*   **NSGA-II Selection**: Uses **Non-Dominated Sorting Genetic Algorithm II** to select elite agents based on multiple conflicting objectives that change per stage:
+    *   **Stage 0 (Solo)**: Minimize Steps (Efficiency) + Maximize Checkpoint Streak (Consistency).
+    *   **Stage 1 (Duel)**: Maximize Win Streak + Minimize Steps.
+    *   **Stage 2 (League)**: Maximize Win Rate + Maximize Laps Completed + Minimize Steps.
+    *   **All Stages**: Maximize **Behavioral Novelty** to maintain diversity.
 *   **Dynamic Reward Shaping**: The system "discovers" the optimal reward function by mutating the weights of various signals (Velocity, Orientation, Winning) during evolution.
 
 ### 📈 Curriculum Learning
 The training process is automated through distinct stages of difficulty:
 1.  **Stage 0: Solo Time Trial**: Agents maximize speed and control to navigate checkpoints (Goal: >50k Laps).
-2.  **Stage 1: Duel (1v1)**: Agents face a scripted bot with dynamic difficulty scaling to learn collision avoidance and overtaking.
+2.  **Stage 1: Duel (1v1)**: Agents face a scripted bot with **Dynamic Difficulty Scaling**.
+    *   **Progression Mechanism**:
+        *   **Standard**: Difficulty increases (+0.05) if Win Rate > **70%**.
+        *   **Turbo**: Difficulty increases (+0.10) if Win Rate > **90%**.
+        *   **Super Turbo**: Difficulty jumps (+0.20) if Win Rate > **98%**.
+    *   **Regression Mechanism**:
+        *   **Immediate**: Difficulty drops (-0.05) if Win Rate falls below **30%**.
+        *   **Persistent**: Difficulty drops if Win Rate stays below **40%** for 2 consecutive checks (2000 games).
 3.  **Stage 2: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
 
 ### 📊 Real-Time Visualization
@@ -162,8 +171,8 @@ Key configurations can be found in `config.py` and `simulation/env.py`.
 *   **Map Size**: 16000 x 9000
 *   **Physics**: Large Pod Radius (400), High Friction (0.85).
 *   **Reward Function**: 
-    *   Velocity uses **Potential-Based Reward Shaping** (Difference of potentials) to guarantee policy invariance.
-    *   Orientation uses a cosine alignment metric.
+    *   Velocity uses **Potential-Based Reward Shaping** ($$\Phi(s') - \Phi(s)$$) where $\Phi(s)$ is the negative distance to the next checkpoint. This mathematical guarantee ensures the optimal policy remains invariant effectively solving the "sparse reward" problem without introducing bias.
+    *   Orientation uses a cosine alignment metric with specific penalties for driving the wrong way.
     
 ## 🏆 Credits
 
