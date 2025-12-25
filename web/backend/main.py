@@ -46,6 +46,7 @@ class TelemetryData(BaseModel):
     win_rate: float
     active_model: str
     curriculum_stage: int
+    league: Optional[Dict[str, Any]] = None
 
 class RaceState(BaseModel):
     pods: List[Dict[str, Any]]

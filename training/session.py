@@ -289,7 +289,7 @@ class TrainingSession:
             except Exception as e:
                 print(f"Consumer Error: {e}")
 
-    def _telemetry_callback(self, step, sps, fps_train, reward, win_rate, env_idx, loss, log_line=None, is_done=False, step_rewards=None, step_actions=None):
+    def _telemetry_callback(self, step, sps, fps_train, reward, win_rate, env_idx, loss, log_line=None, is_done=False, step_rewards=None, step_actions=None, league_stats=None):
         try:
             if log_line:
                 stats_data = {
@@ -300,7 +300,8 @@ class TrainingSession:
                     "win_rate": float(win_rate),
                     "active_model": "training",
                     "generation": getattr(self.trainer, 'generation', 0),
-                    "curriculum_stage": int(self.trainer.env.curriculum_stage) if self.trainer else 0
+                    "curriculum_stage": int(self.trainer.env.curriculum_stage) if self.trainer else 0,
+                    "league": league_stats
                 }
                 try:
                     self.telemetry_in_queue.put_nowait({

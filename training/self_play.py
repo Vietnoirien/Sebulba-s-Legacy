@@ -16,6 +16,7 @@ class LeagueManager:
         
         self.registry = []
         self._load_registry()
+        self.payoff = {} # Track Win Rates (Session based for now)
         
     def _load_registry(self):
         if self.league_path.exists():
@@ -160,4 +161,67 @@ class LeagueManager:
                 print(f"Deleted file: {path}")
             except OSError as e:
                 print(f"Error deleting {path}: {e}")
+
+    # --- SOTA: PFSP & Payoff Matrix ---
+    
+
+    
+    def update_match_result(self, agent_id, opponent_id, result):
+        """
+        Record match result.
+        result: 1.0 (Win), 0.5 (Draw), 0.0 (Loss)
+        """
+        key = (agent_id, opponent_id)
+        
+        if key not in self.payoff:
+            self.payoff[key] = {"wins": 0.0, "games": 0}
+            
+        self.payoff[key]["wins"] += result
+        self.payoff[key]["games"] += 1
+        
+    def get_win_rate(self, agent_id, opponent_id):
+        key = (agent_id, opponent_id)
+        entry = self.payoff.get(key)
+        if not entry or entry["games"] == 0:
+            return 0.5 # Default to uncertainty
+        return entry["wins"] / entry["games"]
+
+    def sample_opponent(self, active_agent_id=None, mode="pfsp"):
+        """
+        Returns path to opponent.
+        Mode 'pfsp': Prioritize opponents with ~50% win rate (High Regret/Uncertainty).
+        """
+        if not self.registry:
+            return None
+            
+        # 20% Chance of using History Randomly (Standard FSP) or if mode is random
+        if mode == 'random' or random.random() < 0.2:
+            return random.choice(self.registry)['path']
+            
+        # PFSP Strategy
+        candidates = []
+        weights = []
+        
+        for entry in self.registry:
+            opp_id = entry['id']
+            if opp_id == active_agent_id: continue
+            
+            wr = self.get_win_rate(active_agent_id, opp_id) if active_agent_id else 0.5
+            
+            # Priority Score: 1.0 when WR=0.5, 0.0 when WR=0 or 1.
+            # Formula: 1 - |WR - 0.5| * 2
+            score = 1.0 - (abs(wr - 0.5) * 2.0)
+            
+            # Add base probability to ensure coverage
+            weight = score + 0.1
+            
+            candidates.append(entry)
+            weights.append(weight)
+            
+        if not candidates:
+            return random.choice(self.registry)['path']
+            
+        # Weighted Choice
+        chosen = random.choices(candidates, weights=weights, k=1)[0]
+        return chosen['path']
 
