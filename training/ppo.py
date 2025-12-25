@@ -150,6 +150,45 @@ class PPOTrainer:
         # 0.3 means 30% new, 70% old. 
         # ~3 generations memory.
         self.ema_alpha = 0.3
+
+        # Dynamic Hyperparameters
+        self.current_num_steps = 256 # Start with Stage 0 default
+        self.current_evolve_interval = 2 # Start with Stage 0 default
+        self.agent_batches = [] 
+        
+        # Allocate Initial Buffers
+        self.allocate_buffers()
+
+    def allocate_buffers(self):
+        """Allocates or Re-allocates batch buffers based on current_num_steps"""
+        self.log(f"Allocating buffers for {self.current_num_steps} steps per iteration...")
+        
+        # Decide Active Pods Max (Assume max 2 for buffer sizing to be safe, or separate?)
+        # Buffers are per AGENT.
+        # Envs per agent = 128.
+        # Max pods per env = 2 (League).
+        
+        stage = self.env.curriculum_stage
+        if stage == STAGE_SOLO or stage == STAGE_DUEL:
+            num_active_pods = 1
+        else: # LEAGUE
+            num_active_pods = 2
+            
+        # Total batch dimension = Steps * EnvsPerAgent * NumActivePods
+        num_active_per_agent_step = num_active_pods * ENVS_PER_AGENT
+        
+        self.agent_batches = []
+        for _ in range(POP_SIZE):
+             self.agent_batches.append({
+                 'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 14), device=self.device),
+                 'entity_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 3, 13), device=self.device),
+                 'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 6), device=self.device),
+                 'actions': torch.zeros((self.current_num_steps, num_active_per_agent_step, 4), device=self.device),
+                 'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                 'rewards': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                 'dones': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                 'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device)
+             })
     
     def log(self, msg):
         print(msg)
@@ -612,23 +651,33 @@ class PPOTrainer:
                 self.log(f"Starting iteration {self.iteration}")
             self.check_curriculum()
             
+            # --- Dynamic Config Check ---
+            current_stage = self.env.curriculum_stage
+            target_steps = 256
+            target_evolve = 2
+            
+            if current_stage == STAGE_SOLO:
+                target_steps = 256
+                target_evolve = 2
+            else: # STAGE_DUEL or STAGE_LEAGUE
+                target_steps = 512
+                target_evolve = 1
+                
+            if target_steps != self.current_num_steps:
+                 self.log(f"Stage Change Triggered Config Update: Steps {self.current_num_steps} -> {target_steps}")
+                 self.current_num_steps = target_steps
+                 self.allocate_buffers() # Re-allocate
+                 
+            if target_evolve != self.current_evolve_interval:
+                 self.log(f"Config Update: Evolve Interval {self.current_evolve_interval} -> {target_evolve}")
+                 self.current_evolve_interval = target_evolve
+
             active_pods = self.get_active_pods()
             num_active_per_agent = len(active_pods) * ENVS_PER_AGENT
             
             # --- Collection Phase (Parallel) ---
             # Batches for each agent
-            agent_batches = []
-            for _ in range(POP_SIZE):
-                 agent_batches.append({
-                     'self_obs': torch.zeros((NUM_STEPS, num_active_per_agent, 14), device=self.device),
-                     'entity_obs': torch.zeros((NUM_STEPS, num_active_per_agent, 3, 13), device=self.device),
-                     'cp_obs': torch.zeros((NUM_STEPS, num_active_per_agent, 6), device=self.device),
-                     'actions': torch.zeros((NUM_STEPS, num_active_per_agent, 4), device=self.device),
-                     'logprobs': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device),
-                     'rewards': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device),
-                     'dones': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device),
-                     'values': torch.zeros((NUM_STEPS, num_active_per_agent), device=self.device)
-                 })
+            # Using self.agent_batches (allocated dynamically)
                  
             # Unpack Obs
             # obs_data is tuple (self, ent, cp) tensors [4, NUM_ENVS, ...]
@@ -709,7 +758,7 @@ class PPOTrainer:
                     # t0_self matches this size.
                     
                     
-                    batch = agent_batches[i]
+                    batch = self.agent_batches[i]
                     batch['self_obs'][step] = t0_self.detach()
                     batch['entity_obs'][step] = t0_ent.detach()
                     batch['cp_obs'][step] = t0_cp.detach()
@@ -877,8 +926,8 @@ class PPOTrainer:
                         flat_r = r_slice
                         flat_d = d_slice
                         
-                    agent_batches[i]['rewards'][step] = flat_r.detach()
-                    agent_batches[i]['dones'][step] = flat_d.float().detach()
+                    self.agent_batches[i]['rewards'][step] = flat_r.detach()
+                    self.agent_batches[i]['dones'][step] = flat_d.float().detach()
                     
                     # Track Score for Evolution (Use RAW rewards)
                     self.population[i]['reward_score'] += raw_r_slice.mean().item()
@@ -1037,7 +1086,7 @@ class PPOTrainer:
             next_norm_cp = next_norm_cp.view(len(active_pods), NUM_ENVS, 6)
             
             for i in range(POP_SIZE):
-                batch = agent_batches[i]
+                batch = self.agent_batches[i]
                 agent = self.population[i]['agent']
                 optimizer = self.population[i]['optimizer']
                 
@@ -1059,8 +1108,8 @@ class PPOTrainer:
                 
                 adv = torch.zeros_like(b_rewards)
                 lastgaelam = 0
-                for t in reversed(range(NUM_STEPS)):
-                    if t == NUM_STEPS - 1:
+                for t in reversed(range(self.current_num_steps)):
+                    if t == self.current_num_steps - 1:
                         nextnonterminal = 1.0 - b_dones[t]
                         nextvalues = next_val
                     else:
@@ -1137,9 +1186,9 @@ class PPOTrainer:
                 total_loss += loss.item()
 
             # Stats & Evolution
-            global_step += NUM_ENVS * NUM_STEPS
+            global_step += NUM_ENVS * self.current_num_steps
             elapsed = time.time() - start_time
-            sps = int((NUM_ENVS * NUM_STEPS) / (elapsed + 1e-6))
+            sps = int((NUM_ENVS * self.current_num_steps) / (elapsed + 1e-6))
             
             # Record Laps
             for i in range(POP_SIZE):
@@ -1164,7 +1213,7 @@ class PPOTrainer:
                 pass
 
             # Evolution Check
-            if self.iteration % EVOLVE_INTERVAL == 0:
+            if self.iteration % self.current_evolve_interval == 0:
                 self.evolve_population()
             
             # Logging
