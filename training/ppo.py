@@ -156,6 +156,9 @@ class PPOTrainer:
         self.current_evolve_interval = 2 # Start with Stage 0 default
         self.agent_batches = [] 
         
+        # Difficulty Adjustment State
+        self.failure_streak = 0
+        
         # Allocate Initial Buffers
         self.allocate_buffers()
 
@@ -296,18 +299,34 @@ class PPOTrainer:
                 
                 self.log(f"Stage 1 Check: Recent WR {rec_wr:.2f} (Diff: {self.env.bot_difficulty:.2f})")
                 
-                if rec_wr < 0.40:
-                    # Regression: Model is struggling, make it easier
+                if rec_wr < 0.30:
+                    # Critical Failure: Immediate Regression
                     self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
-                    self.log(f"-> Regression: Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                elif rec_wr > 0.90:
-                    # Turbo Progression: Crushing it
-                    self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.10)
-                    self.log(f"-> Turbo: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                elif rec_wr > 0.70:
-                    # Standard Progression
-                    self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.05)
-                    self.log(f"-> Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                    self.failure_streak = 0 # Reset streak modification
+                    self.log(f"-> Critical Regression (WR < 30%): Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                    
+                elif rec_wr < 0.40:
+                    # Warning Zone: Regression only if persistent
+                    self.failure_streak += 1
+                    self.log(f"-> Warning Zone (WR < 40%): Streak {self.failure_streak}/2")
+                    
+                    if self.failure_streak >= 2:
+                        self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
+                        self.failure_streak = 0
+                        self.log(f"-> Persistent Failure: Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                
+                else:
+                    # Winning enough to stabilize or progress
+                    self.failure_streak = 0
+                    
+                    if rec_wr > 0.90:
+                        # Turbo Progression: Crushing it
+                        self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.10)
+                        self.log(f"-> Turbo: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                    elif rec_wr > 0.70:
+                        # Standard Progression
+                        self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.05)
+                        self.log(f"-> Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
                 
                 # Graduation Check
                 if self.env.bot_difficulty >= 1.0 and rec_wr > 0.85:
