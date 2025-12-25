@@ -684,8 +684,8 @@ class PPOTrainer:
             # --- PRE-ITERATION LEAGUE LOGIC ---
             # Sample Opponent for this iteration (Fictitious Self-Play)
             self.opponent_agent_loaded = False
-            # Only sample if we are in League Mode or Duel Mode
-            if self.env.curriculum_stage >= STAGE_DUEL:
+            # Only sample if we are in League Mode
+            if self.env.curriculum_stage >= STAGE_LEAGUE:
                 # SOTA: PFSP - Prioritize based on Leader's historical performance
                 leader_id_str = f"gen_{self.generation}_agent_{self.population[self.leader_idx]['id']}"
                 opp_path = self.league.sample_opponent(active_agent_id=leader_id_str, mode='pfsp')
