@@ -106,6 +106,7 @@ class PPOTrainer:
                 'reward_score': 0.0,
                 'efficiency_score': 999.0,
                 'wins': 0, # Track wins for League stage
+                'matches': 0, # Track completed matches
                 'max_streak': 0,
                 'total_cp_steps': 0,
                 'total_cp_hits': 0,
@@ -319,7 +320,11 @@ class PPOTrainer:
                     # Winning enough to stabilize or progress
                     self.failure_streak = 0
                     
-                    if rec_wr > 0.90:
+                    if rec_wr > 0.98:
+                        # Super Turbo Progression: Dominating
+                        self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.20)
+                        self.log(f"-> Super Turbo: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                    elif rec_wr > 0.90:
                         # Turbo Progression: Crushing it
                         self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.10)
                         self.log(f"-> Turbo: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
@@ -563,6 +568,7 @@ class PPOTrainer:
             p['checkpoints_score'] = 0
             p['reward_score'] = 0.0
             p['wins'] = 0
+            p['matches'] = 0
             p['max_streak'] = 0
             p['total_cp_steps'] = 0
             p['total_cp_hits'] = 0
@@ -588,14 +594,19 @@ class PPOTrainer:
             torch.save(p['agent'].state_dict(), save_path)
             
             # Register Top Agents to League
-            if p in top_2:
-                league_name = f"gen_{self.generation}_agent_{agent_id}"
-                metrics = {
-                    "laps_score": p['laps_score'],
-                    "checkpoints_score": p['checkpoints_score'],
-                    "reward_score": p['reward_score']
-                }
-                self.league.register_agent(league_name, save_path, 0, metrics=metrics)
+            # START SOTA UPDATE: Enforce strict entry criteria
+            # Only save to League if passing the "Racer" bar (Stage 1+ and Diff > 0.5)
+            if self.env.curriculum_stage >= STAGE_DUEL and self.env.bot_difficulty > 0.5:
+                if p in top_2:
+                    league_name = f"gen_{self.generation}_agent_{agent_id}"
+                    metrics = {
+                        "efficiency": p.get('ema_efficiency', 999.0),
+                        "consistency": p.get('ema_consistency', 0.0),
+                        "wins_ema": p.get('ema_wins', 0.0),
+                        "novelty": p.get('novelty_score', 0.0)
+                    }
+                    self.league.register_agent(league_name, save_path, 0, metrics=metrics)
+            # END SOTA UPDATE
                 
         # Save Normalization Stats (Global)
         rms_path = os.path.join(gen_dir, "rms_stats.pt")
@@ -669,6 +680,30 @@ class PPOTrainer:
             if self.iteration % 1 == 0:
                 self.log(f"Starting iteration {self.iteration}")
             self.check_curriculum()
+            
+            # --- PRE-ITERATION LEAGUE LOGIC ---
+            # Sample Opponent for this iteration (Fictitious Self-Play)
+            self.opponent_agent_loaded = False
+            # Only sample if we are in League Mode or Duel Mode
+            if self.env.curriculum_stage >= STAGE_DUEL:
+                opp_path = self.league.sample_opponent()
+                if opp_path and os.path.exists(opp_path):
+                    try:
+                        # Load Opponent
+                        self.opponent_agent.load_state_dict(torch.load(opp_path, map_location=self.device))
+                        self.opponent_agent.eval() # Set to Eval mode
+                        self.opponent_agent_loaded = True
+                        
+                        # Identify ID from path
+                        self.current_opponent_id = os.path.basename(opp_path).replace(".pt", "")
+                        self.log(f"⚔️  LEAGUE MATCH: Population vs {self.current_opponent_id} ⚔️")
+                    except Exception as e:
+                        self.log(f"Failed to load opponent {opp_path}: {e}")
+                        self.opponent_agent_loaded = False
+                else:
+                    # Fallback to Mirror Self-Play (or Bot if handled by Env)
+                    # self.log("Using Mirror Self-Play (No League Opponent found or sampled).")
+                    pass
             
             # --- Dynamic Config Check ---
             current_stage = self.env.curriculum_stage
@@ -797,19 +832,73 @@ class PPOTrainer:
                 # Combine to [4096, 4] for Pod 0.
                 combined_act0 = torch.cat(full_actions, dim=0) # [4096 * n_pods, 4]
                 
-                # Reshape/Split to separate pods
+                # Opponents? For PBT and League, we implement Fictitious Self-Play (FSP)
+                # If active_pods has > 1 pod (i.e. League/Duel), Pod 1 is the Opponent.
+
+                # Determine actions for Pod 1 (Opponent)
+                # Strategy:
+                # 1. If self.opponent_agent is loaded (from League), use it.
+                # 2. Else (e.g. Solo or early training), use PBT Agent (Mirror Self-Play) or zeroes if inactive.
+                
+                # Check if we are in League Mode/Duel and have an opponent loaded
+                # We need to handle this per-agent? 
+                # Currently self.opponent_agent is a single global agent loaded for the iteration.
+                # This means ALL agents play against the SAME League Opponent for this iteration.
+                # This is standard for PBT (uniform evaluation).
+                
+                opponent_actions = None
+                if len(active_pods) > 1 and hasattr(self, 'opponent_agent_loaded') and self.opponent_agent_loaded:
+                     # Opponent Inference (No Grad)
+                     # Opponent Obs should be the ones for Pod 1.
+                     # But our normalization 'norm_self' is [N_Active, NUM_ENVS, 14].
+                     # Pod 1 is at index 1 of dim 0.
+                     
+                     if len(active_pods) > 1:
+                         # Extraction for Opponent
+                         # We use the GLOBAL normalization stats for the opponent too? 
+                         # Yes, assume same environment dynamics.
+                         
+                         # Get Pod 1 Obs (All Envs)
+                         # Shape: [NUM_ENVS, 14] at Index 1
+                         opp_self = norm_self[1] 
+                         opp_ent = norm_ent[1]
+                         opp_cp = norm_cp[1]
+                         
+                         # Inference
+                         with torch.no_grad():
+                             # Opponent Agent Action
+                             # Note: Opponent agent is a single instance, not a population.
+                             # We run it on the FULL BATCH of envs (4096).
+                             # It plays against ALL population members simultaneously.
+                             o_act, _, _, _ = self.opponent_agent.get_action_and_value(opp_self, opp_ent, opp_cp)
+                             opponent_actions = o_act # [NUM_ENVS, 4]
+                
+                # Now construct 'env_actions' [NUM_ENVS, 4, 4]
+                # We need to combine PBT Agent actions (Pod 0) and Opponent actions (Pod 1).
+                
+                # 'act_map' currently holds chunks from 'combined_act0' which was PBT Agent logic.
+                # PBT Agent logic produced actions for ALL active pods (Mirror Self Play).
+                # We want to OVERRIDE Pod 1 actions if we have a League Opponent.
+                
+                # Current chunks logic:
+                # combined_act0 was [4096 * len(active), 4].
+                # It was result of stacking actions from PBT agents for Pod 0 AND Pod 1.
+                # chunks split it back to [Pod0_Actions, Pod1_Actions].
+                
                 chunks = torch.chunk(combined_act0, len(active_pods), dim=0)
                 act_map = { pid: c for pid, c in zip(active_pods, chunks) }
                 
+                # Override Pod 1 if League Opponent is Active
+                if opponent_actions is not None:
+                    # Pod 1 is index 1
+                    if 1 in active_pods:
+                        act_map[1] = opponent_actions
+
                 env_actions = torch.zeros((NUM_ENVS, 4, 4), device=self.device)
                 
                 for pid in active_pods:
                     env_actions[:, pid] = act_map[pid]
-                    
-                # Opponents? For PBT, let's just use simple bot or mirror?
-                # Simpler: In Duel, Opponent is Bot (handled in env) or Self-Play.
-                # If League enabled, we need to handle opponents.
-                # For now, let's assume Env handles Bot in Duel, or we don't act for them (zeros).
+
                 
                 # Calculate Tau (Dense Reward Annealing)
                 # 0.0 (Full Dense) -> 1.0 (Full Sparse/Shaped)
@@ -1018,6 +1107,10 @@ class PPOTrainer:
                         
                         win_count = (current_winners == 0).sum().item()
                         self.population[i]['wins'] += win_count
+                        
+                        # Count matches (any done is a match end)
+                        match_count = agent_dones.sum().item()
+                        self.population[i]['matches'] += match_count
                     
                 # Telemetry (Capture BEFORE Reset to see Finish Line state)
                 if telemetry_callback:
@@ -1231,6 +1324,64 @@ class PPOTrainer:
                 # self.population[i]['laps_score'] = laps # Cumulative -> REMOVED (Now tracking incrementally)
                 pass
 
+
+            # ELO Updates (Post-Iteration)
+            if self.env.curriculum_stage >= STAGE_LEAGUE and hasattr(self, 'opponent_agent_loaded') and self.opponent_agent_loaded:
+                 # Calculate Population Win Rate vs Opponent
+                 # We tracked 'wins' in population.
+                 # 'wins' were attributed if winner == 0 (Pod 0).
+                 # We need total matches.
+                 # Since we ran NUM_STEPS * NUM_ENVS, we can estimate matches or track them?
+                 # Actually 'wins' is integer count of wins.
+                 # Total matches per agent = ENVS_PER_AGENT (approx, assuming 1 match per env per iter? No.)
+                 # A match ends on DONE.
+                 # We need to know how many DONES happened for valid win rate calculation.
+                 # Let's aggregate average score?
+                 # SB3 typically uses Outcome: 1 for Win, 0 for Loss.
+                 # We just aggregate all wins across population and treat as "Population vs Opponent" match?
+                 
+                 # Simpler: For each elite/leader, update their ELO vs Opponent.
+                 # Updating for whole population might be noisy.
+                 # Let's update for the LEADER.
+                 
+                 leader = self.population[self.leader_idx]
+                 # We need specific match stats for Leader vs Opponent.
+                 # We have leader['wins']. Does it normalize by matches? No.
+                 # We need leader['matches_played'] or similar.
+                 # We didn't track matches_played explicitly per agent in the loop above.
+                 # BUT, we can infer it or just skip ELO update for now until we track it strictly?
+                 
+                 # Let's add 'matches' tracking in the loop quickly?
+                 # Yes, let's do it below.
+                 pass
+
+            # ELO Updates (Post-Iteration)
+            if self.env.curriculum_stage >= STAGE_DUEL and hasattr(self, 'opponent_agent_loaded') and self.opponent_agent_loaded:
+                 # Update Leader ELO
+                 leader = self.population[self.leader_idx]
+                 matches = leader['matches']
+                 if matches > 0:
+                     wins = leader['wins']
+                     win_rate = wins / matches
+                     
+                     # Update League
+                     # Leader ID is generic "gen_X_agent_Y" usually.
+                     # We need to ensure Leader is registered? 
+                     # Actually, we register checkpoints.
+                     # We can just update ELO for the active 'Agent' identity?
+                     # Standard League: Agents in training have a rating.
+                     # Here we might not persist training agent ELO well.
+                     # Let's just log result for now.
+                     
+                     self.log(f"🏆 League Match Result: Leader vs {self.current_opponent_id} | WR: {win_rate*100:.1f}% ({wins}/{matches})")
+                     
+                     # To properly update ELO, we need a persistent ID for the training agent.
+                     # For now, we only update if the opponent is in registry?
+                     # And we treat Training Agent as a temporary challenger.
+                     
+                     # FUTURE: Enable ELO persistence.
+                     pass
+            
             # Evolution Check
             if self.iteration % self.current_evolve_interval == 0:
                 self.evolve_population()
