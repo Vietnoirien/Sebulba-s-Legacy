@@ -13,7 +13,7 @@ MAX_TURN_DEGREES = 18.0
 
 # Training / Environment Constants
 MAX_LAPS = 3
-TIMEOUT_STEPS = 200
+TIMEOUT_STEPS = 100
 MAX_CHECKPOINTS = 6
 MIN_CHECKPOINTS = 3
 # Curriculum Stages

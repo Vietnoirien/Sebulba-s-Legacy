@@ -120,8 +120,8 @@ class PPOTrainer:
                 'ema_dist': None, # Novelty Distance
                 
                 # --- Behavior Characterization ---
-                # Buffer to accumulate [Speed, Steering] per step: [SumSpeed, SumSteering, Count]
-                'behavior_buffer': torch.zeros(3, device=self.device)
+                # Buffer to accumulate [Speed, Steering, MateDist] per step: [SumSpeed, SumSteer, SumDist, Count]
+                'behavior_buffer': torch.zeros(4, device=self.device)
             })
             
             # Fill Tensor
@@ -605,19 +605,21 @@ class PPOTrainer:
             laps = p['laps_score']
             checkpoints = p['checkpoints_score']
             
-            # Calculate Behavior Vector [Speed, Steer]
+            # Calculate Behavior Vector [Speed, Steer, MateDist]
             buf = p['behavior_buffer']
-            count = buf[2].item()
+            count = buf[3].item()
             if count > 0:
                 avg_speed = buf[0].item() / count
                 avg_steer = buf[1].item() / count
+                avg_dist = buf[2].item() / count
             else:
                 avg_speed = 0.0
                 avg_steer = 0.0
+                avg_dist = 0.0
             
             # Update Behavior Vector
             # We treat this as EMA too for smoothness
-            p_beh = torch.tensor([avg_speed, avg_steer], dtype=torch.float32)
+            p_beh = torch.tensor([avg_speed, avg_steer, avg_dist], dtype=torch.float32)
             p['behavior'] = p_beh # Store current gen behavior
             
             # --- Update EMAs ---
@@ -1428,6 +1430,21 @@ class PPOTrainer:
                 sum_speed = speed_active.sum(dim=1) # [N]
                 sum_steer = steer_active.sum(dim=1) # [N]
                 
+                # Teammate Distance (Only if > 1 active pod)
+                # Assumes Pod 0 and 1 are teammates
+                if len(active_pods) >= 2:
+                    p0 = self.env.physics.pos[:, active_pods[0], :]
+                    p1 = self.env.physics.pos[:, active_pods[1], :]
+                    dist_vec = torch.norm(p0 - p1, dim=1) # [N]
+                    # This distance applies to "The Agent".
+                    # We can sum it to the count later.
+                    # Since we count "Env Steps * Active Pods", adding dist once per env step is tricky scaling.
+                    # Let's add dist to the buffer.
+                    # Normalization: Avg Dist per Env Step.
+                    sum_dist = dist_vec
+                else:
+                    sum_dist = torch.zeros_like(sum_speed)
+                
                 for i in range(POP_SIZE):
                     start_env = i * ENVS_PER_AGENT
                     end_env = start_env + ENVS_PER_AGENT
@@ -1435,11 +1452,23 @@ class PPOTrainer:
                     # Sum for this agent across its envs
                     agent_speed = sum_speed[start_env:end_env].sum()
                     agent_steer = sum_steer[start_env:end_env].sum()
+                    agent_dist = sum_dist[start_env:end_env].sum()
+                    # Count relates to "Pod Steps" or "Env Steps"?
+                    # Previous logic: count = ENVS * len(active_pods).
+                    # This implies we average per Pod Step.
+                    # But Dist is per "Team Step" (defined by Env Step).
+                    # If we divide agent_dist by (Envs * 2), we get Avg Dist / 2.
+                    # We should probably normalize properly.
+                    # Let's accumulate, and later divide by "Env Steps" for Dist?
+                    # Or just divide by same count and accept factor of 1/N.
+                    # As long as it's consistent across agents, it's fine for Novelty.
+                    
                     count = ENVS_PER_AGENT * len(active_pods)
                     
                     self.population[i]['behavior_buffer'][0] += agent_speed
                     self.population[i]['behavior_buffer'][1] += agent_steer
-                    self.population[i]['behavior_buffer'][2] += count
+                    self.population[i]['behavior_buffer'][2] += agent_dist
+                    self.population[i]['behavior_buffer'][3] += count
 
                 # Manual Reset
                 if dones.any():
@@ -1518,7 +1547,8 @@ class PPOTrainer:
                 # Flatten
                 # stored batches were [NUM_STEPS, rows_per_agent, ...]
                 b_obs_s = batch['self_obs'].reshape(-1, 14)
-                b_obs_e = batch['entity_obs'].reshape(-1, 3, 13)
+                b_obs_tm = batch['teammate_obs'].reshape(-1, 13)
+                b_obs_en = batch['enemy_obs'].reshape(-1, 2, 13)
                 b_obs_c = batch['cp_obs'].reshape(-1, 6)
                 b_act   = batch['actions'].reshape(-1, 4)
                 b_logp  = batch['logprobs'].reshape(-1)
@@ -1541,15 +1571,15 @@ class PPOTrainer:
                         # So we do NOT normalize again here.
                         
                         b_s_norm = b_obs_s[mb]
-                        b_e_norm = b_obs_e[mb]
+                        b_tm_norm = b_obs_tm[mb]
+                        b_en_norm = b_obs_en[mb]
                         b_c_norm = b_obs_c[mb]
                         
-
                         
                         # Get Values (for RND logging if needed, but mainly for PPO)
                         
                         _, newlog, ent, newval = agent.get_action_and_value(
-                            b_s_norm, b_e_norm, b_c_norm, b_act[mb]
+                            b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb]
                         )
                         newval = newval.flatten()
                         ratio = (newlog - b_logp[mb]).exp()
