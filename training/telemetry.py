@@ -156,14 +156,18 @@ class TelemetryWorker(mp.Process):
         for i in range(4):
             team = i // 2
             p_thrust = float(actions[i, 0]) * 100.0 if actions is not None else 0.0
+            p_shield = float(actions[i, 2]) if actions is not None else 0.0
+            p_boost = float(actions[i, 3]) if actions is not None else 0.0
             p_reward = float(rewards[team]) if rewards is not None else 0.0
             
-            # 7 floats (28 bytes) + 2 shorts (4 bytes) = 32 bytes
-            p_data = struct.pack('<7f2H', 
+            # 9 floats (36 bytes) + 2 shorts (4 bytes) = 40 bytes
+            p_data = struct.pack('<9f2H', 
                 float(pos[i, 0]), float(pos[i, 1]),
                 float(vel[i, 0]), float(vel[i, 1]),
                 float(angle[i]),
                 p_thrust,
+                p_shield,
+                p_boost,
                 p_reward,
                 int(laps[i]),
                 int(next_cps[i])
