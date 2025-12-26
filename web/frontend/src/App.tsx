@@ -3,7 +3,6 @@ import { DashboardLayout } from './components/layout/DashboardLayout'
 import { ControlPanel } from './components/panels/ControlPanel'
 import { ConfigPanel } from './components/panels/ConfigPanel'
 import { RaceCanvas } from './components/race/RaceCanvas'
-import { StatsPanel } from './components/panels/StatsPanel'
 import { LeaguePanel } from './components/panels/LeaguePanel'
 
 function App() {
@@ -31,10 +30,10 @@ function App() {
         </section>
 
         {/* Right Sidebar: Data & Config */}
-        <aside className="w-96 bg-panel-bg border-l border-gray-700 p-4 flex flex-col gap-6 overflow-y-auto scrollbar-default">
-          <ConfigPanel />
-          <div className="h-px bg-gray-700/50 shrink-0" />
-          <StatsPanel />
+        <aside className="w-96 bg-panel-bg border-l border-gray-700 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 relative">
+            <ConfigPanel />
+          </div>
         </aside>
       </DashboardLayout>
     </GameStateProvider>

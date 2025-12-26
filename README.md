@@ -18,15 +18,19 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
 *   **PPO + GAE**: Utilizes Proximal Policy Optimization with Generalized Advantage Estimation for stable and sample-efficient learning.
 *   **DeepSets Architecture**: Agents use a **Permutation-Invariant** neural network to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
 *   **Intrinsic Curiosity (RND)**: Incorporates **Random Network Distillation** to encourage exploration in sparse reward scenarios, preventing premature convergence.
-*   **Prioritized Fictitious Self-Play (PFSP)**: Instead of random opponents, the system prioritizes "High Regret" opponents (win rate ~50%) from the League registry to maximize the learning signal.
+*   **Prioritized Fictitious Self-Play (PFSP)**: The system maintains a "League" of historical checkpoints. Using a **Payoff Matrix**, it prioritizes opponents with whom the current agent has a ~50% win rate (High Regret), maximizing the learning signal.
+*   **Implicit Exploiters**: 
+    *   **Implicit League Exploiter**: Standard PFSP agents that prey on the weaknesses of the entire history.
+    *   **Implicit Main Exploiter**: A 10% chance to sample opponents from the **latest generation**, forcing the population to remain robust against the current meta.
 
 ### 🧬 Evolutionary Strategy (GA + RL)
 *   **Population-Based Training (PBT)**: Evolves a population of 32 distinct agents. Agents don't just learn a policy; they evolve their hyperparameters (Learning Rate, Entropy Coefficient) and reward weights over time.
 *   **NSGA-II Selection**: Uses **Non-Dominated Sorting Genetic Algorithm II** to select elite agents based on multiple conflicting objectives that change per stage:
     *   **Stage 0 (Solo)**: Minimize Steps (Efficiency) + Maximize Checkpoint Streak (Consistency).
     *   **Stage 1 (Duel)**: Maximize Win Streak + Minimize Steps.
-    *   **Stage 2 (League)**: Maximize Win Rate + Maximize Laps Completed + Minimize Steps.
-    *   **All Stages**: Maximize **Behavioral Novelty** to maintain diversity.
+    *   **Stage 2 (Team)**: Maximize Win Rate + Minimize Steps (2v2 Cooperative).
+    *   **Stage 3 (League)**: Maximize Win Rate + Maximize Laps Completed + Minimize Steps.
+    *   **All Stages**: Maximize **Behavioral Novelty** (using EMA of speed/steering vectors) to maintain diversity.
 *   **Dynamic Reward Shaping**: The system "discovers" the optimal reward function by mutating the weights of various signals (Velocity, Orientation, Winning) during evolution.
 
 ### 📈 Curriculum Learning
@@ -40,7 +44,8 @@ The training process is automated through distinct stages of difficulty:
     *   **Regression Mechanism**:
         *   **Immediate**: Difficulty drops (-0.05) if Win Rate falls below **30%**.
         *   **Persistent**: Difficulty drops if Win Rate stays below **40%** for 2 consecutive checks (2000 games).
-3.  **Stage 2: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
+3.  **Stage 2: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. Rewards include **"Team Spirit"** factors to encourage cooperative play (e.g., Blocker protecting the Runner).
+4.  **Stage 3: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
 
 ### 📊 Real-Time Visualization
 *   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.
@@ -60,19 +65,24 @@ graph TD
     subgraph CPU [CPU Orchestration]
         PPO[PPO Trainer]
         GA["Evolutionary Controller (NSGA-II)"]
+        League["League Manager (PFSP)"]
         API[FastAPI Backend]
     end
     
     subgraph Client [Web Interface]
         React[React Dashboard]
+        Config[Config Panel]
     end
     
     Sim -->|States & Rewards| PPO
     PPO -->|Actions| Sim
-    Sim -->|Telemetry| API
+    PPO -->|Telemetry| API
     PPO -->|Metrics| GA
     GA -->|Mutated Weights| PPO
+    League <-->|Opponents & Results| PPO
     API -->|WebSockets| React
+    Config -->|Live Updates| API
+    API -->|Control & Config| PPO
 ```
 
 ## 📦 Installation
@@ -134,7 +144,7 @@ python launcher.py
 *   **Start With...**: Choose to start training from scratch, resume a previous generation, or load a specific checkpoint.
 *   **Progression Mode**:
     *   **AUTO**: Automatically advances stages based on graduation thresholds (Efficiency & Consistency).
-    *   **MANUAL**: Force a specific stage (Solo, Duel, League).
+    *   **MANUAL**: Force a specific stage (Solo, Duel, Team, League).
 *   **Stage Selector**: Manually override the current curriculum stage (when in Manual mode).
 
 **2. Control Buttons**
@@ -142,12 +152,24 @@ python launcher.py
 *   **HALT**: Safely pauses the training loop (waits for current step to finish).
 *   **RESET**: Resets the environment state without clearing the model.
 *   **SNAPSHOT**: Manually saves a checkpoint of the current leader.
-*   **EXPORT SUBMISSION**: Generates a `submission.py` from the current active model, ready for upload to Codingame.
+*   **EXPORT SUBMISSION**: Generates a `submission.py` for Codingame.
 *   **WIPE ALL CHECKPOINTS**: ⚠️ Destructive action. Deletes all saved models and generations to start fresh.
 
-**3. Hyperparameters (Real-time)**
-*   **Learning Rate**: Adjust the PPO learning rate on the fly.
-*   **Entropy Coef**: Tune exploration vs. exploitation dynamically.
+**3. Config Panel (New)**
+The new configuration interface allows for **Live Tuning** of the training session without restarting:
+*   **General**: 
+    *   Adjust Curriculum Stage and Difficulty.
+    *   Tune PPO Hyperparameters (Learning Rate, Entropy Coefficient).
+*   **Objectives**:
+    *   **Strategic**: Dense Factor (Tau) and **Team Spirit** (0.0 = Selfish, 1.0 = Fully Cooperative).
+    *   **Weights**: Adjust rewards for Win, Loss, Checkpoints.
+*   **Physics**: Fine-tune Velocity (Dot Product), Step Penalty, and Orientation rewards.
+*   **Combat**: Adjust penalties/rewards for Collisions (Runner vs Blocker, Team Hit).
+*   **Transitions**: Modify the precise thresholds required to graduate (e.g., Efficiency check).
+*   **Presets**: Save and Load your favorite training configurations as named presets.
+*   **Actions**:
+    *   **APPLY LIVE**: Inject the new settings into the actively running training process significantly faster than restarting.
+    *   **LAUNCH CUSTOM**: Start a fresh training session using the current panel settings.
 
 ### Headless / CLI Usage
 You can run the components individually without the Launcher/UI:
@@ -171,7 +193,7 @@ Key configurations can be found in `config.py` and `simulation/env.py`.
 *   **Map Size**: 16000 x 9000
 *   **Physics**: Large Pod Radius (400), High Friction (0.85).
 *   **Reward Function**: 
-    *   Velocity uses **Potential-Based Reward Shaping** ($$\Phi(s') - \Phi(s)$$) where $\Phi(s)$ is the negative distance to the next checkpoint. This mathematical guarantee ensures the optimal policy remains invariant effectively solving the "sparse reward" problem without introducing bias.
+    *   Velocity uses a **Dot Product Projection** ($$\vec{v} \cdot \hat{d}$$) where we reward the component of velocity that is aligned with the direction to the next checkpoint. This explicitly encourages moving *towards* the objective while ignoring perpendicular movement.
     *   Orientation uses a cosine alignment metric with specific penalties for driving the wrong way.
     
 ## 🏆 Credits

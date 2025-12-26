@@ -4,7 +4,10 @@ import { useGameState } from '../../context/GameStateContext'
 import { ReadyState } from 'react-use-websocket'
 
 export const Header: React.FC = () => {
-    const { telemetry, readyState, connectionStatus } = useGameState()
+    const { telemetry, readyState, connectionStatus, history } = useGameState()
+
+    const currentStage = telemetry?.stats?.curriculum_stage || 0
+    const winRate = history.length > 0 ? history[history.length - 1].win_rate : 0
 
     const statusColors = {
         [ReadyState.CONNECTING]: 'text-yellow-400 bg-yellow-900/30 border-yellow-800',
@@ -35,6 +38,15 @@ export const Header: React.FC = () => {
                         {telemetry?.stats.active_model || 'N/A'}
                     </span>
                 </div>
+
+                {currentStage > 0 && (
+                    <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-md">
+                        <span className="text-gray-400 uppercase text-[10px]">Wr</span>
+                        <span className="text-pink-400 font-bold min-w-[30px] text-right">
+                            {(winRate * 100).toFixed(1)}%
+                        </span>
+                    </div>
+                )}
 
                 <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-md">
                     <span className="text-gray-400 uppercase text-[10px]">TPS</span>

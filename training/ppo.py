@@ -380,12 +380,26 @@ class PPOTrainer:
                     else:
                         msg = None
 
-                    if msg:
-                         if self.curriculum_mode == "auto":
-                             self.env.bot_difficulty = new_diff
-                             self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                    if self.env.bot_difficulty < 1.0:
+                        if msg:
+                             if self.curriculum_mode == "auto":
+                                 self.env.bot_difficulty = new_diff
+                                 self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                             else:
+                                 self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
+                    else:
+                         # Max difficulty reached. Show status.
+                         cons_wr = self.curriculum_config["duel_consistency_wr"]
+                         abs_wr = self.curriculum_config["duel_absolute_wr"]
+                         cons_checks = self.curriculum_config["duel_consistency_checks"]
+                         
+                         streak = self.grad_consistency_counter
+                         if rec_wr > cons_wr:
+                             streak += 1
                          else:
-                             self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
+                             streak = 0
+                             
+                         self.log(f"-> Max Difficulty. Next Stage Req: WR >= {abs_wr:.2f} OR (WR > {cons_wr:.2f} Streak {streak}/{cons_checks})")
                 
                 # Graduation Check
                 # SOTA Update: Smoother transition.
@@ -479,12 +493,26 @@ class PPOTrainer:
                     else:
                         msg = None
                     
-                    if msg:
-                        if self.curriculum_mode == "auto":
-                            self.env.bot_difficulty = new_diff
-                            self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                        else:
-                            self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
+                    if self.env.bot_difficulty < 1.0:
+                        if msg:
+                            if self.curriculum_mode == "auto":
+                                self.env.bot_difficulty = new_diff
+                                self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                            else:
+                                self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
+                    else:
+                         # Max difficulty reached. Show status.
+                         cons_wr = self.curriculum_config["team_consistency_wr"]
+                         abs_wr = self.curriculum_config["team_absolute_wr"]
+                         cons_checks = self.curriculum_config["team_consistency_checks"]
+                         
+                         streak = self.grad_consistency_counter
+                         if rec_wr > cons_wr:
+                             streak += 1
+                         else:
+                             streak = 0
+                             
+                         self.log(f"-> Max Difficulty. Next Stage Req: WR >= {abs_wr:.2f} OR (WR > {cons_wr:.2f} Streak {streak}/{cons_checks})")
                 
                 # Graduation Check (To League)
                 cons_wr = self.curriculum_config["team_consistency_wr"]
@@ -872,6 +900,9 @@ class PPOTrainer:
         
         # Save Initial Generation (Gen 0)
         self.save_generation()
+        
+        # Explicit Reset to apply initial curriculum stage (e.g. Stage 1/2 from Custom Launch)
+        self.env.reset()
         
         global_step = 0
         
