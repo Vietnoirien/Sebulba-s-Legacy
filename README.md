@@ -144,35 +144,46 @@ python launcher.py
 ### Dashboard Interface (Web UI)
 
 **1. Operations Panel**
-*   **Start With...**: Choose to start training from scratch, resume a previous generation, or load a specific checkpoint.
+*   **Status Indicator**: Visual feedback for the currently active model.
+*   **Start With...**: Options to start from scratch, resume a full **Generation**, or load a specific **Best Agent** (Checkpoint).
 *   **Progression Mode**:
-    *   **AUTO**: Automatically advances stages based on graduation thresholds (Efficiency & Consistency).
+    *   **AUTO**: Automatically advances stages based on graduation thresholds.
     *   **MANUAL**: Force a specific stage (Solo, Duel, Team, League).
-*   **Stage Selector**: Manually override the current curriculum stage (when in Manual mode).
+*   **Stage Selector**: Manually override the current curriculum stage (Available in Manual mode).
 
 **2. Control Buttons**
-*   **INIT SEQUENCE**: Starts or resumes the training loop with the selected configuration.
+*   **INIT SEQUENCE**: Starts or resumes the training loop with selected settings.
 *   **HALT**: Safely pauses the training loop (waits for current step to finish).
-*   **RESET**: Resets the environment state without clearing the model.
+*   **RESET**: Resets the environment state (positions/velocities) without clearing the model.
 *   **SNAPSHOT**: Manually saves a checkpoint of the current leader.
 *   **EXPORT SUBMISSION**: Generates a `submission.py` for Codingame.
 *   **WIPE ALL CHECKPOINTS**: ⚠️ Destructive action. Deletes all saved models and generations to start fresh.
 
-**3. Config Panel (New)**
-The new configuration interface allows for **Live Tuning** of the training session without restarting:
+**3. Config Panel (Live Tuning)**
+The new configuration interface allows for **Live Tuning** of the training session without restarting, organized by tabs:
+
 *   **General**: 
-    *   Adjust Curriculum Stage and Difficulty.
-    *   Tune PPO Hyperparameters (Learning Rate, Entropy Coefficient).
+    *   **Curriculum**: Manually adjust Curriculum Stage and Bot Difficulty (0.0 - 1.0).
+    *   **Training**: Real-time tuning of Hyperparameters (Learning Rate, Entropy Coefficient).
 *   **Objectives**:
-    *   **Strategic**: Dense Factor (Tau) and **Team Spirit** (0.0 = Selfish, 1.0 = Fully Cooperative).
-    *   **Weights**: Adjust rewards for Win, Loss, Checkpoints.
-*   **Physics**: Fine-tune Velocity (Dot Product), Step Penalty, and Orientation rewards.
-*   **Combat**: Adjust penalties/rewards for Collisions (Runner vs Blocker, Team Hit).
-*   **Transitions**: Modify the precise thresholds required to graduate (e.g., Efficiency check).
-*   **Presets**: Save and Load your favorite training configurations as named presets.
+    *   **Strategic**: Adjust Dense Factor (Tau) and **Team Spirit** (0.0 = Selfish, 1.0 = Fully Cooperative).
+    *   **Outcome**: Configure weights for Win, Loss, Checkpoint, and Checkpoint Streak Scale.
+*   **Physics**: 
+    *   **Movement**: Tune Velocity (Dot Product) and Step Penalty weights.
+    *   **Alignment**: Adjust Orientation reward and Wrong Way penalty.
+*   **Combat**: 
+    *   **Collisions**: Tune rewards for hitting the Blocker, and penalties for Runner/Teammate collisions.
+*   **Transitions**: 
+    *   **Thresholds**: Fine-tune the specific criteria required to graduate between stages (Efficiency, Consistency WR, Absolute WR).
+*   **Presets**: 
+    *   **Management**: Save and Load your custom training configurations for quick setup.
 *   **Actions**:
     *   **APPLY LIVE**: Inject the new settings into the actively running training process significantly faster than restarting.
     *   **LAUNCH CUSTOM**: Start a fresh training session using the current panel settings.
+
+**4. Monitoring**
+*   **Stats Panel**: Real-time visualization of Win Rate history.
+*   **League Panel**: System log console showing initialization events and status updates.
 
 ### Headless / CLI Usage
 You can run the components individually without the Launcher/UI:
