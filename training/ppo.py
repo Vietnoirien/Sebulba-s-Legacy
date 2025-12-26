@@ -163,6 +163,23 @@ class PPOTrainer:
         self.grad_consistency_counter = 0
         self.team_spirit = 0.0 # Blending factor for rewards (0.0=Selfish, 1.0=Cooperative)
         
+        # TRANSITION CONFIGURATION
+        self.curriculum_config = {
+             # Stage 0 -> 1
+             "solo_efficiency_threshold": STAGE_SOLO_EFFICIENCY_THRESHOLD,
+             "solo_consistency_threshold": STAGE_SOLO_CONSISTENCY_THRESHOLD,
+             
+             # Stage 1 -> 2
+             "duel_consistency_wr": 0.82,
+             "duel_absolute_wr": 0.84,
+             "duel_consistency_checks": 5,
+             
+             # Stage 2 -> 3
+             "team_consistency_wr": 0.85,
+             "team_absolute_wr": 0.88,
+             "team_consistency_checks": 5
+        }
+        
         # Allocate Initial Buffers
         self.allocate_buffers()
 
@@ -313,7 +330,11 @@ class PPOTrainer:
                 metrics["recent_wins"] = 0
                 metrics["recent_episodes"] = 0
                 
-                self.log(f"Stage 1 Check: Recent WR {rec_wr:.2f} (Games: {rec_games}/{rec_episodes}) (Diff: {self.env.bot_difficulty:.2f})")
+                # Wins, Losses, Timeouts
+                rec_losses = rec_games - rec_wins
+                rec_timeouts = rec_episodes - rec_games
+                
+                self.log(f"Stage 1 Check: Recent WR {rec_wr:.2f} | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
                 
                 if rec_wr < 0.30:
                     # Critical Failure: Immediate Regression
@@ -419,7 +440,11 @@ class PPOTrainer:
                 metrics["recent_wins"] = 0
                 metrics["recent_episodes"] = 0
                 
-                self.log(f"Stage 2 (Team) Check: Recent WR {rec_wr:.2f} (Games: {rec_games}/{rec_episodes}) (Diff: {self.env.bot_difficulty:.2f})")
+                # Wins, Losses, Timeouts
+                rec_losses = rec_games - rec_wins
+                rec_timeouts = rec_episodes - rec_games
+
+                self.log(f"Stage 2 (Team) Check: Recent WR {rec_wr:.2f} | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
                 
                 if rec_wr < 0.30:
                     if self.curriculum_mode == "auto":
