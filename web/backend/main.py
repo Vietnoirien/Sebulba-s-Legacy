@@ -75,11 +75,17 @@ class ConnectionManager:
     async def broadcast(self, message: dict):
         # Convert to JSON string
         json_str = json.dumps(message)
+        to_remove = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(json_str)
-            except Exception as e:
-                print(f"Error sending to websocket: {e}")
+            except Exception:
+                # Failed to send (Connection closed), mark for removal
+                to_remove.append(connection)
+        
+        for conn in to_remove:
+            if conn in self.active_connections:
+                self.active_connections.remove(conn)
 
 manager = ConnectionManager()
 

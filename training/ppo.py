@@ -850,42 +850,9 @@ class PPOTrainer:
         while global_step < TOTAL_TIMESTEPS:
             if stop_event and stop_event.is_set(): break
 
-            self.iteration += 1
-            if self.iteration % 1 == 0:
-                self.log(f"Starting iteration {self.iteration}")
+            # Check Curriculum & Update Config BEFORE starting the iteration
             self.check_curriculum()
-            
-            # --- PRE-ITERATION LEAGUE LOGIC ---
-            # Sample Opponent for this iteration (Fictitious Self-Play)
-            self.opponent_agent_loaded = False
-            # Only sample if we are in League Mode
-            if self.env.curriculum_stage >= STAGE_LEAGUE:
-                # SOTA: PFSP - Prioritize based on Leader's historical performance
-                leader_id_str = f"gen_{self.generation}_agent_{self.population[self.leader_idx]['id']}"
-                opp_path = self.league.sample_opponent(active_agent_id=leader_id_str, mode='pfsp')
-                if opp_path and os.path.exists(opp_path):
-                    try:
-                        # Load Opponent
-                        self.opponent_agent.load_state_dict(torch.load(opp_path, map_location=self.device))
-                        self.opponent_agent.eval() # Set to Eval mode
-                        self.opponent_agent_loaded = True
-                        
-                        # Identify ID from path
-                        self.current_opponent_id = os.path.basename(opp_path).replace(".pt", "")
-                        self.log(f"⚔️  LEAGUE MATCH: Population vs {self.current_opponent_id} ⚔️")
-                        
-                        # Snapshot for PFSP Update
-                        self.iteration_start_wins = self.population[self.leader_idx]['wins']
-                        self.iteration_start_matches = self.population[self.leader_idx]['matches']
-                        
-                    except Exception as e:
-                        self.log(f"Failed to load opponent {opp_path}: {e}")
-                        self.opponent_agent_loaded = False
-                else:
-                    # Fallback to Mirror Self-Play (or Bot if handled by Env)
-                    # self.log("Using Mirror Self-Play (No League Opponent found or sampled).")
-                    pass
-            
+
             # --- Dynamic Config Check ---
             current_stage = self.env.curriculum_stage
             target_steps = 256
@@ -929,6 +896,41 @@ class PPOTrainer:
                  self.log(f"Config Update: Evolve Interval {self.current_evolve_interval} -> {target_evolve}")
                  self.current_evolve_interval = target_evolve
 
+            # Start Iteration
+            self.iteration += 1
+            if self.iteration % 1 == 0:
+                self.log(f"Starting iteration {self.iteration}")
+            
+            # --- PRE-ITERATION LEAGUE LOGIC ---
+            # Sample Opponent for this iteration (Fictitious Self-Play)
+            self.opponent_agent_loaded = False
+            # Only sample if we are in League Mode
+            if self.env.curriculum_stage >= STAGE_LEAGUE:
+                # SOTA: PFSP - Prioritize based on Leader's historical performance
+                leader_id_str = f"gen_{self.generation}_agent_{self.population[self.leader_idx]['id']}"
+                opp_path = self.league.sample_opponent(active_agent_id=leader_id_str, mode='pfsp')
+                if opp_path and os.path.exists(opp_path):
+                    try:
+                        # Load Opponent
+                        self.opponent_agent.load_state_dict(torch.load(opp_path, map_location=self.device))
+                        self.opponent_agent.eval() # Set to Eval mode
+                        self.opponent_agent_loaded = True
+                        
+                        # Identify ID from path
+                        self.current_opponent_id = os.path.basename(opp_path).replace(".pt", "")
+                        self.log(f"⚔️  LEAGUE MATCH: Population vs {self.current_opponent_id} ⚔️")
+                        
+                        # Snapshot for PFSP Update
+                        self.iteration_start_wins = self.population[self.leader_idx]['wins']
+                        self.iteration_start_matches = self.population[self.leader_idx]['matches']
+                        
+                    except Exception as e:
+                        self.log(f"Failed to load opponent {opp_path}: {e}")
+                        self.opponent_agent_loaded = False
+                else:
+                    # Fallback to Mirror Self-Play (or Bot if handled by Env)
+                    # self.log("Using Mirror Self-Play (No League Opponent found or sampled).")
+                    pass
             active_pods = self.get_active_pods()
             num_active_per_agent = len(active_pods) * ENVS_PER_AGENT
             

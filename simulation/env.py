@@ -108,32 +108,12 @@ class PodRacerEnv:
             self.num_checkpoints[curr_env_ids] = n_cps
             
             # 3. Select Generator Type
-            # 0: StarConvex (Circuit) -> 0% (Removed by user request)
-            # 1: GuidedWorm (Wild Worm) -> 35% (Rally)
-            # 2: MaxEntropy (Chaos) -> 65% (Pod Racing)
+            # 0: MaxEntropy (Chaos) -> 100% (Pod Racing)
             
-            probs = torch.tensor([0.0, 0.25, 0.75], device=self.device)
-            type_ids = torch.multinomial(probs, num_curr, replacement=True)
-            
-            # Star Convex (Disabled)
-            # t0_mask = (type_ids == 0)
-            # if t0_mask.any(): ...
-                
-            # Wild Worm
-            t1_mask = (type_ids == 1)
-            if t1_mask.any():
-                t1_ids = curr_env_ids[t1_mask]
-                t1_cnt = len(t1_ids)
-                cps_1 = TrackGenerator.generate_guided_worm(t1_cnt, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-                self.checkpoints[t1_ids] = cps_1
-                
-            # Max Entropy (Chaos)
-            t2_mask = (type_ids == 2)
-            if t2_mask.any():
-                t2_ids = curr_env_ids[t2_mask]
-                t2_cnt = len(t2_ids)
-                cps_2 = TrackGenerator.generate_max_entropy(t2_cnt, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-                self.checkpoints[t2_ids] = cps_2
+            # Simple: All using MaxEntropy
+            cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+            self.checkpoints[curr_env_ids] = cps
+
             
         # 2. Reset Pods
         # Start at CP0
