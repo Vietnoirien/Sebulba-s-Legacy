@@ -13,21 +13,23 @@ class PodAgent(nn.Module):
         super().__init__()
         
         self.self_obs_dim = 14
-        self.entity_obs_dim = 13
+        self.teammate_obs_dim = 13
+        self.enemy_obs_dim = 13
         self.next_cp_dim = 6
         self.latent_dim = 16
         self.hidden_dim = hidden_dim
         
-        # Shared Encoder
+        # Enemy Encoder (DeepSets)
         # Use Orthogonal Init (std=sqrt(2) for ReLU)
-        self.entity_encoder = nn.Sequential(
-            layer_init(nn.Linear(self.entity_obs_dim, 32)),
+        self.enemy_encoder = nn.Sequential(
+            layer_init(nn.Linear(self.enemy_obs_dim, 32)),
             nn.ReLU(),
             layer_init(nn.Linear(32, self.latent_dim)),
         )
         
         # Backbone (Features)
-        input_dim = self.self_obs_dim + self.latent_dim + self.next_cp_dim
+        # Input: Self(14) + Teammate(13) + EnemyContext(16) + NextCP(6) = 49
+        input_dim = self.self_obs_dim + self.teammate_obs_dim + self.latent_dim + self.next_cp_dim
         self.backbone = nn.Sequential(
             layer_init(nn.Linear(input_dim, self.hidden_dim)),
             nn.ReLU(),
@@ -52,22 +54,25 @@ class PodAgent(nn.Module):
         # Critic
         self.critic = layer_init(nn.Linear(self.hidden_dim, 1), std=1.0)
 
-    def _get_features(self, self_obs, entity_obs, next_cp_obs):
-        B, N, _ = entity_obs.shape
-        flat_entities = entity_obs.reshape(B * N, -1)
-        encodings = self.entity_encoder(flat_entities)
+    def _get_features(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
+        # Enemy DeepSets
+        # enemy_obs: [B, N_Enemies=2, 13]
+        B, N, _ = enemy_obs.shape
+        flat_enemies = enemy_obs.reshape(B * N, -1)
+        encodings = self.enemy_encoder(flat_enemies)
         encodings = encodings.view(B, N, -1)
-        global_context, _ = torch.max(encodings, dim=1) # Symmetric MaxPool
+        enemy_context, _ = torch.max(encodings, dim=1) # Symmetric MaxPool
         
-        combined = torch.cat([self_obs, global_context, next_cp_obs], dim=1)
+        # Concatenate: Self(14) + Teammate(13) + Enemy(16) + CP(6)
+        combined = torch.cat([self_obs, teammate_obs, enemy_context, next_cp_obs], dim=1)
         return self.backbone(combined)
 
-    def get_value(self, self_obs, entity_obs, next_cp_obs):
-        features = self._get_features(self_obs, entity_obs, next_cp_obs)
+    def get_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
+        features = self._get_features(self_obs, teammate_obs, enemy_obs, next_cp_obs)
         return self.critic(features)
 
-    def get_action_and_value(self, self_obs, entity_obs, next_cp_obs, action=None):
-        features = self._get_features(self_obs, entity_obs, next_cp_obs)
+    def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, action=None):
+        features = self._get_features(self_obs, teammate_obs, enemy_obs, next_cp_obs)
         
         # 1. Critic
         value = self.critic(features)

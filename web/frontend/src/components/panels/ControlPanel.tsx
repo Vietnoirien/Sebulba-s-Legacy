@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react'
 import { Play, Square, RotateCcw, Save, Loader, Trash2 } from 'lucide-react'
 import { Button } from '../common/Button'
-import { useGameState } from '../../context/GameStateContext'
+import { useGameState, useGameActions } from '../../context/GameStateContext'
 
 export const ControlPanel: React.FC = () => {
-    const { telemetry, selectedModel, setSelectedModel } = useGameState()
+    const { telemetry } = useGameState()
+    const { selectedModel, setSelectedModel } = useGameActions()
     const [checkpoints, setCheckpoints] = useState<any[]>([])
     // const [selectedModel, setSelectedModel] = useState<string>("scratch") // Moved to Context
     const [curriculumMode, setCurriculumMode] = useState<string>("auto")

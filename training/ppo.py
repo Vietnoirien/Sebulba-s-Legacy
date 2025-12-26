@@ -204,7 +204,8 @@ class PPOTrainer:
         for _ in range(POP_SIZE):
              self.agent_batches.append({
                  'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 14), device=self.device),
-                 'entity_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 3, 13), device=self.device),
+                 'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 13), device=self.device),
+                 'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 13), device=self.device),
                  'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 6), device=self.device),
                  'actions': torch.zeros((self.current_num_steps, num_active_per_agent_step, 4), device=self.device),
                  'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
@@ -921,7 +922,15 @@ class PPOTrainer:
             if stop_event and stop_event.is_set(): break
 
             # Check Curriculum & Update Config BEFORE starting the iteration
+            prev_stage = self.env.curriculum_stage
             self.check_curriculum()
+            
+            # If Stage Changed, we MUST reset the environment to spawn new pods/apply new logic immediately.
+            if self.env.curriculum_stage != prev_stage:
+                 self.log(f"Config: Stage Transition {prev_stage} -> {self.env.curriculum_stage}. Resetting Environment...")
+                 self.env.reset()
+                 obs_data = self.env.get_obs()
+
 
             # --- Dynamic Config Check ---
             current_stage = self.env.curriculum_stage
@@ -1009,8 +1018,8 @@ class PPOTrainer:
             # Using self.agent_batches (allocated dynamically)
                  
             # Unpack Obs
-            # obs_data is tuple (self, ent, cp) tensors [4, NUM_ENVS, ...]
-            all_self, all_ent, all_cp = obs_data
+            # obs_data is tuple (self, tm, en, cp) tensors [4, NUM_ENVS, ...]
+            all_self, all_tm, all_en, all_cp = obs_data
             
             for step in range(NUM_STEPS):
                 # --- Global Normalization ---
@@ -1023,15 +1032,20 @@ class PPOTrainer:
                 # It copies and stacks them. Since all_self[i] is [NUM_ENVS, 14] contiguous, this is fast.
                 
                 raw_self = all_self[active_pods].view(-1, 14) # [N_Active * NUM_ENVS, 14]
-                raw_ent = all_ent[active_pods].view(-1, 3, 13)
+                raw_tm = all_tm[active_pods].view(-1, 13)
+                raw_en = all_en[active_pods].view(-1, 2, 13)
                 raw_cp = all_cp[active_pods].view(-1, 6)
                 
                 # Normalize & Update Stats
                 norm_self = self.rms_self(raw_self)
                 
-                # Flatten ent for norm
-                total_rows_ent, N_others, D_ent = raw_ent.shape
-                norm_ent = self.rms_ent(raw_ent.view(-1, D_ent)).view(total_rows_ent, N_others, D_ent)
+                # Normalize Teammate (13) using ENT stats
+                norm_tm = self.rms_ent(raw_tm)
+                
+                # Normalize Enemies (2, 13) using ENT stats
+                # Flatten -> Norm -> Reshape
+                total_rows_en, N_en, D_ent = raw_en.shape
+                norm_en = self.rms_ent(raw_en.view(-1, D_ent)).view(total_rows_en, N_en, D_ent)
                 
                 norm_cp = self.rms_cp(raw_cp)
                 
@@ -1055,7 +1069,8 @@ class PPOTrainer:
                 # Keep normalized as [N_Active, NUM_ENVS, D]
                 
                 norm_self = norm_self.view(len(active_pods), NUM_ENVS, 14)
-                norm_ent = norm_ent.view(len(active_pods), NUM_ENVS, 3, 13)
+                norm_tm = norm_tm.view(len(active_pods), NUM_ENVS, 13)
+                norm_en = norm_en.view(len(active_pods), NUM_ENVS, 2, 13)
                 norm_cp = norm_cp.view(len(active_pods), NUM_ENVS, 6)
                 
                 # Now Agent i needs envs i*128 : (i+1)*128
@@ -1073,12 +1088,13 @@ class PPOTrainer:
                     # This is fine.
                     
                     t0_self = norm_self[:, start_env:end_env, :].reshape(-1, 14)
-                    t0_ent = norm_ent[:, start_env:end_env, :, :].reshape(-1, 3, 13)
+                    t0_tm = norm_tm[:, start_env:end_env, :].reshape(-1, 13)
+                    t0_en = norm_en[:, start_env:end_env, :, :].reshape(-1, 2, 13)
                     t0_cp = norm_cp[:, start_env:end_env, :].reshape(-1, 6)
                     
                     with torch.no_grad():
                         agent = self.population[i]['agent']
-                        action0, logprob0, _, value0 = agent.get_action_and_value(t0_self, t0_ent, t0_cp)
+                        action0, logprob0, _, value0 = agent.get_action_and_value(t0_self, t0_tm, t0_en, t0_cp)
                         
                     # Store
                     # Agent batch storage expectation:
@@ -1089,7 +1105,8 @@ class PPOTrainer:
                     
                     batch = self.agent_batches[i]
                     batch['self_obs'][step] = t0_self.detach()
-                    batch['entity_obs'][step] = t0_ent.detach()
+                    batch['teammate_obs'][step] = t0_tm.detach()
+                    batch['enemy_obs'][step] = t0_en.detach()
                     batch['cp_obs'][step] = t0_cp.detach()
                     batch['actions'][step] = action0.detach()
                     batch['logprobs'][step] = logprob0.detach()
@@ -1125,23 +1142,25 @@ class PPOTrainer:
                      
                      # Extract Raw Obs for Opponent from GLOBAL obs tensors (all_self has 4 pods)
                      opp_raw_self = all_self[opp_indices].view(-1, 14)
-                     opp_raw_ent = all_ent[opp_indices].view(-1, 3, 13)
+                     opp_raw_tm = all_tm[opp_indices].view(-1, 13)
+                     opp_raw_en = all_en[opp_indices].view(-1, 2, 13)
                      opp_raw_cp = all_cp[opp_indices].view(-1, 6)
                      
                      # Normalize (Fixed stats)
                      opp_norm_self = self.rms_self(opp_raw_self, fixed=True)
                      
-                     B_o, N_o, D_o = opp_raw_ent.shape
-                     opp_norm_ent = self.rms_ent(opp_raw_ent.view(-1, D_o), fixed=True).view(B_o, N_o, D_o)
+                     opp_norm_tm = self.rms_ent(opp_raw_tm, fixed=True)
+                     B_o, N_o, D_o = opp_raw_en.shape
+                     opp_norm_en = self.rms_ent(opp_raw_en.view(-1, D_o), fixed=True).view(B_o, N_o, D_o)
                      opp_norm_cp = self.rms_cp(opp_raw_cp, fixed=True)
                      
                      with torch.no_grad():
                          if use_league_opp:
-                             o_act_stacked, _, _, _ = self.opponent_agent.get_action_and_value(opp_norm_self, opp_norm_ent, opp_norm_cp)
+                             o_act_stacked, _, _, _ = self.opponent_agent.get_action_and_value(opp_norm_self, opp_norm_tm, opp_norm_en, opp_norm_cp)
                          else:
                              # Fallback: Mirror Self-Play
                              # Use current Leader Agent (self.agent)
-                             o_act_stacked, _, _, _ = self.agent.get_action_and_value(opp_norm_self, opp_norm_ent, opp_norm_cp)
+                             o_act_stacked, _, _, _ = self.agent.get_action_and_value(opp_norm_self, opp_norm_tm, opp_norm_en, opp_norm_cp)
                      
                      # Split actions back to Pod 2 and 3
                      o_act_chunks = torch.chunk(o_act_stacked, 2, dim=0)
@@ -1429,7 +1448,7 @@ class PPOTrainer:
 
                 # Next Obs (New Start State)
                 obs_data = self.env.get_obs()
-                all_self, all_ent, all_cp = obs_data
+                all_self, all_tm, all_en, all_cp = obs_data
 
             # 3. Update Phase (Per Agent)
             # Bootstrapping & Training
@@ -1438,18 +1457,26 @@ class PPOTrainer:
             # Global Normalize Next Obs (Fixed=True)
             # Source: [4, NUM_ENVS, ...]
             
+            # Global Normalize Next Obs (Fixed=True)
+            # Source: [4, NUM_ENVS, ...]
+            
             next_raw_self = all_self[active_pods].view(-1, 14)
-            next_raw_ent = all_ent[active_pods].view(-1, 3, 13)
+            next_raw_tm = all_tm[active_pods].view(-1, 13)
+            next_raw_en = all_en[active_pods].view(-1, 2, 13)
             next_raw_cp = all_cp[active_pods].view(-1, 6)
             
             next_norm_self = self.rms_self(next_raw_self, fixed=True)
-            B_e, N_e, D_e = next_raw_ent.shape
-            next_norm_ent = self.rms_ent(next_raw_ent.view(-1, D_e), fixed=True).view(B_e, N_e, D_e)
+            
+            next_norm_tm = self.rms_ent(next_raw_tm, fixed=True)
+            B_e, N_e, D_e = next_raw_en.shape
+            next_norm_en = self.rms_ent(next_raw_en.view(-1, D_e), fixed=True).view(B_e, N_e, D_e)
+            
             next_norm_cp = self.rms_cp(next_raw_cp, fixed=True)
             
             # View as [N_Act, NUM_ENVS, ...]
             next_norm_self = next_norm_self.view(len(active_pods), NUM_ENVS, 14)
-            next_norm_ent = next_norm_ent.view(len(active_pods), NUM_ENVS, 3, 13)
+            next_norm_tm = next_norm_tm.view(len(active_pods), NUM_ENVS, 13)
+            next_norm_en = next_norm_en.view(len(active_pods), NUM_ENVS, 2, 13)
             next_norm_cp = next_norm_cp.view(len(active_pods), NUM_ENVS, 6)
             
             for i in range(POP_SIZE):
@@ -1462,11 +1489,12 @@ class PPOTrainer:
                 end_env = start_env + ENVS_PER_AGENT
                 
                 t0_self = next_norm_self[:, start_env:end_env, :].reshape(-1, 14)
-                t0_ent = next_norm_ent[:, start_env:end_env, :, :].reshape(-1, 3, 13)
+                t0_tm = next_norm_tm[:, start_env:end_env, :].reshape(-1, 13)
+                t0_en = next_norm_en[:, start_env:end_env, :, :].reshape(-1, 2, 13)
                 t0_cp = next_norm_cp[:, start_env:end_env, :].reshape(-1, 6)
                 
                 with torch.no_grad():
-                    next_val = agent.get_value(t0_self, t0_ent, t0_cp).flatten()
+                    next_val = agent.get_value(t0_self, t0_tm, t0_en, t0_cp).flatten()
                 
                 # GAE
                 b_rewards = batch['rewards']

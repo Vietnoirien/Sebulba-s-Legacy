@@ -948,12 +948,7 @@ class PodRacerEnv:
 
         # --- DEBUG: Monitor Pod 0 (Team 0) ---
         # Only print for Env 0 every 10 steps to reduce spam
-        if self.curriculum_stage == STAGE_TEAM: # Uncomment to debug
-            e0_role = "RUNNER" if self.is_runner[0, 0] else "BLOCKER"
-            e0_dist = self.prev_dist[0, 0].item()
-            e0_thrust = act_thrust[0, 0].item()
-            e0_angle = act_angle[0, 0].item()
-            print(f"Step {self.laps[0,0]}:{self.next_cp_id[0,0]} | Pod0 ({e0_role}): Dist {e0_dist:.1f} | Act: Thr {e0_thrust:.1f} Ang {e0_angle:.1f}")
+
 
 
         return rewards, self.dones.clone(), infos
@@ -1060,10 +1055,10 @@ class PodRacerEnv:
         # 2 -> 0, 1, 3
         # 3 -> 0, 1, 2
         other_indices = torch.tensor([
-            [1, 2, 3],
-            [0, 2, 3],
-            [0, 1, 3],
-            [0, 1, 2]
+            [1, 2, 3], # 0: Mate, E, E
+            [0, 2, 3], # 1: Mate, E, E
+            [3, 0, 1], # 2: Mate, E, E
+            [2, 0, 1]  # 3: Mate, E, E
         ], device=device) # [4, 3]
         
         # Broadcast to [B, 4, 3]
@@ -1190,9 +1185,18 @@ class PodRacerEnv:
         # Permute to [4, B, ...] for contiguous memory access per Pod
         # self_obs: [B, 4, 14] -> [4, B, 14]
         self_c = self_obs.permute(1, 0, 2).contiguous()
-        # entity_obs: [B, 4, 3, 13] -> [4, B, 3, 13]
-        ent_c = entity_obs.permute(1, 0, 2, 3).contiguous()
+        
+        # entity_obs: [B, 4, 3, 13]
+        # Split into Teammate (Index 0) and Enemies (Indices 1,2)
+        # Teammate: [B, 4, 1, 13] -> Squeeze -> [B, 4, 13]
+        tm_obs = entity_obs[:, :, 0, :]
+        en_obs = entity_obs[:, :, 1:, :] # [B, 4, 2, 13]
+        
+        # Permute
+        tm_c = tm_obs.permute(1, 0, 2).contiguous()
+        en_c = en_obs.permute(1, 0, 2, 3).contiguous()
+        
         # cp_obs: [B, 4, 6] -> [4, B, 6]
         cp_c = cp_obs.permute(1, 0, 2).contiguous()
         
-        return self_c, ent_c, cp_c
+        return self_c, tm_c, en_c, cp_c

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Slider } from '../common/Slider'
-import { useGameState } from '../../context/GameStateContext'
+import { useGameActions } from '../../context/GameStateContext'
 import { Save, Upload, Trash2, Play, Target, Zap, ShieldAlert, Cpu, Database, Shuffle, Rocket } from 'lucide-react'
 
 // Reward Indices (Must match Backend)
@@ -24,7 +24,7 @@ interface ConfigPreset {
 }
 
 export const ConfigPanel: React.FC = () => {
-    const { sendMessage, selectedModel } = useGameState()
+    const { sendMessage, selectedModel } = useGameActions()
     const [activeTab, setActiveTab] = useState<'general' | 'objectives' | 'physics' | 'combat' | 'transitions' | 'presets'>('general')
 
     // --- State ---
