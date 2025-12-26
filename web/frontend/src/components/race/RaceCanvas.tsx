@@ -181,8 +181,8 @@ export const RaceCanvas: React.FC = () => {
 
         // Draw Pods
         if (telemetry.race_state?.pods) {
-            telemetry.race_state.pods.forEach((pod, index) => {
-                const color = index === 0 ? 'red' : 'white'
+            telemetry.race_state.pods.forEach((pod) => {
+                const color = pod.team === 0 ? 'red' : 'white'
                 drawPod(ctx, pod, color, images, debugLines)
             })
         }

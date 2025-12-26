@@ -124,20 +124,23 @@ class StartPayload(BaseModel):
     model: Optional[str] = "scratch"
     curriculum_mode: Optional[str] = "auto"
     curriculum_stage: Optional[int] = 0
+    config: Optional[Dict[str, Any]] = None
 
 @app.post("/api/start")
 async def start_training(payload: StartPayload = None):
     model_name = "scratch"
     curr_mode = "auto"
     curr_stage = 0
+    initial_config = None
     
     if payload:
         model_name = payload.model
         curr_mode = payload.curriculum_mode
         curr_stage = payload.curriculum_stage
+        initial_config = payload.config
 
     try:
-        session.start(model_name=model_name, curriculum_mode=curr_mode, curriculum_stage=curr_stage)
+        session.start(model_name=model_name, curriculum_mode=curr_mode, curriculum_stage=curr_stage, config=initial_config)
         return {"status": "started", "model": model_name, "curriculum": curr_mode, "stage": curr_stage}
     except Exception as e:
         import traceback

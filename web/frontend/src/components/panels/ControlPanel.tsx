@@ -164,7 +164,8 @@ export const ControlPanel: React.FC = () => {
                     >
                         <option value={0}>Stage 0: Solo Time Trial</option>
                         <option value={1}>Stage 1: 1v1 Duel</option>
-                        <option value={2}>Stage 2: 2v2 League</option>
+                        <option value={2}>Stage 2: 2v2 Team</option>
+                        <option value={3}>Stage 3: League</option>
                     </select>
                 </div>
             </div>

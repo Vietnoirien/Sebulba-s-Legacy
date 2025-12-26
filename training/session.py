@@ -48,7 +48,7 @@ class TrainingSession:
             self.trainer = PPOTrainer(logger_callback=self._log_callback)
         return self.trainer
 
-    def start(self, model_name=None, curriculum_mode="auto", curriculum_stage=0):
+    def start(self, model_name=None, curriculum_mode="auto", curriculum_stage=0, config=None):
         if self.running:
             return
         
@@ -77,6 +77,11 @@ class TrainingSession:
         self.trainer.curriculum_mode = curriculum_mode
         self.trainer.env.curriculum_stage = curriculum_stage
         self.trainer.log(f"Session started with Curriculum: {self.trainer.curriculum_mode} | Stage: {self.trainer.env.curriculum_stage}")
+
+        # Apply Initial Config if provided (Fix for race condition)
+        if config:
+            self.trainer.log(f"Applying initial configuration...")
+            self.update_config(config)
             
         # Load Model Logic
         if model_name and model_name != "scratch":

@@ -1,6 +1,7 @@
 import torch
 import math
 from simulation.gpu_physics import GPUPhysics
+from simulation.tracks import TrackGenerator
 from config import *
 
 # Reward Indices
@@ -14,18 +15,20 @@ RW_COLLISION_BLOCKER = 6
 RW_STEP_PENALTY = 7
 RW_ORIENTATION = 8
 RW_WRONG_WAY = 9
+RW_COLLISION_MATE = 10
 
 DEFAULT_REWARD_WEIGHTS = {
     RW_WIN: 10000.0,
     RW_LOSS: 5000.0,
     RW_CHECKPOINT: 2000.0,
     RW_CHECKPOINT_SCALE: 50.0, # Kept as is, minor influence
-    RW_VELOCITY: 0.05, # Drastically reduced to prevent "money printing"
+    RW_VELOCITY: 0.1, # Restored since Dot-Product logic is safer
     RW_COLLISION_RUNNER: 0.5,
-    RW_COLLISION_BLOCKER: 2.0,
+    RW_COLLISION_BLOCKER: 1000.0, # Increased 10x to prioritize Blocking over Checkpoints for Blocker
     RW_STEP_PENALTY: 10.0, # Reduced to balance with lower velocity
     RW_ORIENTATION: 0.005, # SOTA: De-emphasized to prevent "Orientation Trap". Implicit in velocity.
-    RW_WRONG_WAY: 10.0
+    RW_WRONG_WAY: 10.0,
+    RW_COLLISION_MATE: 2.0 # Penalty for hitting teammate
 }
 
 class PodRacerEnv:
@@ -39,15 +42,29 @@ class PodRacerEnv:
         self.next_cp_id = torch.ones((num_envs, 4), dtype=torch.long, device=self.device) # Start at 1 (0 is start)
         self.laps = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device)
         self.timeouts = torch.full((num_envs, 4), TIMEOUT_STEPS, dtype=torch.long, device=self.device)
+        self.cps_passed = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device)
         
         # Checkpoints [Batch, MaxCP, 2]
         self.checkpoints = torch.zeros((num_envs, MAX_CHECKPOINTS, 2), device=self.device)
         self.num_checkpoints = torch.zeros((num_envs,), dtype=torch.long, device=self.device)
         
+        # Track steps since last CP for efficiency metric
+        self.steps_last_cp = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device) # Track steps per CP
+        
+        # Metrics per env
+        self.stage_metrics = {
+            "solo_completes": 0,
+            "solo_steps": 0,
+            "checkpoint_hits": 0,
+            "duel_wins": 0,
+            "duel_games": 0,
+            "recent_wins": 0,
+            "recent_games": 0,
+            "recent_episodes": 0
+        }
+        
         # Rewards / Done
         self.rewards = torch.zeros((num_envs, 2), device=self.device) # Team 0, Team 1
-        self.cp_reward_buffer = torch.zeros((num_envs, 4), device=self.device) # Buffer for spreading CP rewards
-        self.cps_passed = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device) # Track CPs passed for scaling
         self.dones = torch.zeros((num_envs,), dtype=torch.bool, device=self.device)
         self.winners = torch.full((num_envs,), -1, dtype=torch.long, device=self.device)
         
@@ -57,16 +74,6 @@ class PodRacerEnv:
         
         # Progress tracking for dense rewards
         self.prev_dist = torch.zeros((num_envs, 4), device=self.device)
-        self.steps_last_cp = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device) # Track steps per CP
-        self.stage_metrics = {
-            "solo_completes": 0,
-            "solo_steps": 0,
-            "checkpoint_hits": 0,
-            "duel_wins": 0,
-            "duel_games": 0,
-            "recent_wins": 0,
-            "recent_games": 0
-        }
         
         self.bot_difficulty = 0.0 # 0.0 to 1.0
 
@@ -86,148 +93,47 @@ class PodRacerEnv:
         # 1. Generate Tracks (Vectorized Retry Logic)
         # Optimized: Fail fast (3 attempts, 20 loops) -> Fallback to Procedural Path
         
-        MAX_MAP_ATTEMPTS = 3
-        BORDER_BUFFER = 2500.0
-        MIN_DIST = 3000.0
+        # 1. Generate Tracks
+        # Using Modular Generators for Diversity
         
-        active_mask = torch.ones(num_reset, dtype=torch.bool, device=self.device)
+        curr_env_ids = env_ids
+        num_curr = len(curr_env_ids)
         
-        for attempt in range(MAX_MAP_ATTEMPTS):
-            if not active_mask.any():
-                break
-                
-            # Indices of envs to generate this round (relative to env_ids)
-            pending_idx = torch.nonzero(active_mask).squeeze(-1)
-            # Global indices to update
-            curr_env_ids = env_ids[pending_idx]
-            num_curr = len(curr_env_ids)
-            
-            # --- Generation Logic for curr_env_ids ---
-            
-            # 1. Reset CPs for these envs to 0
+        if num_curr > 0:
+            # 1. Reset CPs 
             self.checkpoints[curr_env_ids] = 0.0
             
             # 2. Random N CPs
             n_cps = torch.randint(MIN_CHECKPOINTS, MAX_CHECKPOINTS + 1, (num_curr,), device=self.device)
             self.num_checkpoints[curr_env_ids] = n_cps
             
-            # 3. CP 0 (Start)
-            cx = torch.rand(num_curr, device=self.device) * (WIDTH - 2*BORDER_BUFFER) + BORDER_BUFFER
-            cy = torch.rand(num_curr, device=self.device) * (HEIGHT - 2*BORDER_BUFFER) + BORDER_BUFFER
-            self.checkpoints[curr_env_ids, 0, 0] = cx
-            self.checkpoints[curr_env_ids, 0, 1] = cy
+            # 3. Select Generator Type
+            # 0: StarConvex (Circuit) -> 0% (Removed by user request)
+            # 1: GuidedWorm (Wild Worm) -> 35% (Rally)
+            # 2: MaxEntropy (Chaos) -> 65% (Pod Racing)
             
-            # 4. Generate Remaining CPs
-            map_failed = torch.zeros(num_curr, dtype=torch.bool, device=self.device)
+            probs = torch.tensor([0.0, 0.25, 0.75], device=self.device)
+            type_ids = torch.multinomial(probs, num_curr, replacement=True)
             
-            for i in range(1, MAX_CHECKPOINTS):
-                vals_needed = i < n_cps
-                if not vals_needed.any():
-                    break
-                    
-                need_mask = vals_needed & (~map_failed)
-                if not need_mask.any():
-                     continue
-
-                valid_placement = torch.zeros(num_curr, dtype=torch.bool, device=self.device)
-                BATCH_SIZE = 32
-                MAX_PLACEMENT_LOOPS = 5 # Reduced for Speed
+            # Star Convex (Disabled)
+            # t0_mask = (type_ids == 0)
+            # if t0_mask.any(): ...
                 
-                for loop in range(MAX_PLACEMENT_LOOPS):
-                    candidates_needed = need_mask & (~valid_placement)
-                    
-                    if not candidates_needed.any():
-                        break
-                        
-                    # Generate Candidates
-                    if self.curriculum_stage == STAGE_SOLO:
-                         prev_cp = self.checkpoints[curr_env_ids, i-1].unsqueeze(1) 
-                         theta = torch.rand(num_curr, BATCH_SIZE, device=self.device) * 2 * math.pi
-                         r = torch.rand(num_curr, BATCH_SIZE, device=self.device) * 3000.0 + 3000.0
-                         off_x = r * torch.cos(theta)
-                         off_y = r * torch.sin(theta)
-                         cands = prev_cp + torch.stack([off_x, off_y], dim=2)
-                         
-                         in_bounds = (cands[..., 0] > BORDER_BUFFER) & (cands[..., 0] < WIDTH - BORDER_BUFFER) & \
-                                     (cands[..., 1] > BORDER_BUFFER) & (cands[..., 1] < HEIGHT - BORDER_BUFFER)
-                    else:
-                         rx = torch.rand(num_curr, BATCH_SIZE, device=self.device) * (WIDTH - 2*BORDER_BUFFER) + BORDER_BUFFER
-                         ry = torch.rand(num_curr, BATCH_SIZE, device=self.device) * (HEIGHT - 2*BORDER_BUFFER) + BORDER_BUFFER
-                         cands = torch.stack([rx, ry], dim=2)
-                         in_bounds = torch.ones(num_curr, BATCH_SIZE, dtype=torch.bool, device=self.device)
-                         
-                    is_safe = in_bounds.clone()
-                    for j in range(i):
-                        prev = self.checkpoints[curr_env_ids, j].unsqueeze(1)
-                        diff = cands - prev
-                        dist_sq = (diff ** 2).sum(dim=2)
-                        is_safe = is_safe & (dist_sq > MIN_DIST**2)
-                        
-                    has_valid = is_safe.any(dim=1)
-                    success_mask = candidates_needed & has_valid
-                    
-                    if success_mask.any():
-                        valid_indices = is_safe.long().argmax(dim=1)
-                        sel_idx = valid_indices.view(-1, 1, 1).expand(-1, 1, 2)
-                        winners = cands.gather(1, sel_idx).squeeze(1)
-                        succ_idx_global = torch.nonzero(success_mask).squeeze(-1)
-                        self.checkpoints[curr_env_ids[succ_idx_global], i] = winners[succ_idx_global]
-                        valid_placement = valid_placement | success_mask
+            # Wild Worm
+            t1_mask = (type_ids == 1)
+            if t1_mask.any():
+                t1_ids = curr_env_ids[t1_mask]
+                t1_cnt = len(t1_ids)
+                cps_1 = TrackGenerator.generate_guided_worm(t1_cnt, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                self.checkpoints[t1_ids] = cps_1
                 
-                failed_this_step = need_mask & (~valid_placement)
-                if failed_this_step.any():
-                    map_failed = map_failed | failed_this_step
-            
-            # Integrity Check
-            for k_local in range(num_curr):
-               if not map_failed[k_local]:
-                   cnt = n_cps[k_local]
-                   cps = self.checkpoints[curr_env_ids[k_local], :cnt]
-                   if (cps == 0).all(dim=1).any():
-                       map_failed[k_local] = True
-            
-            active_mask[pending_idx] = map_failed
-
-        # Fallback: Procedural Path (Guaranteed Speed & Validity)
-        # Instead of a straight line, we generate a zig-zag or structured path.
-        if active_mask.any():
-            final_fail_idx = torch.nonzero(active_mask).squeeze(-1)
-            fail_env_ids = env_ids[final_fail_idx]
-            n_fail = len(fail_env_ids)
-            
-            # Set to 5 checkpoints for simplicity in fallback
-            self.num_checkpoints[fail_env_ids] = 5
-            self.checkpoints[fail_env_ids] = 0.0
-            
-            # Procedural Generation: Zig-Zag
-            # Start Left-Center
-            start_x = 2500.0
-            start_y = HEIGHT / 2.0
-            
-            # X Step: 3000
-            # Y Amplitude: +/- 2000
-            
-            # Generate random Y-direction per env: -1 or 1
-            y_dir = (torch.randint(0, 2, (n_fail,), device=self.device) * 2 - 1).float()
-            
-            for i in range(5):
-                px = start_x + (i * 3000.0)
-                # Alternate up/down offset
-                offset = (i % 2) * 2500.0 * y_dir # 0, 2500, 0, 2500...
-                
-                # Jitter (small random noise) to prevent overfitting
-                jitter_x = (torch.rand(n_fail, device=self.device) * 500.0) - 250.0
-                jitter_y = (torch.rand(n_fail, device=self.device) * 500.0) - 250.0
-                
-                py = start_y + offset + jitter_y
-                px = px + jitter_x
-                
-                # Clamp to be safe
-                px = torch.clamp(px, BORDER_BUFFER, WIDTH - BORDER_BUFFER)
-                py = torch.clamp(py, BORDER_BUFFER, HEIGHT - BORDER_BUFFER)
-                
-                self.checkpoints[fail_env_ids, i, 0] = px
-                self.checkpoints[fail_env_ids, i, 1] = py
+            # Max Entropy (Chaos)
+            t2_mask = (type_ids == 2)
+            if t2_mask.any():
+                t2_ids = curr_env_ids[t2_mask]
+                t2_cnt = len(t2_ids)
+                cps_2 = TrackGenerator.generate_max_entropy(t2_cnt, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                self.checkpoints[t2_ids] = cps_2
             
         # 2. Reset Pods
         # Start at CP0
@@ -289,7 +195,6 @@ class PodRacerEnv:
         self.timeouts[env_ids] = TIMEOUT_STEPS
         self.dones[env_ids] = False
         self.winners[env_ids] = -1
-        self.cp_reward_buffer[env_ids] = 0.0
         self.cps_passed[env_ids] = 0
         self.steps_last_cp[env_ids] = 0
         
@@ -361,17 +266,17 @@ class PodRacerEnv:
             # Select CP for each batch elt.
             # advanced indexing: cps[range, cp_idx]
             targets = cps[torch.arange(len(env_ids), device=self.device), cp_idx] # [N, 2]
-            
             curr_pos = self.physics.pos[env_ids, i]
             dist = torch.norm(targets - curr_pos, dim=1)
             self.prev_dist[env_ids, i] = dist
 
-    def step(self, actions, reward_weights=None, tau=0.0, beta=0.0):
+    def step(self, actions, reward_weights, tau=0.0, team_spirit=0.0):
         """
-        actions: [Batch, 4, 4] -> [Thrust, Angle, Shield, Boost]
-        reward_weights: Tensor [Batch, 10] (Optional, defaults to DEFAULT_REWARD_WEIGHTS)
-        tau: Scalar (Dense -> Sparse annealing)
-        beta: Scalar (Selfish -> Team annealing)
+        Stepping the Environment.
+        actions: [B, 4, 4] (Thrust, Angle, Shift, Boost)
+        reward_weights: [B, 11] (Per-environment weights, taken from Agent)
+        tau: float, Dense Reward Annealing factor (0.0 = Full Dense, 1.0 = Full Sparse)
+        team_spirit: float, 0.0=Selfish, 1.0=Cooperative. Blends rewards.
         """
         if reward_weights is None:
             # Construct default tensor
@@ -381,7 +286,7 @@ class PodRacerEnv:
             for k, v in DEFAULT_REWARD_WEIGHTS.items():
                 reward_weights[:, k] = v
         
-        # Aliases for readability
+        # Unpack weights [B, 11]
         w_win = reward_weights[:, RW_WIN]
         w_loss = reward_weights[:, RW_LOSS]
         w_checkpoint = reward_weights[:, RW_CHECKPOINT]
@@ -392,7 +297,28 @@ class PodRacerEnv:
         w_step_pen = reward_weights[:, RW_STEP_PENALTY]
         w_orient = reward_weights[:, RW_ORIENTATION]
         w_wrong_way = reward_weights[:, RW_WRONG_WAY]
-
+        w_col_mate = reward_weights[:, RW_COLLISION_MATE]
+        
+        # --- Team Spirit Blending ---
+        # Modify weights based on spirit
+        # Spirit 0.0 (Selfish): Base Weights.
+        # Spirit 1.0 (Cooperative): Boost Win/Loss, Reduce Checkpoint/Velocity (Individual stuff).
+        
+        # Win/Loss Multiplier: 1.0 + team_spirit (Doubles importance at full spirit)
+        w_win = w_win * (1.0 + team_spirit)
+        w_loss = w_loss * (1.0 + team_spirit)
+        
+        # Individual Multiplier: 1.0 - (0.5 * team_spirit) (Reduces to 50% at full spirit)
+        indiv_mult = 1.0 - (0.5 * team_spirit)
+        w_checkpoint = w_checkpoint * indiv_mult
+        w_chk_scale = w_chk_scale * indiv_mult
+        w_velocity = w_velocity * indiv_mult
+        
+        # Blocker/Team Interaction:
+        # Blocker Reward IS a team contribution, so maybe boost it?
+        # Collision Mate Penalty: Boost it (Don't hit friends!)
+        w_col_mate = w_col_mate * (1.0 + team_spirit)
+        
         # Unpack Actions & Clamp
         # Thrust: [0..1] -> [0..100]
         act_thrust = torch.clamp(actions[..., 0], 0.0, 1.0) * 100.0
@@ -403,56 +329,61 @@ class PodRacerEnv:
         # Boost: > 0.5
         act_boost = actions[..., 3] > 0.5
         
-        # --- Stage 2 (Duel) Bot Logic ---
-        if self.curriculum_stage == STAGE_DUEL:
-            # Override Opponent (Pod 2) actions with Simple Bot
-            # Bot: Steer towards next checkpoint
+        # --- Bot Logic for Stage 1 (Duel) & Stage 2 (Team) ---
+        if self.curriculum_stage == STAGE_DUEL or self.curriculum_stage == STAGE_TEAM:
+            # Stage Duel: Bot = Pod 2
+            # Stage Team: Bots = Pod 2, Pod 3
             
-            # Opp is index 2
-            # Get target
-            opp_nid = self.next_cp_id[:, 2]
-            batch_idx = torch.arange(self.num_envs, device=self.device)
-            target = self.checkpoints[batch_idx, opp_nid]
-            p_pos = self.physics.pos[:, 2]
+            bot_pods = [2]
+            if self.curriculum_stage == STAGE_TEAM:
+                bot_pods = [2, 3]
             
-            # Desired Angle
-            diff = target - p_pos
-            desired_rad = torch.atan2(diff[:, 1], diff[:, 0])
-            desired_deg = torch.rad2deg(desired_rad)
-            
-            # --- Dynamic Difficulty Scaling ---
-            # Difficulty 0.0: Thrust 60%, Steering Error +/- 15 deg
-            # Difficulty 1.0: Thrust 100%, Steering Error 0 deg
-            
-            # 1. Steering Noise
-            # Lower difficulty = More noise
-            # Noise range: (1.0 - diff) * 30.0
-            noise_scale = (1.0 - self.bot_difficulty) * 30.0
-            noise = (torch.rand(self.num_envs, device=self.device) * 2.0 - 1.0) * noise_scale
-            desired_deg += noise
-            
-            # Current Angle
-
-            curr_deg = self.physics.angle[:, 2]
-            
-            # Delta
-            delta = desired_deg - curr_deg
-            # Normalize -180..180
-            delta = (delta + 180) % 360 - 180
-            
-            # Clamp to -18..18
-            delta = torch.clamp(delta, -18.0, 18.0)
-            
-            # Set Actions
-            act_angle[:, 2] = delta
-            
-            # 2. Thrust Scaling
-            # 40 + (60 * diff)
-            thrust_val = 40.0 + (60.0 * self.bot_difficulty)
-            act_thrust[:, 2] = thrust_val 
-            
-            act_shield[:, 2] = False
-            act_boost[:, 2] = False
+            for bot_id in bot_pods:
+                # Override Actions with Simple Bot
+                # Bot: Steer towards next checkpoint
+                
+                # Get target
+                opp_nid = self.next_cp_id[:, bot_id]
+                batch_indices = torch.arange(self.num_envs, device=self.device)
+                target = self.checkpoints[batch_indices, opp_nid]
+                p_pos = self.physics.pos[:, bot_id]
+                
+                # Desired Angle
+                diff = target - p_pos
+                desired_rad = torch.atan2(diff[:, 1], diff[:, 0])
+                desired_deg = torch.rad2deg(desired_rad)
+                
+                # --- Dynamic Difficulty Scaling ---
+                # Difficulty 0.0: Thrust 60%, Steering Error +/- 15 deg
+                # Difficulty 1.0: Thrust 100%, Steering Error 0 deg
+                
+                # 1. Steering Noise
+                # Lower difficulty = More noise
+                noise_scale = (1.0 - self.bot_difficulty) * 30.0
+                noise = (torch.rand(self.num_envs, device=self.device) * 2.0 - 1.0) * noise_scale
+                desired_deg += noise
+                
+                # Current Angle
+                curr_deg = self.physics.angle[:, bot_id]
+                
+                # Delta
+                delta = desired_deg - curr_deg
+                # Normalize -180..180
+                delta = (delta + 180) % 360 - 180
+                
+                # Clamp to -18..18
+                delta = torch.clamp(delta, -18.0, 18.0)
+                
+                # Set Actions
+                act_angle[:, bot_id] = delta
+                
+                # 2. Thrust Scaling
+                # 20 + (80 * diff)
+                thrust_val = 20.0 + (80.0 * self.bot_difficulty)
+                act_thrust[:, bot_id] = thrust_val 
+                
+                act_shield[:, bot_id] = False
+                act_boost[:, bot_id] = False
         
         # Track Previous Position for Continuous Collision Detection (CCD)
         prev_pos = self.physics.pos.clone()
@@ -499,34 +430,42 @@ class PodRacerEnv:
              # Just ensure bot logic doesn't crash
              pass
 
-        delta = self.prev_dist - new_dists
-        # velocity weight is per agent/env.
+        # v. Change to Dot Product Velocity Reward
+        # Reward = Velocity dot TargetDirection
+        # This encourages moving TOWARDS the target explicitly.
+        
+        # We need Target Dir [B, 4, 2]
+        # new_dists is [B, 4]
+        # We need 'diff' vector from the loop above?
+        # Let's re-compute vectorized for safety/clarity.
+        
+        # Gather Target Pos [B, 4, 2]
+        batch_indices = torch.arange(self.num_envs, device=self.device).unsqueeze(1).expand(-1, 4)
+        target_pos_all = self.checkpoints[batch_indices, self.next_cp_id]
+        
+        # Diff
+        diff_vec = target_pos_all - self.physics.pos # [B, 4, 2]
+        dist_vec = torch.norm(diff_vec, dim=2, keepdim=True) + 1e-5
+        target_dir = diff_vec / dist_vec # [B, 4, 2] Normalized
+        
+        # Project Velocity
+        # Vel: [B, 4, 2]
+        vel_proj = (self.physics.vel * target_dir).sum(dim=2) # [B, 4] scalars
+        
+        # Apply Weights
         # w_velocity is [B]
+        # scale is [B, 1]
+        scale = w_velocity.unsqueeze(1)
         
-        # SOTA: Potential-Based Reward Shaping
-        # Reward = Phi(s') - Phi(s)
-        # Here, Phi(s) = -DistanceToTarget
-        # So Reward = (-NewDist) - (-PrevDist) = PrevDist - NewDist = delta
-        # This guarantees optimal policy invariance compared to dense heuristics.
+        v_scaled = vel_proj * scale
         
-        weighted_delta = delta
-        
-        scale = w_velocity.unsqueeze(1) # [B, 1] broadcast to 4 pods?
-        # rewards is [B, 2]. Delta is [B, 4].
-        # We sum delta for pods 0+1 and 2+3.
-        # Need to apply weight first.
-        
-        d_scaled = weighted_delta * scale
-        
-        
-        # Annealing (tau)
+        # Annealing
         dense_mult = (1.0 - tau)
-        # dense_mult is scalar or tensor? Assumed scalar for now.
         if isinstance(dense_mult, torch.Tensor):
              dense_mult = dense_mult.squeeze()
-             
-        rewards[:, 0] += (d_scaled[:, 0] + d_scaled[:, 1]) * dense_mult
-        rewards[:, 1] += (d_scaled[:, 2] + d_scaled[:, 3]) * dense_mult
+
+        rewards[:, 0] += (v_scaled[:, 0] + v_scaled[:, 1]) * dense_mult
+        rewards[:, 1] += (v_scaled[:, 2] + v_scaled[:, 3]) * dense_mult
 
         # Orientation Reward (Guide to face next checkpoint)
         # ------------------------------------------------
@@ -812,8 +751,10 @@ class PodRacerEnv:
                 self.steps_last_cp[pass_idx, i] = 0
                 
                 # --- TIME EXTENSION ---
-                # Reset Timeout for this pod
+                # Reset Timeout for this pod AND Teammate (Team Shared Timer)
                 self.timeouts[pass_idx, i] = TIMEOUT_STEPS
+                mate_idx = i ^ 1
+                self.timeouts[pass_idx, mate_idx] = TIMEOUT_STEPS
                 
                 base_reward = w_checkpoint[pass_idx]
                 scale_reward = w_chk_scale[pass_idx]
@@ -826,8 +767,9 @@ class PodRacerEnv:
                 
                 total_reward = base_reward + (streak - 1.0) * scale_reward
                 
-                # Add to buffer for the specific POD
-                self.cp_reward_buffer[pass_idx, i] += total_reward
+                # DIRECT REWARD (No Splitting)
+                team = i // 2
+                rewards[pass_idx, team] += total_reward
                 
                 # Correction for Dense Reward Overshoot
                 # If we passed, we reached the target (distance 0). 
@@ -840,28 +782,9 @@ class PodRacerEnv:
                 # Overshoot correction should be immediate? 
                 # Yes, it's a correction for THIS step's dense calculation.
                 # correction for THIS step's dense calculation.
-                team = i // 2
+                # Team already defined above
                 rewards[pass_idx, team] += overshoot_dist * scale[pass_idx, 0] * dense_mult # scale is [B,1]
         
-        # --- Payout Checkpoint Buffer ---
-        # Spread over 10 steps
-        PAYOUT_STEPS = 10.0
-        # --- Payout Checkpoint Buffer ---
-        # Spread over 10 steps
-        PAYOUT_STEPS = 10.0
-        payout_chunk = w_checkpoint / PAYOUT_STEPS # [B]
-        payout_chunk = payout_chunk.unsqueeze(1) # [B, 1] for keying
-        
-        # Calculated actual payout (min of remaining or chunk)
-        # Apply to all pods
-        payout = torch.min(self.cp_reward_buffer, payout_chunk) # min works elementwise
-        self.cp_reward_buffer -= payout
-        
-        # Add to Team Rewards
-        # Team 0: 0, 1
-        rewards[:, 0] += payout[:, 0] + payout[:, 1]
-        rewards[:, 1] += payout[:, 2] + payout[:, 3]
-
         # Increment Step Counter for Efficiency
         self.steps_last_cp += 1
 
@@ -954,8 +877,26 @@ class PodRacerEnv:
                 self.stage_metrics["recent_wins"] += n_wins
                 self.stage_metrics["recent_games"] += n_games
 
+            elif self.curriculum_stage == STAGE_TEAM:
+                # Team Mode: Winner = 0 means Team 0 won?
+                # winner tensor is 0 if Team 0 won, 1 if Team 1 won.
+                # "winners" logic needs verification:
+                # Currently winners = team_idx (0 or 1).
+                
+                n_wins = mask_w0.sum().item() # Number of Team 0 wins
+                n_games = env_won.sum().item() # Total games finished
+                
+                self.stage_metrics["recent_wins"] += n_wins
+                self.stage_metrics["recent_games"] += n_games
+
         # Update Progress Metric for Next Step
         self.update_progress_metric(torch.arange(self.num_envs, device=self.device))
+        
+        # --- Update Game Counts (Wins + Timeouts) ---
+        # We count ALL finished episodes for win rate calculation (Timeouts = Loss)
+        num_dones = self.dones.sum().item()
+        if num_dones > 0:
+             self.stage_metrics["recent_episodes"] += num_dones
         
         # --- Role Specific Collision Rewards ---
         # collisions: [B, 4, 4] magnitudes
@@ -1008,10 +949,31 @@ class PodRacerEnv:
             blocker_reward = w_col_block * bonus
             
             self.rewards[:, team] += blocker_reward * is_block.float()
+        
+            # 3. Teammate Collision Penalty
+            # Defined as collision with my mate
+            # mate_idx logic: 
+            # if i is 0, mate is 1. If 1, mate is 0. 
+            # if 2, mate 3. if 3, mate 2.
+            # mate_idx = i ^ 1
+            mate_idx = i ^ 1
+            impact_mate = collisions[:, i, mate_idx] # [B]
+            
+            mate_pen = -w_col_mate * impact_mate
+            self.rewards[:, team] += mate_pen
             
         # Update Roles for Next Step
         all_ids = torch.arange(self.num_envs, device=self.device)
         self._update_roles(all_ids)
+
+        # --- DEBUG: Monitor Pod 0 (Team 0) ---
+        # Only print for Env 0 every 10 steps to reduce spam
+        if self.curriculum_stage == STAGE_TEAM: # Uncomment to debug
+            e0_role = "RUNNER" if self.is_runner[0, 0] else "BLOCKER"
+            e0_dist = self.prev_dist[0, 0].item()
+            e0_thrust = act_thrust[0, 0].item()
+            e0_angle = act_angle[0, 0].item()
+            print(f"Step {self.laps[0,0]}:{self.next_cp_id[0,0]} | Pod0 ({e0_role}): Dist {e0_dist:.1f} | Act: Thr {e0_thrust:.1f} Ang {e0_angle:.1f}")
 
 
         return rewards, self.dones.clone(), infos

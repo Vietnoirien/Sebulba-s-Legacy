@@ -14,12 +14,13 @@ MAX_TURN_DEGREES = 18.0
 # Training / Environment Constants
 MAX_LAPS = 3
 TIMEOUT_STEPS = 100
-MAX_CHECKPOINTS = 8
+MAX_CHECKPOINTS = 6
 MIN_CHECKPOINTS = 3
 # Curriculum Stages
 STAGE_SOLO = 0
 STAGE_DUEL = 1
-STAGE_LEAGUE = 2
+STAGE_TEAM = 2
+STAGE_LEAGUE = 3
 
 # Graduation Thresholds (Stage 0 -> 1)
 # Efficiency: Avg Steps per Checkpoint (Lower is better). 30 = ~Decent driving.

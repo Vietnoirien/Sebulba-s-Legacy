@@ -19,7 +19,7 @@ from simulation.env import (
     PodRacerEnv, 
     RW_WIN, RW_LOSS, RW_CHECKPOINT, RW_CHECKPOINT_SCALE, 
     RW_VELOCITY, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
-    RW_STEP_PENALTY, RW_ORIENTATION, RW_WRONG_WAY,
+    RW_STEP_PENALTY, RW_ORIENTATION, RW_WRONG_WAY, RW_COLLISION_MATE,
     DEFAULT_REWARD_WEIGHTS
 )
 from models.deepsets import PodAgent
@@ -64,8 +64,8 @@ class PPOTrainer:
         self.generation = 0
         self.iteration = 0
         
-        # Reward Tensors [4096, 10]
-        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 10), device=self.device)
+        # Reward Tensors [4096, 11]
+        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 11), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((14,), device=self.device)
@@ -155,28 +155,29 @@ class PPOTrainer:
         # Dynamic Hyperparameters
         self.current_num_steps = 256 # Start with Stage 0 default
         self.current_evolve_interval = 2 # Start with Stage 0 default
+        self.current_active_pods_count = 1 # Start with Stage 0 default
         self.agent_batches = [] 
         
         # Difficulty Adjustment State
         self.failure_streak = 0
+        self.grad_consistency_counter = 0
+        self.team_spirit = 0.0 # Blending factor for rewards (0.0=Selfish, 1.0=Cooperative)
         
         # Allocate Initial Buffers
         self.allocate_buffers()
 
     def allocate_buffers(self):
         """Allocates or Re-allocates batch buffers based on current_num_steps"""
-        self.log(f"Allocating buffers for {self.current_num_steps} steps per iteration...")
+        active_pods = self.get_active_pods()
+        self.current_active_pods_count = len(active_pods)
+        self.log(f"Allocating buffers for {self.current_num_steps} steps per iteration. Active Pods: {self.current_active_pods_count}")
         
         # Decide Active Pods Max (Assume max 2 for buffer sizing to be safe, or separate?)
         # Buffers are per AGENT.
         # Envs per agent = 128.
         # Max pods per env = 2 (League).
         
-        stage = self.env.curriculum_stage
-        if stage == STAGE_SOLO or stage == STAGE_DUEL:
-            num_active_pods = 1
-        else: # LEAGUE
-            num_active_pods = 2
+        num_active_pods = self.current_active_pods_count
             
         # Total batch dimension = Steps * EnvsPerAgent * NumActivePods
         num_active_per_agent_step = num_active_pods * ENVS_PER_AGENT
@@ -213,7 +214,8 @@ class PPOTrainer:
                  "checkpoint": w[RW_CHECKPOINT], "checkpoint_scale": w[RW_CHECKPOINT_SCALE],
                  "velocity": w[RW_VELOCITY], "collision_runner": w[RW_COLLISION_RUNNER],
                  "collision_blocker": w[RW_COLLISION_BLOCKER], "step_penalty": w[RW_STEP_PENALTY],
-                 "orientation": w[RW_ORIENTATION], "wrong_way_alpha": w[RW_WRONG_WAY]
+                 "orientation": w[RW_ORIENTATION], "wrong_way_alpha": w[RW_WRONG_WAY],
+                 "collision_mate": w[RW_COLLISION_MATE]
              }
         }
 
@@ -262,7 +264,8 @@ class PPOTrainer:
             pass
 
     def check_curriculum(self):
-        if self.curriculum_mode == "manual": return
+        # if self.curriculum_mode == "manual": return # Removed to allow logging
+
         metrics = self.env.stage_metrics
         stage = self.env.curriculum_stage
         
@@ -284,30 +287,144 @@ class PPOTrainer:
             
             if avg_eff < STAGE_SOLO_EFFICIENCY_THRESHOLD and avg_cons > STAGE_SOLO_CONSISTENCY_THRESHOLD:
                 self.log(f">>> GRADUATION: Top Agents Avg Eff {avg_eff:.1f}, Cons {avg_cons:.1f} <<<")
-                self.env.curriculum_stage = STAGE_DUEL
-                self.env.bot_difficulty = 0.0
+                if self.curriculum_mode == "auto":
+                    self.env.curriculum_stage = STAGE_DUEL
+                    self.env.bot_difficulty = 0.0
 
         elif stage == STAGE_DUEL:
             # Dynamic Difficulty
-            rec_games = metrics["recent_games"]
-            if rec_games > 1000: # Check every 1k games
+            # Check every 1k EPISODES (including timeouts)
+            rec_episodes = metrics.get("recent_episodes", 0)
+            if rec_episodes == 0:
+                 # Fallback for old env code or if not populated yet
+                 rec_episodes = metrics["recent_games"]
+
+            if rec_episodes > 1000: 
                 rec_wins = metrics["recent_wins"]
-                rec_wr = rec_wins / rec_games
+                rec_games = metrics["recent_games"] # Valid finished games
+                
+                if rec_episodes > 0:
+                    rec_wr = rec_wins / rec_episodes
+                else:
+                    rec_wr = 0.0 # All Timeouts = 0% Win Rate
                 
                 # Reset Recent
                 metrics["recent_games"] = 0
                 metrics["recent_wins"] = 0
+                metrics["recent_episodes"] = 0
                 
-                self.log(f"Stage 1 Check: Recent WR {rec_wr:.2f} (Diff: {self.env.bot_difficulty:.2f})")
+                self.log(f"Stage 1 Check: Recent WR {rec_wr:.2f} (Games: {rec_games}/{rec_episodes}) (Diff: {self.env.bot_difficulty:.2f})")
                 
                 if rec_wr < 0.30:
                     # Critical Failure: Immediate Regression
-                    self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
+                    if self.curriculum_mode == "auto":
+                        self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
+                        self.log(f"-> Critical Regression (WR < 30%): Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                    else:
+                        self.log(f"-> Critical Regression (WR < 30%): [Manual] Suggested Diff: {max(0.0, self.env.bot_difficulty - 0.05):.2f}")
+                    
                     self.failure_streak = 0 # Reset streak modification
-                    self.log(f"-> Critical Regression (WR < 30%): Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
                     
                 elif rec_wr < 0.40:
                     # Warning Zone: Regression only if persistent
+                    self.failure_streak += 1
+                    self.log(f"-> Warning Zone (WR < 40%): Streak {self.failure_streak}/2")
+                    
+                    if self.failure_streak >= 2:
+                        if self.curriculum_mode == "auto":
+                            self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
+                            self.log(f"-> Persistent Failure: Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                        else:
+                            self.log(f"-> Persistent Failure: [Manual] Suggested Diff: {max(0.0, self.env.bot_difficulty - 0.05):.2f}")
+                        self.failure_streak = 0
+                
+                else:
+                    # Winning enough to stabilize or progress
+                    self.failure_streak = 0
+                    
+
+                    new_diff = self.env.bot_difficulty
+                    if rec_wr > 0.99:
+                        new_diff = min(1.0, self.env.bot_difficulty + 0.50)
+                        msg = "Insane Turbo"
+                    elif rec_wr > 0.98:
+                        new_diff = min(1.0, self.env.bot_difficulty + 0.20)
+                        msg = "Super Turbo"
+                    elif rec_wr > 0.90:
+                        new_diff = min(1.0, self.env.bot_difficulty + 0.10)
+                        msg = "Turbo"
+                    elif rec_wr > 0.70:
+                        new_diff = min(1.0, self.env.bot_difficulty + 0.05)
+                        msg = "Standard"
+                    else:
+                        msg = None
+
+                    if msg:
+                         if self.curriculum_mode == "auto":
+                             self.env.bot_difficulty = new_diff
+                             self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                         else:
+                             self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
+                
+                # Graduation Check
+                # SOTA Update: Smoother transition.
+                # Threshold: > 0.84 ONCE or > 0.82 for 5 sequential checks at difficulty 1.0.
+                if self.env.bot_difficulty >= 1.0:
+                    should_graduate = False
+                    reason = ""
+                    if rec_wr > 0.82:
+                        self.grad_consistency_counter += 1
+                    else:
+                        self.grad_consistency_counter = 0
+
+                    if rec_wr >= 0.84 and self.grad_consistency_counter >= 2:
+                        should_graduate = True
+                        reason = f"WR {rec_wr:.2f} >= 0.84"
+                    elif self.grad_consistency_counter >= 5:
+                        should_graduate = True
+                        reason = f"WR > 0.82 for 5 checks (Last: {rec_wr:.2f})"
+                        
+                    if should_graduate:
+                         self.log(f">>> UPGRADING TO STAGE 2: TEAM ({reason}) <<<")
+                         if self.curriculum_mode == "auto":
+                             self.env.curriculum_stage = STAGE_TEAM
+                             self.env.bot_difficulty = 0.0 # Reset difficulty for new stage
+                             
+                             # Reset Metrics for new stage
+                             self.env.stage_metrics["recent_games"] = 0
+                             self.env.stage_metrics["recent_wins"] = 0
+                             self.env.stage_metrics["recent_episodes"] = 0
+                         
+        elif stage == STAGE_TEAM:
+            # Dynamic Difficulty (Same Logic as Duel but for 2v2)
+            rec_episodes = metrics.get("recent_episodes", 0)
+            if rec_episodes == 0: rec_episodes = metrics["recent_games"]
+
+            if rec_episodes > 1000: 
+                rec_wins = metrics["recent_wins"]
+                rec_games = metrics["recent_games"]
+                
+                if rec_episodes > 0:
+                    rec_wr = rec_wins / rec_episodes
+                else:
+                    rec_wr = 0.0
+                
+                # Reset Recent
+                metrics["recent_games"] = 0
+                metrics["recent_wins"] = 0
+                metrics["recent_episodes"] = 0
+                
+                self.log(f"Stage 2 (Team) Check: Recent WR {rec_wr:.2f} (Games: {rec_games}/{rec_episodes}) (Diff: {self.env.bot_difficulty:.2f})")
+                
+                if rec_wr < 0.30:
+                    if self.curriculum_mode == "auto":
+                        self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
+                        self.log(f"-> Critical Regression (WR < 30%): Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                    else:
+                        self.log(f"-> Critical Regression (WR < 30%): [Manual] Suggested Diff: {max(0.0, self.env.bot_difficulty - 0.05):.2f}")
+                    self.failure_streak = 0
+                    
+                elif rec_wr < 0.40:
                     self.failure_streak += 1
                     self.log(f"-> Warning Zone (WR < 40%): Streak {self.failure_streak}/2")
                     
@@ -317,31 +434,73 @@ class PPOTrainer:
                         self.log(f"-> Persistent Failure: Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
                 
                 else:
-                    # Winning enough to stabilize or progress
                     self.failure_streak = 0
                     
+                    new_diff = self.env.bot_difficulty
                     if rec_wr > 0.98:
-                        # Super Turbo Progression: Dominating
-                        self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.20)
-                        self.log(f"-> Super Turbo: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                        new_diff = min(1.0, self.env.bot_difficulty + 0.20)
+                        msg = "Super Turbo"
                     elif rec_wr > 0.90:
-                        # Turbo Progression: Crushing it
-                        self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.10)
-                        self.log(f"-> Turbo: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                        new_diff = min(1.0, self.env.bot_difficulty + 0.10)
+                        msg = "Turbo"
                     elif rec_wr > 0.70:
-                        # Standard Progression
-                        self.env.bot_difficulty = min(1.0, self.env.bot_difficulty + 0.05)
-                        self.log(f"-> Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                        new_diff = min(1.0, self.env.bot_difficulty + 0.05)
+                        msg = "Standard"
+                    else:
+                        msg = None
+                    
+                    if msg:
+                        if self.curriculum_mode == "auto":
+                            self.env.bot_difficulty = new_diff
+                            self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
+                        else:
+                            self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
                 
-                # Graduation Check
-                if self.env.bot_difficulty >= 1.0 and rec_wr > 0.85:
-                     self.log(f">>> UPGRADING TO STAGE 3: LEAGUE (WR: {rec_wr:.2f}) <<<")
-                     self.env.curriculum_stage = STAGE_LEAGUE
+                # Graduation Check (To League)
+                if rec_wr > 0.85: # Slightly higher bar for 2v2 mastery
+                    self.grad_consistency_counter += 1
+                else:
+                    self.grad_consistency_counter = 0
+                    
+                if self.env.bot_difficulty >= 1.0:
+                    should_graduate = False
+                    reason = ""
+                    
+                    if rec_wr >= 0.88:
+                        should_graduate = True
+                        reason = f"WR {rec_wr:.2f} >= 0.88"
+                    elif self.grad_consistency_counter >= 5:
+                        should_graduate = True
+                        reason = f"WR > 0.85 for 5 checks (Last: {rec_wr:.2f})"
+                        
+                    if should_graduate:
+                         self.log(f">>> UPGRADING TO STAGE 3: LEAGUE ({reason}) <<<")
+                         if self.curriculum_mode == "auto":
+                             self.env.curriculum_stage = STAGE_LEAGUE
+                             
+                             # Reset Metrics for new stage
+                             self.env.stage_metrics["recent_games"] = 0
+                             self.env.stage_metrics["recent_wins"] = 0
+                             self.env.stage_metrics["recent_episodes"] = 0
+        
+        # --- Team Spirit Update ---
+        if stage < STAGE_TEAM:
+            self.team_spirit = 0.0
+        elif stage == STAGE_TEAM:
+            # Anneal based on Difficulty or WR?
+            # Let's link it to Difficulty (which proxies capability).
+            # Diff 0.0 -> Spirit 0.0
+            # Diff 1.0 -> Spirit 0.5
+            target_spirit = self.env.bot_difficulty * 0.5
+            self.team_spirit = target_spirit
+        else: # LEAGUE
+            self.team_spirit = 1.0
 
     def get_active_pods(self):
         stage = self.env.curriculum_stage
         if stage == STAGE_SOLO: return [0]
         elif stage == STAGE_DUEL: return [0]
+        elif stage == STAGE_TEAM: return [0, 1]
         else: return [0, 1]
 
     def evolve_population(self):
@@ -367,6 +526,14 @@ class PPOTrainer:
             
             # Extract other raw metrics
             wins = p['wins']
+            matches = p.get('matches', 0)
+            
+            # PBT Win Rate Calculation (Safe Division)
+            if matches > 0:
+                win_rate = float(wins) / float(matches)
+            else:
+                win_rate = 0.0
+            
             laps = p['laps_score']
             checkpoints = p['checkpoints_score']
             
@@ -392,7 +559,7 @@ class PPOTrainer:
                 return alpha * current_val + (1.0 - alpha) * old_ema
                 
             p['ema_efficiency'] = update_ema(prof_score, p['ema_efficiency'], self.ema_alpha)
-            p['ema_wins'] = update_ema(float(wins), p['ema_wins'], self.ema_alpha)
+            p['ema_wins'] = update_ema(win_rate, p['ema_wins'], self.ema_alpha)
             p['ema_consistency'] = update_ema(float(checkpoints), p['ema_consistency'], self.ema_alpha)
             p['ema_laps'] = update_ema(float(laps), p['ema_laps'], self.ema_alpha)
             
@@ -439,13 +606,17 @@ class PPOTrainer:
                 ]
                 objectives_list.append(obj)
                 
-        elif stage == STAGE_DUEL:
+        elif stage == STAGE_DUEL or stage == STAGE_TEAM:
             # Objectives:
-            # 1. Wins (EMA Wins) -> Max
+            # 1. Win Rate (EMA Win Rate) -> Max
             # 2. Efficiency -> Minimize
             # 3. Novelty -> Max
             
             for p in self.population:
+                # ema_wins now tracks Win Rate (0.0 to 1.0)
+                # Scale it up for numerical parity? (e.g. 100.0) 
+                # NSGA-II doesn't strictly need scaling but it helps interpretation.
+                # Let's keep raw 0-1.
                 obj = [
                     p['ema_wins'],
                     -p['ema_efficiency'],
@@ -453,11 +624,14 @@ class PPOTrainer:
                 ]
                 objectives_list.append(obj)
         else: # LEAGUE
-             # Wins, Laps, Efficiency
+             # Objectives:
+             # 1. Win Rate (EMA Win Rate) -> Max
+             # 2. Laps (EMA Laps) -> Max
+             # 3. Efficiency (EMA Proficiency) -> Minimize (So Maximize -EMA)
              for p in self.population:
                 obj = [
-                    p['ema_wins'],
-                    p['ema_laps'],
+                    p['ema_wins'], # Win Rate
+                    p['ema_laps'], # Raw Laps
                     -p['ema_efficiency']
                 ]
                 objectives_list.append(obj)
@@ -605,7 +779,7 @@ class PPOTrainer:
                         "wins_ema": p.get('ema_wins', 0.0),
                         "novelty": p.get('novelty_score', 0.0)
                     }
-                    self.league.register_agent(league_name, save_path, 0, metrics=metrics)
+                    self.league.register_agent(league_name, save_path, self.generation, metrics=metrics)
             # END SOTA UPDATE
                 
         # Save Normalization Stats (Global)
@@ -699,6 +873,11 @@ class PPOTrainer:
                         # Identify ID from path
                         self.current_opponent_id = os.path.basename(opp_path).replace(".pt", "")
                         self.log(f"⚔️  LEAGUE MATCH: Population vs {self.current_opponent_id} ⚔️")
+                        
+                        # Snapshot for PFSP Update
+                        self.iteration_start_wins = self.population[self.leader_idx]['wins']
+                        self.iteration_start_matches = self.population[self.leader_idx]['matches']
+                        
                     except Exception as e:
                         self.log(f"Failed to load opponent {opp_path}: {e}")
                         self.opponent_agent_loaded = False
@@ -715,14 +894,36 @@ class PPOTrainer:
             if current_stage == STAGE_SOLO:
                 target_steps = 256
                 target_evolve = 2
-            else: # STAGE_DUEL or STAGE_LEAGUE
+            elif current_stage == STAGE_DUEL:
                 target_steps = 512
-                target_evolve = 1
-                
+                target_evolve = 4
+            else: # STAGE_TEAM or STAGE_LEAGUE
+                target_steps = 256
+                target_evolve = 8
+            
+            # Check Active Pods Change
+            current_active_pods_ids = self.get_active_pods()
+            active_count = len(current_active_pods_ids)
+            
+            needs_realloc = False
+            
             if target_steps != self.current_num_steps:
                  self.log(f"Stage Change Triggered Config Update: Steps {self.current_num_steps} -> {target_steps}")
                  self.current_num_steps = target_steps
+                 needs_realloc = True
+                 
+            if active_count != self.current_active_pods_count:
+                 self.log(f"Stage Change Triggered Config Update: Active Pods {self.current_active_pods_count} -> {active_count}")
+                 needs_realloc = True
+
+            # DEBUG LOG
+            if current_stage == STAGE_TEAM and self.current_active_pods_count == 1:
+                self.log(f"DEBUG: Stage IS Team, but Alloc Count is 1. Active Count: {active_count}. Needs Realloc: {needs_realloc}")
+
+            if needs_realloc:
+                 self.log("DEBUG: Calling allocate_buffers()...")
                  self.allocate_buffers() # Re-allocate
+                 self.log(f"DEBUG: New Batch Shape: {self.agent_batches[0]['self_obs'].shape}")
                  
             if target_evolve != self.current_evolve_interval:
                  self.log(f"Config Update: Evolve Interval {self.current_evolve_interval} -> {target_evolve}")
@@ -830,76 +1031,56 @@ class PPOTrainer:
                 # We need to map back to env structure
                 
                 # Simple logic:
-                # If Solo: Active=[0]. full_actions[i] is [512, 4].
-                # Combine to [4096, 4] for Pod 0.
-                combined_act0 = torch.cat(full_actions, dim=0) # [4096 * n_pods, 4]
+                if len(active_pods) == 1:
+                     combined_act0 = torch.cat(full_actions, dim=0) # [4096, 4]
+                     act_map = { active_pods[0]: combined_act0 }
+                else:
+                     combined_act0 = torch.cat(full_actions, dim=0) # [4096 * 2, 4] (stacked)
+                     chunks = torch.chunk(combined_act0, len(active_pods), dim=0)
+                     act_map = { pid: c for pid, c in zip(active_pods, chunks) }
                 
-                # Opponents? For PBT and League, we implement Fictitious Self-Play (FSP)
-                # If active_pods has > 1 pod (i.e. League/Duel), Pod 1 is the Opponent.
+                # Check for League Mode Opponent Logic (Stage 2: 2v2)
+                if self.env.curriculum_stage >= STAGE_LEAGUE:
+                     # We need to control Pods [2, 3] (Opponent Team).
+                     # Strategy:
+                     # 1. Use League Opponent if available.
+                     # 2. Else: Use Self-Play (Current Agent).
 
-                # Determine actions for Pod 1 (Opponent)
-                # Strategy:
-                # 1. If self.opponent_agent is loaded (from League), use it.
-                # 2. Else (e.g. Solo or early training), use PBT Agent (Mirror Self-Play) or zeroes if inactive.
-                
-                # Check if we are in League Mode/Duel and have an opponent loaded
-                # We need to handle this per-agent? 
-                # Currently self.opponent_agent is a single global agent loaded for the iteration.
-                # This means ALL agents play against the SAME League Opponent for this iteration.
-                # This is standard for PBT (uniform evaluation).
-                
-                opponent_actions = None
-                if len(active_pods) > 1 and hasattr(self, 'opponent_agent_loaded') and self.opponent_agent_loaded:
-                     # Opponent Inference (No Grad)
-                     # Opponent Obs should be the ones for Pod 1.
-                     # But our normalization 'norm_self' is [N_Active, NUM_ENVS, 14].
-                     # Pod 1 is at index 1 of dim 0.
+                     use_league_opp = hasattr(self, 'opponent_agent_loaded') and self.opponent_agent_loaded
                      
-                     if len(active_pods) > 1:
-                         # Extraction for Opponent
-                         # We use the GLOBAL normalization stats for the opponent too? 
-                         # Yes, assume same environment dynamics.
-                         
-                         # Get Pod 1 Obs (All Envs)
-                         # Shape: [NUM_ENVS, 14] at Index 1
-                         opp_self = norm_self[1] 
-                         opp_ent = norm_ent[1]
-                         opp_cp = norm_cp[1]
-                         
-                         # Inference
-                         with torch.no_grad():
-                             # Opponent Agent Action
-                             # Note: Opponent agent is a single instance, not a population.
-                             # We run it on the FULL BATCH of envs (4096).
-                             # It plays against ALL population members simultaneously.
-                             o_act, _, _, _ = self.opponent_agent.get_action_and_value(opp_self, opp_ent, opp_cp)
-                             opponent_actions = o_act # [NUM_ENVS, 4]
+                     # Opponent controls Pods 2 and 3
+                     opp_indices = [2, 3] 
+                     
+                     # Extract Raw Obs for Opponent from GLOBAL obs tensors (all_self has 4 pods)
+                     opp_raw_self = all_self[opp_indices].view(-1, 14)
+                     opp_raw_ent = all_ent[opp_indices].view(-1, 3, 13)
+                     opp_raw_cp = all_cp[opp_indices].view(-1, 6)
+                     
+                     # Normalize (Fixed stats)
+                     opp_norm_self = self.rms_self(opp_raw_self, fixed=True)
+                     
+                     B_o, N_o, D_o = opp_raw_ent.shape
+                     opp_norm_ent = self.rms_ent(opp_raw_ent.view(-1, D_o), fixed=True).view(B_o, N_o, D_o)
+                     opp_norm_cp = self.rms_cp(opp_raw_cp, fixed=True)
+                     
+                     with torch.no_grad():
+                         if use_league_opp:
+                             o_act_stacked, _, _, _ = self.opponent_agent.get_action_and_value(opp_norm_self, opp_norm_ent, opp_norm_cp)
+                         else:
+                             # Fallback: Mirror Self-Play
+                             # Use current Leader Agent (self.agent)
+                             o_act_stacked, _, _, _ = self.agent.get_action_and_value(opp_norm_self, opp_norm_ent, opp_norm_cp)
+                     
+                     # Split actions back to Pod 2 and 3
+                     o_act_chunks = torch.chunk(o_act_stacked, 2, dim=0)
+                     act_map[2] = o_act_chunks[0]
+                     act_map[3] = o_act_chunks[1]
                 
-                # Now construct 'env_actions' [NUM_ENVS, 4, 4]
-                # We need to combine PBT Agent actions (Pod 0) and Opponent actions (Pod 1).
-                
-                # 'act_map' currently holds chunks from 'combined_act0' which was PBT Agent logic.
-                # PBT Agent logic produced actions for ALL active pods (Mirror Self Play).
-                # We want to OVERRIDE Pod 1 actions if we have a League Opponent.
-                
-                # Current chunks logic:
-                # combined_act0 was [4096 * len(active), 4].
-                # It was result of stacking actions from PBT agents for Pod 0 AND Pod 1.
-                # chunks split it back to [Pod0_Actions, Pod1_Actions].
-                
-                chunks = torch.chunk(combined_act0, len(active_pods), dim=0)
-                act_map = { pid: c for pid, c in zip(active_pods, chunks) }
-                
-                # Override Pod 1 if League Opponent is Active
-                if opponent_actions is not None:
-                    # Pod 1 is index 1
-                    if 1 in active_pods:
-                        act_map[1] = opponent_actions
-
+                # Construct Global Action Tensor
                 env_actions = torch.zeros((NUM_ENVS, 4, 4), device=self.device)
                 
-                for pid in active_pods:
-                    env_actions[:, pid] = act_map[pid]
+                for pid, act in act_map.items():
+                    env_actions[:, pid] = act
 
                 
                 # Calculate Tau (Dense Reward Annealing)
@@ -918,7 +1099,7 @@ class PPOTrainer:
                 # info is dictionary now
                 # rewards is [NUM_ENVS, 2] (Team 0, Team 1)
                 # dones is [NUM_ENVS]
-                rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau)
+                rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau, team_spirit=self.team_spirit)
                 
                 # Extract Team 0 Reward for Training
                 # We assume we are training Team 0.
@@ -1365,50 +1546,32 @@ class PPOTrainer:
                  leader = self.population[self.leader_idx]
                  leader_id_str = f"gen_{self.generation}_agent_{leader['id']}"
                  
-                 # Estimate 'wins' in this iteration vs opponent?
-                 # We have leader['wins'] which accumulates global wins.
-                 # We need wins JUST from this iteration.
-                 # But we didn't track "start_wins".
-                 # Heuristic: Just use current win rate from the League Payoff Matrix?
-                 # Wait, we need to feed the match results FROM this iteration INTO the matrix.
+                 # Calculate Delta Stats (Wins in this iteration vs THIS opponent)
+                 # We snapshot start stats after opponent load
+                 iter_wins = leader['wins'] - self.iteration_start_wins
+                 iter_matches = leader['matches'] - self.iteration_start_matches
                  
-                 # Ideally we captured match results in the loop. 
-                 # Currently we only updated population['wins'].
-                 # Let's trust the population['wins'] increments if we reset them or track delta?
-                 # They are reset at `evolve_population`.
-                 # So `leader['wins']` is total wins in this Generation.
-                 # This mixes opponents if we change opponents every iteration.
-                 
-                 # SOTA Fix: We should update the Payoff Matrix *inside* the loop when matches end.
-                 # But for now, let's assume we do it here if we had precise tracking.
-                 # Actually, let's use the 'telemetry' loop hook to capture match results?
-                 # Too complex to wire.
-                 
-                 # Simplification: Just read existing Payoff stats for the UI for now.
-                 # The 'update' is missing, but the 'read' works if we had data.
-                 # I will add a placeholder update to 0.5 to initialize if missing, 
-                 # or reliance on 'wins' if we assume 1 opponent per gen (false).
-                 
-                 # Better: We added 'matches' and 'wins' to population.
-                 # We can assume these are largely against the current opponent if we sample once per gen?
-                 # No, sample once per iteration.
-                 
-                 # OK - For this iteration, we can't easily retroactively update Payoff without tracking delta.
-                 # I will SKIP the Payoff Update in this PR step (as per "careful not to break") 
-                 # and focus on relaying the STATS to the UI (Win Rate).
+                 if iter_matches > 0:
+                     win_rate = iter_wins / iter_matches
+                     # Update PFSP Payoff Matrix
+                     self.league.update_match_result(leader_id_str, self.current_opponent_id, win_rate)
+                 else:
+                     win_rate = 0.0 # No matches finished?
                  
                  # Calculate stats to show
-                 wr = self.league.get_win_rate(leader_id_str, self.current_opponent_id)
+                 # "wr" is historical (from matrix), or current? 
+                 # Let's show the Cumulative Matrix WR if available, else current.
+                 hist_wr = self.league.get_win_rate(leader_id_str, self.current_opponent_id)
                  
                  league_stats = {
-                     "matches_played": leader['matches'],
-                     "wins": leader['wins'],
-                     "win_rate": leader['wins'] / max(1, leader['matches']), # Iteration WR
+                     "matches_played": iter_matches,
+                     "wins": iter_wins,
+                     "win_rate": win_rate, 
                      "opponent_id": self.current_opponent_id,
                      "registry_count": len(self.league.registry)
                  }
                  
-                 self.log(f"🏆 League: {leader_id_str} vs {self.current_opponent_id} | WR: {league_stats['win_rate']:.2f}")
+                 self.log(f"🏆 League: {leader_id_str} vs {self.current_opponent_id} | WR: {win_rate:.2f} (Hist: {hist_wr:.2f})")
 
             # Evolution Check
             if self.iteration % self.current_evolve_interval == 0:

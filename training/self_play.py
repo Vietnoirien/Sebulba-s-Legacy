@@ -7,6 +7,7 @@ from pathlib import Path
 
 LEAGUE_DIR = "data/checkpoints"
 LEAGUE_FILE = "data/league.json"
+PAYOFF_FILE = "data/payoff.json"
 
 class LeagueManager:
     def __init__(self):
@@ -16,7 +17,20 @@ class LeagueManager:
         
         self.registry = []
         self._load_registry()
-        self.payoff = {} # Track Win Rates (Session based for now)
+        self.payoff = {} 
+        self._load_payoff()
+        
+    def _load_payoff(self):
+        playoff_path = Path(PAYOFF_FILE)
+        if playoff_path.exists():
+            with open(playoff_path, 'r') as f:
+                self.payoff = json.load(f)
+        else:
+            self.payoff = {}
+            
+    def _save_payoff(self):
+        with open(PAYOFF_FILE, 'w') as f:
+            json.dump(self.payoff, f, indent=2)
         
     def _load_registry(self):
         if self.league_path.exists():
@@ -171,7 +185,8 @@ class LeagueManager:
         Record match result.
         result: 1.0 (Win), 0.5 (Draw), 0.0 (Loss)
         """
-        key = (agent_id, opponent_id)
+        # JSON keys must be strings
+        key = f"{agent_id}:{opponent_id}"
         
         if key not in self.payoff:
             self.payoff[key] = {"wins": 0.0, "games": 0}
@@ -179,8 +194,10 @@ class LeagueManager:
         self.payoff[key]["wins"] += result
         self.payoff[key]["games"] += 1
         
+        self._save_payoff()
+        
     def get_win_rate(self, agent_id, opponent_id):
-        key = (agent_id, opponent_id)
+        key = f"{agent_id}:{opponent_id}"
         entry = self.payoff.get(key)
         if not entry or entry["games"] == 0:
             return 0.5 # Default to uncertainty
@@ -193,6 +210,14 @@ class LeagueManager:
         """
         if not self.registry:
             return None
+            
+        # 10% Chance: Implicit Main Exploiter (Prev Gen Leader / Latest Agents)
+        # We find agents with the MAX step (Latest Gen) and sample from them.
+        if random.random() < 0.1:
+            max_step = max(e['step'] for e in self.registry)
+            latest_agents = [e for e in self.registry if e['step'] == max_step]
+            if latest_agents:
+                return random.choice(latest_agents)['path']
             
         # 20% Chance of using History Randomly (Standard FSP) or if mode is random
         if mode == 'random' or random.random() < 0.2:
