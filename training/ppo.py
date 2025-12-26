@@ -162,6 +162,7 @@ class PPOTrainer:
         self.failure_streak = 0
         self.grad_consistency_counter = 0
         self.team_spirit = 0.0 # Blending factor for rewards (0.0=Selfish, 1.0=Cooperative)
+        self.current_win_rate = 0.0 # Persistent Win Rate for Telemetry
         
         # TRANSITION CONFIGURATION
         self.curriculum_config = {
@@ -325,6 +326,8 @@ class PPOTrainer:
                 else:
                     rec_wr = 0.0 # All Timeouts = 0% Win Rate
                 
+                self.current_win_rate = rec_wr # Update global tracker
+                
                 # Reset Recent
                 metrics["recent_games"] = 0
                 metrics["recent_wins"] = 0
@@ -448,6 +451,8 @@ class PPOTrainer:
                     rec_wr = rec_wins / rec_episodes
                 else:
                     rec_wr = 0.0
+                
+                self.current_win_rate = rec_wr # Update global tracker
                 
                 # Reset Recent
                 metrics["recent_games"] = 0
@@ -1372,7 +1377,7 @@ class PPOTrainer:
                         for t_idx, t_env in enumerate(self.telemetry_env_indices):
                              # Get Data for CURRENT t_env
                              # If Done, this is the Finish Line state.
-                             telemetry_callback(global_step + step, sps, 0, 0, 0, t_env, 0, None, dones[t_env].item(), 
+                             telemetry_callback(global_step + step, sps, 0, 0, self.current_win_rate, t_env, 0, None, dones[t_env].item(), 
                                                 rewards_all[t_env].cpu().numpy(), env_actions[t_env].cpu().numpy())
                              
                              # Update stream target if current one finished (for NEXT step)
@@ -1656,7 +1661,7 @@ class PPOTrainer:
             
             if telemetry_callback:
                 # Pass league_stats as a new argument
-                telemetry_callback(global_step, sps, 0, 0, 0, self.telemetry_env_indices[0], total_loss/POP_SIZE, log_line, False, league_stats=league_stats)
+                telemetry_callback(global_step, sps, 0, 0, self.current_win_rate, self.telemetry_env_indices[0], total_loss/POP_SIZE, log_line, False, league_stats=league_stats)
 
             start_time = time.time()
             

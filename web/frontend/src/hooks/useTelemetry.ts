@@ -96,7 +96,16 @@ export const useTelemetry = () => {
             } else if (msg.type === "telemetry_stats") {
                 // Just update stats without changing race state
                 setTelemetry(prev => {
-                    return prev ? { ...prev, stats: msg.payload, logs: [] } : null
+                    if (!prev) {
+                        return {
+                            step: 0,
+                            match_id: "init",
+                            stats: msg.payload,
+                            logs: [],
+                            race_state: { pods: [], checkpoints: [] }
+                        }
+                    }
+                    return { ...prev, stats: msg.payload, logs: [] }
                 })
             } else {
                 // Legacy / Standard Telemetry
