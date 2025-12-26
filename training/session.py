@@ -203,10 +203,48 @@ class TrainingSession:
                  new_rewards = config["rewards"]
                  if "weights" in new_rewards:
                      self.trainer.reward_config["weights"].update(new_rewards["weights"])
+                     # Also update the tensor!
+                     # Optimization: For now we just update weights dict, 
+                     # but in PBT we need to update the tensor row for the leader?
+                     # Or all agents?
+                     # If we are "tuning parameters", usually we want to override the whole population 
+                     # or at least the leader.
+                     # Let's broadcast to all agents for now to make the UI effective.
+                     for i, p in enumerate(self.trainer.population):
+                         for k, v in new_rewards["weights"].items():
+                             k_int = int(k)
+                             p['weights'][k_int] = float(v)
+                             # Update tensor
+                             start_idx = i * (NUM_ENVS // len(self.trainer.population))
+                             end_idx = start_idx + (NUM_ENVS // len(self.trainer.population))
+                             self.trainer.reward_weights_tensor[start_idx:end_idx, k_int] = float(v)
+
                  if "tau" in new_rewards:
                      self.trainer.reward_config["tau"] = float(new_rewards["tau"])
-                 if "beta" in new_rewards:
-                     self.trainer.reward_config["beta"] = float(new_rewards["beta"])
+                 if "beta" in new_rewards: # Team Spirit alias?
+                     # beta usually refers to entropy or similar, but here maybe team_spirit?
+                     # Config.py doesn't have BETA. 
+                     # self.trainer.team_spirit is what we want.
+                     pass 
+                 if "team_spirit" in new_rewards:
+                     self.trainer.team_spirit = float(new_rewards["team_spirit"])
+                     
+            if "curriculum" in config:
+                curr = config["curriculum"]
+                if "stage" in curr:
+                    self.trainer.env.curriculum_stage = int(curr["stage"])
+                if "difficulty" in curr:
+                    self.trainer.env.bot_difficulty = float(curr["difficulty"])
+                    
+            if "transitions" in config:
+                trans = config["transitions"]
+                # Update known keys
+                for k in ["solo_efficiency_threshold", "solo_consistency_threshold",
+                          "duel_consistency_wr", "duel_absolute_wr", "duel_consistency_checks",
+                          "team_consistency_wr", "team_absolute_wr", "team_consistency_checks"]:
+                     if k in trans:
+                         self.trainer.curriculum_config[k] = float(trans[k])
+                
             print(f"Trainer Config Updated: {self.trainer.reward_config}")
 
     async def _playback_loop(self):

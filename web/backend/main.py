@@ -60,7 +60,20 @@ class TelemetryMessage(BaseModel):
     logs: List[str] = []
     race_state: RaceState
 
-# Connection Manager
+class HasName(BaseModel):
+    name: str
+    data: Optional[Dict[str, Any]] = None
+
+
+# --- Config Management ---
+class ConfigItem(BaseModel):
+    name: str
+    config: Dict[str, Any]
+
+class ConfigList(BaseModel):
+    configs: List[HasName]
+
+# --- Connection Manager ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -327,6 +340,105 @@ async def export_submission():
         import traceback
         traceback.print_exc()
         return {"error": str(e)}
+
+# --- Configuration Presets ---
+
+DEFAULT_CONFIG = {
+    "rewards": {
+         "weights": {
+             "0": 10000.0, "1": 5000.0, "2": 2000.0, "3": 50.0, "4": 0.1,
+             "5": 0.5, "6": 1000.0, "7": 10.0, "8": 0.005, "9": 10.0, "10": 2.0
+         },
+         "tau": 0.0,
+         "team_spirit": 0.0
+    },
+    "curriculum": {"stage": 0, "difficulty": 0.0},
+    "hyperparameters": {"lr": 1e-4, "ent_coef": 0.01},
+    "transitions": {
+         "solo_efficiency_threshold": 28.0,
+         "solo_consistency_threshold": 2400.0,
+         "duel_consistency_wr": 0.82,
+         "duel_absolute_wr": 0.84,
+         "duel_consistency_checks": 5,
+         "team_consistency_wr": 0.85,
+         "team_absolute_wr": 0.88,
+         "team_consistency_checks": 5
+    }
+}
+
+@app.get("/api/configs")
+async def list_configs():
+    """List all saved configuration presets."""
+    configs = []
+    
+    # Always include Default
+    configs.append({
+        "name": "default",
+        "data": DEFAULT_CONFIG
+    })
+
+    folder = "data/configs"
+    if not os.path.exists(folder):
+        return configs
+        
+    for f in os.listdir(folder):
+        if f.endswith(".json"):
+            try:
+                with open(os.path.join(folder, f), "r") as file:
+                    data = json.load(file)
+                    configs.append({
+                        "name": f.replace(".json", ""),
+                        "data": data
+                    })
+            except Exception:
+                pass
+    
+    return configs
+
+@app.post("/api/configs")
+async def save_config(item: ConfigItem):
+    """Save a configuration preset."""
+    folder = "data/configs"
+    os.makedirs(folder, exist_ok=True)
+    
+    # Sanitize name
+    safe_name = "".join([c for c in item.name if c.isalnum() or c in (' ', '_', '-')]).strip()
+    if not safe_name:
+        return {"error": "Invalid name"}
+    
+    if safe_name.lower() == "default":
+        return {"error": "Cannot overwrite default preset"}
+        
+    path = os.path.join(folder, f"{safe_name}.json")
+    try:
+        with open(path, "w") as f:
+            json.dump(item.config, f, indent=2)
+        return {"status": "saved", "name": safe_name}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/api/configs/{name}")
+async def delete_config(name: str):
+    """Delete a configuration preset."""
+    if name.lower() == "default":
+        return {"error": "Cannot delete default preset"}
+        
+    folder = "data/configs"
+    path = os.path.join(folder, f"{name}.json")
+    if os.path.exists(path):
+        os.remove(path)
+        return {"status": "deleted"}
+    return {"error": "Not found"}
+
+@app.post("/api/configs/load")
+async def load_config_to_session(item: ConfigItem):
+    """Apply a config directly to the running session."""
+    try:
+        session.update_config(item.config)
+        return {"status": "applied"}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 if __name__ == "__main__":
 

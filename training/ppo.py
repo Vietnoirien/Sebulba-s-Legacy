@@ -372,17 +372,22 @@ class PPOTrainer:
                 if self.env.bot_difficulty >= 1.0:
                     should_graduate = False
                     reason = ""
-                    if rec_wr > 0.82:
+                    
+                    cons_wr = self.curriculum_config["duel_consistency_wr"]
+                    abs_wr = self.curriculum_config["duel_absolute_wr"]
+                    cons_checks = self.curriculum_config["duel_consistency_checks"]
+
+                    if rec_wr > cons_wr:
                         self.grad_consistency_counter += 1
                     else:
                         self.grad_consistency_counter = 0
 
-                    if rec_wr >= 0.84 and self.grad_consistency_counter >= 2:
+                    if rec_wr >= abs_wr and self.grad_consistency_counter >= 2:
                         should_graduate = True
-                        reason = f"WR {rec_wr:.2f} >= 0.84"
-                    elif self.grad_consistency_counter >= 5:
+                        reason = f"WR {rec_wr:.2f} >= {abs_wr}"
+                    elif self.grad_consistency_counter >= cons_checks:
                         should_graduate = True
-                        reason = f"WR > 0.82 for 5 checks (Last: {rec_wr:.2f})"
+                        reason = f"WR > {cons_wr} for {cons_checks} checks (Last: {rec_wr:.2f})"
                         
                     if should_graduate:
                          self.log(f">>> UPGRADING TO STAGE 2: TEAM ({reason}) <<<")
@@ -457,7 +462,11 @@ class PPOTrainer:
                             self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
                 
                 # Graduation Check (To League)
-                if rec_wr > 0.85: # Slightly higher bar for 2v2 mastery
+                cons_wr = self.curriculum_config["team_consistency_wr"]
+                abs_wr = self.curriculum_config["team_absolute_wr"]
+                cons_checks = self.curriculum_config["team_consistency_checks"]
+                
+                if rec_wr > cons_wr: # Slightly higher bar for 2v2 mastery
                     self.grad_consistency_counter += 1
                 else:
                     self.grad_consistency_counter = 0
@@ -466,12 +475,12 @@ class PPOTrainer:
                     should_graduate = False
                     reason = ""
                     
-                    if rec_wr >= 0.88:
+                    if rec_wr >= abs_wr:
                         should_graduate = True
-                        reason = f"WR {rec_wr:.2f} >= 0.88"
-                    elif self.grad_consistency_counter >= 5:
+                        reason = f"WR {rec_wr:.2f} >= {abs_wr}"
+                    elif self.grad_consistency_counter >= cons_checks:
                         should_graduate = True
-                        reason = f"WR > 0.85 for 5 checks (Last: {rec_wr:.2f})"
+                        reason = f"WR > {cons_wr} for {cons_checks} checks (Last: {rec_wr:.2f})"
                         
                     if should_graduate:
                          self.log(f">>> UPGRADING TO STAGE 3: LEAGUE ({reason}) <<<")

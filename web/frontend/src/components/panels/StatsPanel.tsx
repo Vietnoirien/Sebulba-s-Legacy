@@ -40,23 +40,9 @@ export const StatsPanel: React.FC = () => {
 
     return (
         <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-                <div className="bg-purple-900/40 rounded-lg p-2 border border-purple-500/30">
-                    <h3 className="text-[10px] text-purple-300 font-mono uppercase">Generation</h3>
-                    <p className="text-xl font-bold text-white font-mono">{stats.generation || 0}</p>
-                </div>
-                <div className="bg-cyan-900/40 rounded-lg p-2 border border-cyan-500/30">
-                    <h3 className="text-[10px] text-cyan-300 font-mono uppercase">Agent ID</h3>
-                    <p className="text-xl font-bold text-white font-mono">{stats.agent_id !== undefined ? stats.agent_id : "-"}</p>
-                </div>
-            </div>
 
-            <StatCard
-                title="Reward Mean"
-                dataKey="reward"
-                color="#06b6d4"
-                data={history}
-            />
+
+
             <StatCard
                 title="Win Rate"
                 dataKey="win_rate"
