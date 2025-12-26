@@ -4,9 +4,9 @@ import { Button } from '../common/Button'
 import { useGameState } from '../../context/GameStateContext'
 
 export const ControlPanel: React.FC = () => {
-    const { telemetry } = useGameState()
+    const { telemetry, selectedModel, setSelectedModel } = useGameState()
     const [checkpoints, setCheckpoints] = useState<any[]>([])
-    const [selectedModel, setSelectedModel] = useState<string>("scratch")
+    // const [selectedModel, setSelectedModel] = useState<string>("scratch") // Moved to Context
     const [curriculumMode, setCurriculumMode] = useState<string>("auto")
     const [curriculumStage, setCurriculumStage] = useState<number>(0)
 
@@ -114,11 +114,17 @@ export const ControlPanel: React.FC = () => {
                     {/* Generations Group */}
                     {generations.length > 0 && (
                         <optgroup label="Entire Generations (Resume Training)">
-                            {generations.map((gen: any) => (
-                                <option key={gen.id} value={gen.id}>
-                                    {gen.name} ({gen.agent_count} Agents)
-                                </option>
-                            ))}
+                            {generations
+                                .sort((a, b) => {
+                                    const numA = parseInt(a.name.replace(/\D/g, '')) || 0;
+                                    const numB = parseInt(b.name.replace(/\D/g, '')) || 0;
+                                    return numB - numA;
+                                })
+                                .map((gen: any) => (
+                                    <option key={gen.id} value={gen.id}>
+                                        {gen.name} ({gen.agent_count} Agents)
+                                    </option>
+                                ))}
                         </optgroup>
                     )}
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { Slider } from '../common/Slider'
 import { useGameState } from '../../context/GameStateContext'
-import { Save, Upload, Trash2, Play, Target, Zap, ShieldAlert, Cpu, Database, Shuffle } from 'lucide-react'
+import { Save, Upload, Trash2, Play, Target, Zap, ShieldAlert, Cpu, Database, Shuffle, Rocket } from 'lucide-react'
 
 // Reward Indices (Must match Backend)
 const RW = {
@@ -24,7 +24,7 @@ interface ConfigPreset {
 }
 
 export const ConfigPanel: React.FC = () => {
-    const { sendMessage } = useGameState()
+    const { sendMessage, selectedModel } = useGameState()
     const [activeTab, setActiveTab] = useState<'general' | 'objectives' | 'physics' | 'combat' | 'transitions' | 'presets'>('general')
 
     // --- State ---
@@ -98,6 +98,30 @@ export const ConfigPanel: React.FC = () => {
             }
         }
         sendMessage(JSON.stringify(payload))
+    }
+
+    const handleLaunch = async () => {
+        const config = {
+            rewards: rewards,
+            curriculum: curriculum,
+            hyperparameters: hyperparams,
+            transitions: transitions
+        }
+
+        try {
+            await fetch('http://localhost:8000/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: selectedModel, // Use Global Selection
+                    curriculum_mode: "auto",
+                    curriculum_stage: curriculum.stage,
+                    config: config
+                })
+            })
+        } catch (e) {
+            console.error("Failed to launch", e)
+        }
     }
 
     const handleSavePreset = async () => {
@@ -356,13 +380,20 @@ export const ConfigPanel: React.FC = () => {
             </div>
 
             {/* Sticky Action Footer */}
-            <div className="p-4 border-t border-gray-700 shrink-0 bg-[#252526]">
+            <div className="p-3 border-t border-gray-700 shrink-0 bg-[#252526] flex gap-2">
                 <button
                     onClick={handleApply}
-                    className="w-full bg-neon-cyan text-black font-bold py-2 rounded flex items-center justify-center gap-2 hover:bg-cyan-300 transition-colors"
+                    className="flex-1 bg-neon-cyan/80 text-black text-xs font-bold uppercase tracking-wide py-2 rounded flex items-center justify-center gap-2 hover:bg-neon-cyan transition-colors shadow-lg shadow-cyan-500/20"
                 >
-                    <Play size={16} />
-                    APPLY CONFIGURATION
+                    <Play size={14} strokeWidth={2.5} />
+                    APPLY LIVE
+                </button>
+                <button
+                    onClick={handleLaunch}
+                    className="flex-1 bg-orange-600/80 text-white text-xs font-bold uppercase tracking-wide py-2 rounded flex items-center justify-center gap-2 hover:bg-orange-500 transition-colors shadow-lg shadow-orange-500/20"
+                >
+                    <Rocket size={14} strokeWidth={2.5} />
+                    LAUNCH CUSTOM
                 </button>
             </div>
         </div>

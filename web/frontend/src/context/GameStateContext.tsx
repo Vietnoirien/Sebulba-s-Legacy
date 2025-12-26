@@ -9,15 +9,26 @@ interface GameStateContextType {
     history: any[]
     stats: any
     sendMessage: (message: string) => void
+
+    // UI State
+    selectedModel: string
+    setSelectedModel: (model: string) => void
 }
 
 const GameStateContext = createContext<GameStateContextType | undefined>(undefined)
 
 export const GameStateProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const telemetryData = useTelemetry()
+    const [selectedModel, setSelectedModel] = React.useState<string>("scratch")
+
+    const value = {
+        ...telemetryData,
+        selectedModel,
+        setSelectedModel
+    }
 
     return (
-        <GameStateContext.Provider value={telemetryData}>
+        <GameStateContext.Provider value={value}>
             {children}
         </GameStateContext.Provider>
     )

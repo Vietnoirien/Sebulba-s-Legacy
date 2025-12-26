@@ -334,7 +334,7 @@ class PPOTrainer:
                 rec_losses = rec_games - rec_wins
                 rec_timeouts = rec_episodes - rec_games
                 
-                self.log(f"Stage 1 Check: Recent WR {rec_wr:.2f} | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
+                self.log(f"Stage 1 Check: Recent WR {rec_wr*100:.1f}% | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
                 
                 if rec_wr < 0.30:
                     # Critical Failure: Immediate Regression
@@ -444,7 +444,7 @@ class PPOTrainer:
                 rec_losses = rec_games - rec_wins
                 rec_timeouts = rec_episodes - rec_games
 
-                self.log(f"Stage 2 (Team) Check: Recent WR {rec_wr:.2f} | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
+                self.log(f"Stage 2 (Team) Check: Recent WR {rec_wr*100:.1f}% | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
                 
                 if rec_wr < 0.30:
                     if self.curriculum_mode == "auto":
