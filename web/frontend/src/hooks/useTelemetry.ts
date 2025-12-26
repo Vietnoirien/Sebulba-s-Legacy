@@ -261,7 +261,7 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
 
     const frames: ParsedFrame[] = []
     let offset = 0
-    const FRAME_SIZE = 176 // 16 Header + 4*40 Pods
+    const FRAME_SIZE = 192 // 16 Header + 4*44 Pods
 
     while (offset + FRAME_SIZE <= len) {
         // Header
@@ -280,7 +280,7 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
         // Pods
         const pods: any[] = []
         for (let i = 0; i < 4; i++) {
-            // 9 floats + 2 shorts = 36 + 4 = 40 bytes
+            // 10 floats + 2 shorts = 40 + 4 = 44 bytes
             const x = view.getFloat32(offset, true)
             const y = view.getFloat32(offset + 4, true)
             const vx = view.getFloat32(offset + 8, true)
@@ -290,19 +290,20 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
             const shield = view.getFloat32(offset + 24, true)
             const boost = view.getFloat32(offset + 28, true)
             const reward = view.getFloat32(offset + 32, true)
-            const lap = view.getUint16(offset + 36, true)
-            const next_cp = view.getUint16(offset + 38, true)
+            const collision = view.getFloat32(offset + 36, true)
+            const lap = view.getUint16(offset + 40, true)
+            const next_cp = view.getUint16(offset + 42, true)
 
             pods.push({
                 id: i,
                 team: Math.floor(i / 2),
                 x, y, vx, vy, angle,
-                boost, shield,
+                boost, shield, collision,
                 lap, next_checkpoint: next_cp,
                 reward, thrust
             })
 
-            offset += 40
+            offset += 44
         }
 
         frames.push({

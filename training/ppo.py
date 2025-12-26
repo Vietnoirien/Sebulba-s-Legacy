@@ -1395,11 +1395,21 @@ class PPOTrainer:
                     if (current_time - self.last_telemetry_time) > 0.05:
                         self.last_telemetry_time = current_time
                         
+                        # Extract flags for batch
+                        # info['collision_flags'] is [Batch, 4]
+                        batch_coll_flags = infos.get("collision_flags", None)
+
                         for t_idx, t_env in enumerate(self.telemetry_env_indices):
                              # Get Data for CURRENT t_env
                              # If Done, this is the Finish Line state.
+                             
+                             coll_f = None
+                             if batch_coll_flags is not None:
+                                 coll_f = batch_coll_flags[t_env].cpu().numpy()
+
                              telemetry_callback(global_step + step, sps, 0, 0, self.current_win_rate, t_env, 0, None, dones[t_env].item(), 
-                                                rewards_all[t_env].cpu().numpy(), env_actions[t_env].cpu().numpy())
+                                                rewards_all[t_env].cpu().numpy(), env_actions[t_env].cpu().numpy(), 
+                                                collision_flags=coll_f)
                              
                              # Update stream target if current one finished (for NEXT step)
                              if dones[t_env]:

@@ -371,6 +371,13 @@ class PodRacerEnv:
         # 1. Physics Step
         collisions = self.physics.step(act_thrust, act_angle, act_shield, act_boost)
         
+        # Calculate Collision Flags for Telemetry [Batch, 4]
+        # Sum collisions per pod. If > 0, flag = 1.0
+        # collisions is [B, 4, 4] (magnitudes)
+        # Sum over last dim (4) -> [B, 4]
+        col_sums = collisions.sum(dim=2)
+        collision_flags = (col_sums > 0).float()
+        
         # Update Roles based on new state (logic: "Assign it based on race state")
         # Do we update before or after rewards? 
         # Plan implies Role dictates Policy and Reward weights.
@@ -393,7 +400,8 @@ class PodRacerEnv:
              "laps_completed": torch.zeros((self.num_envs, 4), dtype=torch.long, device=self.device),
              "checkpoints_passed": torch.zeros((self.num_envs, 4), dtype=torch.long, device=self.device),
              "current_streak": self.cps_passed.clone(),
-             "cp_steps": torch.zeros((self.num_envs, 4), dtype=torch.long, device=self.device) # Steps taken for passed CPs
+             "cp_steps": torch.zeros((self.num_envs, 4), dtype=torch.long, device=self.device), # Steps taken for passed CPs
+             "collision_flags": collision_flags # [Batch, 4]
         }
 
         # --- Dense Rewards (Progress) ---

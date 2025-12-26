@@ -19,6 +19,9 @@ import cpkBordure from '../../assets/cpk/bordure.png'
 import cpkInsideSpinning from '../../assets/cpk/inside_spinning.png'
 import cpkInsideStart from '../../assets/cpk/inside_start.png'
 
+import redShield from '../../assets/red_shield.png'
+import whiteShield from '../../assets/white_shield.png'
+
 
 const GAME_WIDTH = 16000
 const GAME_HEIGHT = 9000
@@ -48,7 +51,8 @@ export const RaceCanvas: React.FC = () => {
             whiteCabin, whiteLEngine, whiteREngine,
             bgImage,
             cpkMainCircle, cpkSupport, cpkRedLight, cpkYellowLight,
-            cpkBordure, cpkInsideSpinning, cpkInsideStart
+            cpkBordure, cpkInsideSpinning, cpkInsideStart,
+            redShield, whiteShield
         }
 
         const loaded: Record<string, HTMLImageElement> = {}
@@ -395,7 +399,8 @@ function drawPod(
     ctx: CanvasRenderingContext2D,
     pod: {
         x: number, y: number, vx: number, vy: number, angle: number,
-        lap?: number, next_checkpoint?: number, reward?: number, thrust?: number
+        lap?: number, next_checkpoint?: number, reward?: number, thrust?: number,
+        team?: number, collision?: number
     },
     color: 'red' | 'white',
     images: Record<string, HTMLImageElement>,
@@ -417,6 +422,21 @@ function drawPod(
     // Draw Pod Body
     ctx.save()
     ctx.rotate(angle)
+
+    // Draw Shield (Underneath or On Top? Underneath implies "Shield bubble")
+    if ((pod as any).collision > 0.5) {
+        const shieldImg = pod.team === 0 ? images.redShield : images.whiteShield
+        if (shieldImg) {
+            // Scale shield to cover pod. Pod parts are scaled by 4.0.
+            // Shield asset should be drawn relative to that.
+            // Let's assume shield asset is roughly same resolution as cabins.
+            // We use scale 5.0 to be slightly larger than 4.0
+            const sScale = 5.0
+            const sw = shieldImg.width * sScale
+            const sh = shieldImg.height * sScale
+            ctx.drawImage(shieldImg, -sw / 2, -sh / 2, sw, sh)
+        }
+    }
 
     const scale = 4.0
     const cabinW = cabin.width * scale

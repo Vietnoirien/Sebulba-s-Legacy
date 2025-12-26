@@ -36,15 +36,14 @@ async def verify():
                                     # pack_frame: Header(16) + Pods(4*40=160) = 176.
                                     # So total size should be divisible by 176.
                                     
-                                    if size % 176 == 0:
-                                        count = size // 176
-                                        print(f"SUCCESS: Payload size {size} is divisible by 176. (Frames: {count})")
-                                        print("Telemetry format verified as UPDATED (Shield/Boost included).")
+                                    if size % 192 == 0:
+                                        count = size // 192
+                                        print(f"SUCCESS: Payload size {size} is divisible by 192. (Frames: {count})")
+                                        print("Telemetry format verified as UPDATED (Shield/Boost/Collision included).")
                                         return True
-                                    elif size % 144 == 0:
-                                        count = size // 144
-                                        print(f"FAILURE: Payload size {size} is divisible by 144. (Frames: {count})")
-                                        print("Telemetry format is OLD (No Shield/Boost). Server restart required.")
+                                    elif size % 176 == 0:
+                                        count = size // 176
+                                        print(f"FAILURE: Payload size {size} is divisible by 176. (Legacy - No Collision). Server restart required.")
                                         return False
                                     else:
                                         print(f"WARNING: Payload size {size} is not divisible by 176 or 144.")

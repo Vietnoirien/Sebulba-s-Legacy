@@ -332,7 +332,7 @@ class TrainingSession:
             except Exception as e:
                 print(f"Consumer Error: {e}")
 
-    def _telemetry_callback(self, step, sps, fps_train, reward, win_rate, env_idx, loss, log_line=None, is_done=False, step_rewards=None, step_actions=None, league_stats=None):
+    def _telemetry_callback(self, step, sps, fps_train, reward, win_rate, env_idx, loss, log_line=None, is_done=False, step_rewards=None, step_actions=None, league_stats=None, collision_flags=None):
         try:
             if log_line:
                 stats_data = {
@@ -392,7 +392,8 @@ class TrainingSession:
                 "angle": angle,
                 "laps": laps,
                 "next_cps": next_cps,
-                "checkpoints": checkpoints
+                "checkpoints": checkpoints,
+                "collision_flags": collision_flags
             }
             
             try:
