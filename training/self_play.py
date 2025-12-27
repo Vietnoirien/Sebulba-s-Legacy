@@ -211,6 +211,14 @@ class LeagueManager:
         if not self.registry:
             return None
             
+        # Explicit Latest Mode (For Exploiters)
+        if mode == 'latest':
+            max_step = max(e['step'] for e in self.registry)
+            latest_agents = [e for e in self.registry if e['step'] == max_step]
+            if latest_agents:
+                return random.choice(latest_agents)['path']
+            return random.choice(self.registry)['path'] # Fallback
+            
         # 10% Chance: Implicit Main Exploiter (Prev Gen Leader / Latest Agents)
         # We find agents with the MAX step (Latest Gen) and sample from them.
         if random.random() < 0.1:

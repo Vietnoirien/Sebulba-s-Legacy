@@ -97,6 +97,7 @@ class PPOTrainer:
             
             self.population.append({
                 'id': i,
+                'type': 'exploiter' if i >= 28 else 'main', # 4 Explicit Exploiters
                 'agent': agent,
                 'optimizer': optimizer,
                 'weights': weights, # Python Dict for mutation logic
@@ -1046,14 +1047,13 @@ class PPOTrainer:
                 opp_path = self.league.sample_opponent(active_agent_id=leader_id_str, mode='pfsp')
                 if opp_path and os.path.exists(opp_path):
                     try:
-                        # Load Opponent
+                        # Load Main Opponent (for Main Population)
                         self.opponent_agent.load_state_dict(torch.load(opp_path, map_location=self.device))
-                        self.opponent_agent.eval() # Set to Eval mode
+                        self.opponent_agent.eval()
                         self.opponent_agent_loaded = True
                         
-                        # Identify ID from path
                         self.current_opponent_id = os.path.basename(opp_path).replace(".pt", "")
-                        self.log(f"⚔️  LEAGUE MATCH: Population vs {self.current_opponent_id} ⚔️")
+                        self.log(f"⚔️  LEAGUE MATCH: Main Pop vs {self.current_opponent_id} ⚔️")
                         
                         # Snapshot for PFSP Update
                         self.iteration_start_wins = self.population[self.leader_idx]['wins']
@@ -1062,9 +1062,30 @@ class PPOTrainer:
                     except Exception as e:
                         self.log(f"Failed to load opponent {opp_path}: {e}")
                         self.opponent_agent_loaded = False
+                        
+                    # --- NEW: Exploiter Opponent Logic ---
+                    # Exploiters play against CURRENT Leader (or recent strong agent)
+                    # We can use 'latest' mode from LeagueManager if implemented, or just pick the Leader of Gen N-1.
+                    # Since we are in Gen N, Gen N-1 is in the League Registry.
+                    
+                    # Check if we have exploiters
+                    has_exploiters = any(p['type'] == 'exploiter' for p in self.population)
+                    self.exploiter_opponent_loaded = False
+                    
+                    if has_exploiters:
+                         # Use 'latest' to get the strongest recent agent
+                         exp_opp_path = self.league.sample_opponent(active_agent_id=leader_id_str, mode='latest')
+                         if exp_opp_path:
+                             try:
+                                 self.exploiter_opponent_agent.load_state_dict(torch.load(exp_opp_path, map_location=self.device))
+                                 self.exploiter_opponent_agent.eval()
+                                 self.exploiter_opponent_loaded = True
+                                 exp_id = os.path.basename(exp_opp_path).replace(".pt", "")
+                                 self.log(f"🕵️  EXPLOITER MATCH: Exploiters vs {exp_id} (Targeting Leader)")
+                             except Exception as e:
+                                 self.log(f"Failed to load exploiter opponent {exp_opp_path}: {e}")
                 else:
-                    # Fallback to Mirror Self-Play (or Bot if handled by Env)
-                    # self.log("Using Mirror Self-Play (No League Opponent found or sampled).")
+                    # Fallback to Mirror Self-Play
                     pass
             active_pods = self.get_active_pods()
             num_active_per_agent = len(active_pods) * ENVS_PER_AGENT
@@ -1197,31 +1218,79 @@ class PPOTrainer:
                      opp_indices = [2, 3] 
                      
                      # Extract Raw Obs for Opponent from GLOBAL obs tensors (all_self has 4 pods)
-                     opp_raw_self = all_self[opp_indices].view(-1, 14)
-                     opp_raw_tm = all_tm[opp_indices].view(-1, 13)
-                     opp_raw_en = all_en[opp_indices].view(-1, 2, 13)
-                     opp_raw_cp = all_cp[opp_indices].view(-1, 6)
+                     # Keep dim 1 (Envs) intact for slicing: [2, 4096, 14]
+                     opp_raw_self = all_self[opp_indices] 
+                     opp_raw_tm = all_tm[opp_indices]
+                     opp_raw_en = all_en[opp_indices]
+                     opp_raw_cp = all_cp[opp_indices]
                      
                      # Normalize (Fixed stats)
-                     opp_norm_self = self.rms_self(opp_raw_self, fixed=True)
+                     # Must flatten to normalize then reshape back
+                     B_o, N_e, D_o = opp_raw_self.shape
+                     opp_norm_self = self.rms_self(opp_raw_self.view(-1, D_o), fixed=True).view(B_o, N_e, D_o)
                      
-                     opp_norm_tm = self.rms_ent(opp_raw_tm, fixed=True)
-                     B_o, N_o, D_o = opp_raw_en.shape
-                     opp_norm_en = self.rms_ent(opp_raw_en.view(-1, D_o), fixed=True).view(B_o, N_o, D_o)
-                     opp_norm_cp = self.rms_cp(opp_raw_cp, fixed=True)
+                     D_tm = opp_raw_tm.shape[-1]
+                     opp_norm_tm = self.rms_ent(opp_raw_tm.view(-1, D_tm), fixed=True).view(B_o, N_e, D_tm)
+                     
+                     # Enemies: [2, 4096, 2, 13]
+                     D_en = opp_raw_en.shape[-1]
+                     opp_norm_en = self.rms_ent(opp_raw_en.view(-1, D_en), fixed=True).view(B_o, N_e, 2, D_en)
+                     
+                     D_cp = opp_raw_cp.shape[-1]
+                     opp_norm_cp = self.rms_cp(opp_raw_cp.view(-1, D_cp), fixed=True).view(B_o, N_e, D_cp)
+                     
+                     # Split Indices
+                     # Main: Agents 0-27 -> Envs 0 to 28*128 = 3584
+                     # Exploiter: Agents 28-31 -> Envs 3584 to 4096
+                     split_idx = 28 * ENVS_PER_AGENT
+                     
+                     # --- MAIN GROUP INFERENCE ---
+                     # Slice: Everything before split_idx
+                     # Reshape to [Batch, D] for network
+                     m_self = opp_norm_self[:, :split_idx, :].reshape(-1, D_o)
+                     m_tm = opp_norm_tm[:, :split_idx, :].reshape(-1, D_tm)
+                     m_en = opp_norm_en[:, :split_idx, :, :].reshape(-1, 2, D_en)
+                     m_cp = opp_norm_cp[:, :split_idx, :].reshape(-1, D_cp)
                      
                      with torch.no_grad():
                          if use_league_opp:
-                             o_act_stacked, _, _, _ = self.opponent_agent.get_action_and_value(opp_norm_self, opp_norm_tm, opp_norm_en, opp_norm_cp)
+                             # Main plays against "opponent_agent" (Standard History)
+                             act_m, _, _, _ = self.opponent_agent.get_action_and_value(m_self, m_tm, m_en, m_cp)
                          else:
-                             # Fallback: Mirror Self-Play
-                             # Use current Leader Agent (self.agent)
-                             o_act_stacked, _, _, _ = self.agent.get_action_and_value(opp_norm_self, opp_norm_tm, opp_norm_en, opp_norm_cp)
+                             act_m, _, _, _ = self.agent.get_action_and_value(m_self, m_tm, m_en, m_cp)
+
+                     # Reshape back to [2, M_Envs, 4]
+                     act_m = act_m.view(2, split_idx, 4)
+
+                     # --- EXPLOITER GROUP INFERENCE ---
+                     # Slice: Everything after split_idx
+                     e_self = opp_norm_self[:, split_idx:, :].reshape(-1, D_o)
+                     e_tm = opp_norm_tm[:, split_idx:, :].reshape(-1, D_tm)
+                     e_en = opp_norm_en[:, split_idx:, :, :].reshape(-1, 2, D_en)
+                     e_cp = opp_norm_cp[:, split_idx:, :].reshape(-1, D_cp)
                      
-                     # Split actions back to Pod 2 and 3
-                     o_act_chunks = torch.chunk(o_act_stacked, 2, dim=0)
-                     act_map[2] = o_act_chunks[0]
-                     act_map[3] = o_act_chunks[1]
+                     with torch.no_grad():
+                         # Exploiters play against "exploiter_opponent_agent" (Leader) if loaded
+                         if hasattr(self, 'exploiter_opponent_loaded') and self.exploiter_opponent_loaded:
+                             act_e, _, _, _ = self.exploiter_opponent_agent.get_action_and_value(e_self, e_tm, e_en, e_cp)
+                         elif use_league_opp:
+                             # Fallback to Main Opponent if specialized one failed to load
+                             act_e, _, _, _ = self.opponent_agent.get_action_and_value(e_self, e_tm, e_en, e_cp)
+                         else:
+                             # Fallback to Self
+                             act_e, _, _, _ = self.agent.get_action_and_value(e_self, e_tm, e_en, e_cp)
+
+                     # Reshape back to [2, E_Envs, 4]
+                     # Note: E_Envs = Total - split_idx
+                     act_e = act_e.view(2, NUM_ENVS - split_idx, 4)
+                     
+                     # --- COMBINE ---
+                     # Concatenate along Env dim (dim 1)
+                     combined_opp_act = torch.cat([act_m, act_e], dim=1) # [2, 4096, 4]
+                     
+                     # Map to Act Map
+                     act_map[2] = combined_opp_act[0] # Pod 2
+                     act_map[3] = combined_opp_act[1] # Pod 3
                 
                 # Construct Global Action Tensor
                 env_actions = torch.zeros((NUM_ENVS, 4, 4), device=self.device)

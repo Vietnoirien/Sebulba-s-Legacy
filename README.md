@@ -30,6 +30,9 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
 *   **Implicit Exploiters**: 
     *   **Implicit League Exploiter**: Standard PFSP agents that prey on the weaknesses of the entire history.
     *   **Implicit Main Exploiter**: A 10% chance to sample opponents from the **latest generation**, forcing the population to remain robust against the current meta.
+*   **Explicit League Exploiters**:
+    *   **Grouped Batch Inference**: In the League Stage, the system efficiently splits the 4096-environment batch to allow different agents to fight different opponents simultaneously (Main vs History, Exploiters vs Leader).
+    *   **Targeted Evolution**: A sub-population of "Exploiter" agents evolves purely to maximize Win Rate against the **Current Leader**, preventing cyclic drift while Main agents focus on historical robustness.
 
 ### 🧬 Evolutionary Strategy (GA + RL)
 *   **Population-Based Training (PBT)**: Evolves a population of 32 distinct agents. Agents don't just learn a policy; they evolve their hyperparameters (**Learning Rate**, **Entropy Coefficient**, **Clip Range**) and reward weights over time. This allows the population to dynamically adjust its "conservativeness" and exploration vs exploitation balance.
@@ -70,7 +73,9 @@ We use a **Multi-Objective Genetic Algorithm** to select the best agents for the
     *   **Win Rate**: Primary objective.
     *   **Runner Velocity**: Maximize average velocity of the Runner pod.
     *   **Blocker Damage**: Maximize impact damage dealt by the Blocker pod.
-*   **Stage 3 (League)**: `[Win Rate, Laps, -Efficiency]`
+*   **Stage 3 (League)**: 
+    *   **Main Agents**: `[Win Rate, Laps, -Efficiency]`
+    *   **Exploiter Agents**: `[Win Rate, Novelty]` (Pure Aggression)
 
 ### 📊 Real-Time Visualization
 *   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.
