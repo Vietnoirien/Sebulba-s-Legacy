@@ -130,7 +130,7 @@ class PodAgent(nn.Module):
     def get_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
         return self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs)
 
-    def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, action=None):
+    def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, action=None, compute_divergence=False):
         # 1. Critic
         value = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs)
         
@@ -193,4 +193,35 @@ class PodAgent(nn.Module):
         log_prob = lp_cont + lp_s + lp_b
         entropy = dist_cont.entropy().sum(1) + dist_shield.entropy() + dist_boost.entropy()
         
-        return action, log_prob, entropy, value
+        divergence = torch.tensor(0.0, device=self_obs.device)
+        
+        if compute_divergence:
+            # Construct Distributions for both heads
+            # Runner
+            d_r_cont = torch.distributions.Normal(torch.cat(r_means, 1), r_std)
+            d_r_s = torch.distributions.Categorical(logits=r_logits[0])
+            d_r_b = torch.distributions.Categorical(logits=r_logits[1])
+            
+            # Blocker
+            d_b_cont = torch.distributions.Normal(torch.cat(b_means, 1), b_std)
+            d_b_s = torch.distributions.Categorical(logits=b_logits[0])
+            d_b_b = torch.distributions.Categorical(logits=b_logits[1])
+            
+            # KL(P || Q) + KL(Q || P) (Symmetric)
+            # Continuous (Sum over dims)
+            kl_cont = torch.distributions.kl.kl_divergence(d_r_cont, d_b_cont).sum(1) + \
+                      torch.distributions.kl.kl_divergence(d_b_cont, d_r_cont).sum(1)
+                      
+            # Discrete
+            kl_s = torch.distributions.kl.kl_divergence(d_r_s, d_b_s) + \
+                   torch.distributions.kl.kl_divergence(d_b_s, d_r_s)
+                   
+            kl_b = torch.distributions.kl.kl_divergence(d_r_b, d_b_b) + \
+                   torch.distributions.kl.kl_divergence(d_b_b, d_r_b)
+                   
+            divergence = (kl_cont + kl_s + kl_b)
+        
+        if compute_divergence:
+             return action, log_prob, entropy, value, divergence
+        else:
+             return action, log_prob, entropy, value

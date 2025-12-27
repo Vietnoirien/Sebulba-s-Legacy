@@ -37,6 +37,7 @@ CLIP_RANGE = 0.2
 ENT_COEF = 0.01
 VF_COEF = 0.5
 MAX_GRAD_NORM = 0.5
+DIV_COEF = 0.05 # Role Regularization Coefficient
 TOTAL_TIMESTEPS = 2_000_000_000
 NUM_ENVS = 4096
 NUM_STEPS = 256
@@ -101,6 +102,7 @@ class PPOTrainer:
                 'weights': weights, # Python Dict for mutation logic
                 'lr': LR,
                 'ent_coef': ENT_COEF, # Individual Entropy Coefficient
+                'clip_range': CLIP_RANGE, # Individual Clip Range
                 'laps_score': 0,
                 'checkpoints_score': 0,
                 'reward_score': 0.0,
@@ -821,6 +823,10 @@ class PPOTrainer:
             if random.random() < 0.3:
                 loser['ent_coef'] *= random.uniform(0.8, 1.2)
                 loser['ent_coef'] = max(0.0001, min(0.1, loser['ent_coef']))
+                
+            if random.random() < 0.3:
+                loser['clip_range'] *= random.uniform(0.8, 1.2)
+                loser['clip_range'] = max(0.05, min(0.4, loser['clip_range']))
                 
             self.log(f"Agent {loser['id']} (Rank {loser['rank']}) replaced by clone of {parent['id']} (Rank {parent['rank']})")
              # Update Global Tensor
@@ -1611,9 +1617,20 @@ class PPOTrainer:
                         
                         # Get Values (for RND logging if needed, but mainly for PPO)
                         
-                        _, newlog, ent, newval = agent.get_action_and_value(
-                            b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb]
-                        )
+                        
+                        # Role Regularization (Diversity)
+                        use_div = (self.env.curriculum_stage >= STAGE_TEAM)
+                        
+                        if use_div:
+                             _, newlog, ent, newval, divergence = agent.get_action_and_value(
+                                b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=True
+                             )
+                        else:
+                             divergence = torch.tensor(0.0, device=self.device)
+                             _, newlog, ent, newval = agent.get_action_and_value(
+                                b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=False
+                             )
+                        
                         newval = newval.flatten()
                         ratio = (newlog - b_logp[mb]).exp()
                         
@@ -1621,7 +1638,8 @@ class PPOTrainer:
                         mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
                         
                         pg1 = -mb_adv * ratio
-                        pg2 = -mb_adv * torch.clamp(ratio, 1-CLIP_RANGE, 1+CLIP_RANGE)
+                        current_clip = self.population[i].get('clip_range', CLIP_RANGE)
+                        pg2 = -mb_adv * torch.clamp(ratio, 1-current_clip, 1+current_clip)
                         pg_loss = torch.max(pg1, pg2).mean()
                         
                         v_loss = 0.5 * ((newval - b_ret[mb])**2).mean()
@@ -1629,7 +1647,8 @@ class PPOTrainer:
                         
                         # Use Agent's Specific Entropy Coefficient
                         current_ent_coef = self.population[i].get('ent_coef', ENT_COEF)
-                        loss = pg_loss - current_ent_coef * ent.mean() + VF_COEF * v_loss
+                        div_loss = divergence.mean()
+                        loss = pg_loss - current_ent_coef * ent.mean() + VF_COEF * v_loss - DIV_COEF * div_loss
                         
                         optimizer.zero_grad()
                         loss.backward()

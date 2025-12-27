@@ -25,13 +25,14 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
     *   **Enemy Permutation Invariance**: Processes enemy observations via a **DeepSets Encoders** to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
     *   **Observation Space**: Flattened structure: `[Self Params, Teammate Params, Enemy Context (DeepSets), Checkpoint Vector]`.
 *   **Intrinsic Curiosity (RND)**: Incorporates **Random Network Distillation** to encourage exploration in sparse reward scenarios, preventing premature convergence.
+*   **Role Regularization**: implements a custom **Diversity Loss** (KL Divergence) between the Runner and Blocker heads during the Team stage. This forces the two efficient policy heads to specialize and behave differently in identical situations, preventing mode collapse.
 *   **Prioritized Fictitious Self-Play (PFSP)**: The system maintains a "League" of historical checkpoints. Using a **Payoff Matrix**, it prioritizes opponents with whom the current agent has a ~50% win rate (High Regret), maximizing the learning signal.
 *   **Implicit Exploiters**: 
     *   **Implicit League Exploiter**: Standard PFSP agents that prey on the weaknesses of the entire history.
     *   **Implicit Main Exploiter**: A 10% chance to sample opponents from the **latest generation**, forcing the population to remain robust against the current meta.
 
 ### 🧬 Evolutionary Strategy (GA + RL)
-*   **Population-Based Training (PBT)**: Evolves a population of 32 distinct agents. Agents don't just learn a policy; they evolve their hyperparameters (Learning Rate, Entropy Coefficient) and reward weights over time.
+*   **Population-Based Training (PBT)**: Evolves a population of 32 distinct agents. Agents don't just learn a policy; they evolve their hyperparameters (**Learning Rate**, **Entropy Coefficient**, **Clip Range**) and reward weights over time. This allows the population to dynamically adjust its "conservativeness" and exploration vs exploitation balance.
 *   **NSGA-II Selection**: Uses **Non-Dominated Sorting Genetic Algorithm II** to select elite agents based on multiple conflicting objectives that change per stage:
     *   **Stage 0 (Solo)**: Minimize Steps (Efficiency) + Maximize Checkpoint Streak (Consistency).
     *   **Stage 1 (Duel)**: Maximize Win Streak + Minimize Steps.
