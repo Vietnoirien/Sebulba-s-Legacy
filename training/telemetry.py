@@ -72,10 +72,11 @@ class TelemetryWorker(mp.Process):
         frame_bytes = self.pack_frame(data)
         buffer_obj["frames"].append(frame_bytes)
         
-        # CHUNKED STREAMING
-        # If buffer size > Threshold (e.g. 50 frames ~ 100-200 bytes * 50 = 10KB)
-        if len(buffer_obj["frames"]) >= 50:
-             self.flush_chunk(env_idx, is_final=False, data_ref=data)
+        # CHUNKED STREAMING - DISABLED FOR ATOMICITY
+        # We want to send COMPLETE RACES for "Succession" playback.
+        # Since Sim is fast, buffering 200-500 frames is fine.
+        # if len(buffer_obj["frames"]) >= 50:
+        #      self.flush_chunk(env_idx, is_final=False, data_ref=data)
 
         if is_done:
             # Flush remaining frames as final chunk

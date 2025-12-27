@@ -142,7 +142,7 @@ export const useTelemetry = () => {
                     // Loop runs at 20Hz (50ms).
                     // Backend now sends every step (20Hz).
                     // So we advance 1.0 frames per tick.
-                    const PLAYBACK_SPEED = 1.0;
+                    const PLAYBACK_SPEED = playbackSpeedRef.current;
                     const nextCursor = cursor + PLAYBACK_SPEED;
 
                     // Check boundaries
@@ -227,13 +227,23 @@ export const useTelemetry = () => {
         [ReadyState.UNINSTANTIATED]: 'Uninstantiated',
     }[readyState] as ConnectionStatus
 
+    const [playbackSpeed, _setPlaybackSpeed] = useState(0.5)
+    const playbackSpeedRef = useRef(0.5)
+
+    const setPlaybackSpeed = (speed: number) => {
+        _setPlaybackSpeed(speed)
+        playbackSpeedRef.current = speed
+    }
+
     return {
         telemetry,
         readyState,
         connectionStatus,
         history,
         stats: telemetry?.stats || {},
-        sendMessage
+        sendMessage,
+        playbackSpeed,
+        setPlaybackSpeed
     }
 }
 

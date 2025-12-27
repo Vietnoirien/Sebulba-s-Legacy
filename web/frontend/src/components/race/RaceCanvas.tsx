@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react'
-import { useGameState } from '../../context/GameStateContext'
+import { useGameState, useGameActions } from '../../context/GameStateContext'
 
 // Import assets directly to ensure Vite bundles them
 import redCabin from '../../assets/Red_cabin.png'
@@ -30,6 +30,7 @@ const GAME_HEIGHT = 9000
 export const RaceCanvas: React.FC = () => {
     const canvasRef = useRef<HTMLCanvasElement>(null)
     const { telemetry } = useGameState()
+    const { playbackSpeed, setPlaybackSpeed } = useGameActions()
     const [images, setImages] = useState<Record<string, HTMLImageElement>>({})
     const [debugLines, setDebugLines] = useState(false)
     const [debugText, setDebugText] = useState(false)
@@ -285,6 +286,22 @@ export const RaceCanvas: React.FC = () => {
                             >
                                 {debugText ? 'Debug Text: ON' : 'Debug Text: OFF'}
                             </button>
+
+                            <div className="px-3 py-2 border-t border-gray-700 mt-1 pt-2">
+                                <div className="flex justify-between text-gray-400 text-xs mb-1">
+                                    <span>Speed</span>
+                                    <span>{playbackSpeed.toFixed(1)}x</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min="0.1"
+                                    max="2.0"
+                                    step="0.1"
+                                    value={playbackSpeed}
+                                    onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                                    className="w-full accent-green-500 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                                />
+                            </div>
                         </div>
                     )}
                 </div>

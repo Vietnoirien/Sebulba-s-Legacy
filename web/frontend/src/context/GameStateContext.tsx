@@ -18,6 +18,8 @@ interface GameActionContextType {
     setSelectedModel: (model: string) => void
     viewMode: '2d' | '3d'
     setViewMode: (mode: '2d' | '3d') => void
+    playbackSpeed: number
+    setPlaybackSpeed: (speed: number) => void
 }
 
 const GameStateContext = createContext<GameStateContextType | undefined>(undefined)
@@ -34,8 +36,10 @@ export const GameStateProvider: React.FC<{ children: ReactNode }> = ({ children 
         selectedModel,
         setSelectedModel,
         viewMode,
-        setViewMode
-    }), [telemetryData.sendMessage, selectedModel, viewMode])
+        setViewMode,
+        playbackSpeed: telemetryData.playbackSpeed,
+        setPlaybackSpeed: telemetryData.setPlaybackSpeed
+    }), [telemetryData.sendMessage, selectedModel, viewMode, telemetryData.playbackSpeed, telemetryData.setPlaybackSpeed])
 
     // Volatile State Value
     const stateValue = {

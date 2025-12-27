@@ -150,9 +150,9 @@ class PPOTrainer:
         
         # Telemetry
         # Track 2 distinct streams for visualization continuity
-        self.telemetry_env_indices = [0, 128] # Start with disparate indices (Agent 0 and Agent ~2)
-        self.stats_interval = 100 
-        self.last_telemetry_time = time.time()
+        # Updated to track 8 streams for "Playlist" behavior
+        self.telemetry_env_indices = [0, 512, 1024, 1536, 2048, 2560, 3072, 3584] 
+        self.stats_interval = 100
         
         # EMA Alpha (Smoothing Factor)
         # 0.3 means 30% new, 70% old. 
@@ -1488,34 +1488,40 @@ class PPOTrainer:
                     
                 # Telemetry (Capture BEFORE Reset to see Finish Line state)
                 if telemetry_callback:
-                    current_time = time.time()
-                    # Throttle to 20 Hz (0.05s) to avoid killing performance
-                    if (current_time - self.last_telemetry_time) > 0.05:
-                        self.last_telemetry_time = current_time
+                    # Switch to Step-Based Sampling (Stride = 4 -> 25% of steps)
+                    # Stride 4 + Frontend 20fps = 80 sim steps/sec rendered.
+                    # Sim Physics ~60Hz -> ~1.3x Playback Speed (Smooth Real-time-ish).
+                    TELEMETRY_STRIDE = 4
+                    current_total_step = global_step + step
+                    
+                    if True: # Logic moved inside loop
                         
                         # Extract flags for batch
                         # info['collision_flags'] is [Batch, 4]
                         batch_coll_flags = infos.get("collision_flags", None)
 
                         for t_idx, t_env in enumerate(self.telemetry_env_indices):
-                             # Get Data for CURRENT t_env
-                             # If Done, this is the Finish Line state.
+                             # CRITICAL FIX: Capture if Stride Match OR Done
+                             # If we miss a Done signal, the backend buffer never flushing.
+                             is_stride = (current_total_step % TELEMETRY_STRIDE == 0)
+                             is_done_env = dones[t_env].item()
                              
-                             coll_f = None
-                             if batch_coll_flags is not None:
-                                 coll_f = batch_coll_flags[t_env].cpu().numpy()
+                             if is_stride or is_done_env:
+                                 coll_f = None
+                                 if batch_coll_flags is not None:
+                                     coll_f = batch_coll_flags[t_env].cpu().numpy()
 
-                             telemetry_callback(global_step + step, sps, 0, 0, self.current_win_rate, t_env, 0, None, dones[t_env].item(), 
-                                                rewards_all[t_env].cpu().numpy(), env_actions[t_env].cpu().numpy(), 
-                                                collision_flags=coll_f)
-                             
-                             # Update stream target if current one finished (for NEXT step)
-                             if dones[t_env]:
-                                 done_indices = torch.nonzero(dones).flatten()
-                                 if len(done_indices) > 0:
-                                     candidates = done_indices.tolist()
-                                     new_idx = random.choice(candidates)
-                                     self.telemetry_env_indices[t_idx] = new_idx
+                                 telemetry_callback(global_step + step, sps, 0, 0, self.current_win_rate, t_env, 0, None, is_done_env, 
+                                                    rewards_all[t_env].cpu().numpy(), env_actions[t_env].cpu().numpy(), 
+                                                    collision_flags=coll_f)
+                                 
+                                 # Update stream target if current one finished (for NEXT step)
+                                 if is_done_env:
+                                     done_indices = torch.nonzero(dones).flatten()
+                                     if len(done_indices) > 0:
+                                         candidates = done_indices.tolist()
+                                         new_idx = random.choice(candidates)
+                                         self.telemetry_env_indices[t_idx] = new_idx
                 
                 # --- Behavior Characterization Tracking ---
                 # Track Avg Speed and Steering Variance per Agent

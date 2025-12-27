@@ -17,7 +17,7 @@ class TrainingSession:
         self.stop_event = threading.Event()
         self.running = False
         self.loop = None # Reference to main event loop
-        self.playback_queue = asyncio.Queue(maxsize=500)
+        self.playback_queue = asyncio.Queue(maxsize=5000)
         self.playback_task = None
         self.stats = {} 
         
@@ -293,7 +293,7 @@ class TrainingSession:
                      
                      # Pace the stream (Wait for duration of race)
                      # Assuming 20 FPS recording
-                     await asyncio.sleep(0.1) # Yield but stream immediately
+                     await asyncio.sleep(0.016) # Cap at ~60Hz to prevent flooding frontend
                      
                      active_race = [] # Done
                      continue
@@ -304,7 +304,7 @@ class TrainingSession:
                     if self.stats:
                         payload["stats"].update(self.stats)
                     await self.manager.broadcast(payload)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.016) # Cap at ~60Hz
                     if not active_race:
                         active_race = [] # Clear if empty
                 
@@ -345,19 +345,11 @@ class TrainingSession:
                          
                 elif msg_type == "race_replay":
                     race_params = msg["payload"]
-                    # print(f"DEBUG: Consumer received race replay of length {len(race_params)}")
                     
                     if self.loop:
-                        try:
-                            # Push FULL MSG, not just payload
-                            self.playback_queue.put_nowait(msg)
-                            # print("DEBUG: Pushed replay to Playback Queue")
-                        except asyncio.QueueFull:
-                            # print("DEBUG: Playback Queue Full")
-                            try: self.playback_queue.get_nowait()
-                            except: pass
-                            try: self.playback_queue.put_nowait(msg)
-                            except: pass
+                        # Thread-Safe Queue Push
+                        # Use call_soon_threadsafe because we are invalidating the GIL/Asyncio boundary
+                        self.loop.call_soon_threadsafe(self.playback_queue.put_nowait, msg)
                             
             except Exception as e:
                 print(f"Consumer Error: {e}")
