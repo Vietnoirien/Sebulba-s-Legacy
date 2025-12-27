@@ -22,7 +22,7 @@ class PodActor(nn.Module):
         self.latent_dim = 16
         self.hidden_dim = hidden_dim
         
-        # Enemy Encoder
+        # Shared "Car" Encoder (Used for Enemy AND Teammate)
         self.enemy_encoder = nn.Sequential(
             layer_init(nn.Linear(self.enemy_obs_dim, 32)),
             nn.ReLU(),
@@ -30,7 +30,8 @@ class PodActor(nn.Module):
         )
         
         # Backbone
-        input_dim = self.self_obs_dim + self.teammate_obs_dim + self.latent_dim + self.next_cp_dim
+        # Input: Self(14) + TeammateLatent(16) + EnemyLatent(16) + CP(6) = 52
+        input_dim = self.self_obs_dim + self.latent_dim + self.latent_dim + self.next_cp_dim
         self.backbone = nn.Sequential(
             layer_init(nn.Linear(input_dim, self.hidden_dim)),
             nn.ReLU(),
@@ -50,17 +51,22 @@ class PodActor(nn.Module):
         self.actor_boost = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
 
     def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
-        # Enemy DeepSets
+        # 1. Encode Teammate (Shared Encoder)
+        # Teammate is [B, 13]
+        tm_latent = self.enemy_encoder(teammate_obs) # [B, 16]
+
+        # 2. Encode Enemies (Shared Encoder + DeepSets)
         B, N, _ = enemy_obs.shape
         flat_enemies = enemy_obs.reshape(B * N, -1)
         encodings = self.enemy_encoder(flat_enemies)
         encodings = encodings.view(B, N, -1)
-        enemy_context, _ = torch.max(encodings, dim=1) 
+        enemy_context, _ = torch.max(encodings, dim=1) # [B, 16]
         
-        combined = torch.cat([self_obs, teammate_obs, enemy_context, next_cp_obs], dim=1)
+        # 3. Backbone
+        combined = torch.cat([self_obs, tm_latent, enemy_context, next_cp_obs], dim=1)
         features = self.backbone(combined)
         
-        # Actor
+        # Actor Heads
         thrust_mean = torch.sigmoid(self.actor_thrust_mean(features))
         angle_mean = torch.tanh(self.actor_angle_mean(features))
         std = torch.exp(self.actor_logstd).expand_as(torch.cat([thrust_mean, angle_mean], 1))
@@ -84,16 +90,14 @@ class PodCritic(nn.Module):
         self.latent_dim = 16
         self.hidden_dim = hidden_dim
         
-        # Should structurally match Actor for feature compatibility?
-        # Ideally yes, but we can make it deeper.
-        
         self.enemy_encoder = nn.Sequential(
             layer_init(nn.Linear(self.enemy_obs_dim, 32)),
             nn.ReLU(),
             layer_init(nn.Linear(32, self.latent_dim)),
         )
         
-        input_dim = self.self_obs_dim + self.teammate_obs_dim + self.latent_dim + self.next_cp_dim
+        # Input: Self(14) + TeammateLatent(16) + EnemyLatent(16) + CP(6) = 52
+        input_dim = self.self_obs_dim + self.latent_dim + self.latent_dim + self.next_cp_dim
         self.backbone = nn.Sequential(
             layer_init(nn.Linear(input_dim, self.hidden_dim)),
             nn.ReLU(),
@@ -104,13 +108,18 @@ class PodCritic(nn.Module):
         self.value_head = layer_init(nn.Linear(self.hidden_dim, 1), std=1.0)
 
     def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
+        # 1. Encode Teammate
+        tm_latent = self.enemy_encoder(teammate_obs)
+        
+        # 2. Encode Enemies
         B, N, _ = enemy_obs.shape
         flat_enemies = enemy_obs.reshape(B * N, -1)
         encodings = self.enemy_encoder(flat_enemies)
         encodings = encodings.view(B, N, -1)
         enemy_context, _ = torch.max(encodings, dim=1)
         
-        combined = torch.cat([self_obs, teammate_obs, enemy_context, next_cp_obs], dim=1)
+        # 3. Backbone
+        combined = torch.cat([self_obs, tm_latent, enemy_context, next_cp_obs], dim=1)
         features = self.backbone(combined)
         return self.value_head(features)
 

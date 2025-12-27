@@ -44,22 +44,23 @@ def fuse_normalization_actor(model, rms_stats):
     W = layer.weight.data.cpu().numpy() 
     b = layer.bias.data.cpu().numpy()
     
+    # Input: Self(14) + TeammateLatent(16) + EnemyLatent(16) + CP(6) = 52
     W_self = W[:, 0:14]
-    W_tm   = W[:, 14:27]
-    W_ctx  = W[:, 27:43]
-    W_cp   = W[:, 43:49]
+    W_tm   = W[:, 14:30] # 16 (Latent) - No Norm Fusion needed (internal)
+    W_ctx  = W[:, 30:46] # 16 (Latent) - No Norm Fusion needed (internal)
+    W_cp   = W[:, 46:52] # 6
     
     W_self_new = W_self / std_s[None, :]
     shift_self = np.sum(W_self_new * mean_s[None, :], axis=1)
 
-    W_tm_new = W_tm / std_e[None, :]
-    shift_tm = np.sum(W_tm_new * mean_e[None, :], axis=1)
+    # W_tm and W_ctx take latent inputs from previous layer (ReLU output), 
+    # so they don't need input normalization.
     
     W_cp_new = W_cp / std_c[None, :]
     shift_cp = np.sum(W_cp_new * mean_c[None, :], axis=1)
     
-    W_new = np.concatenate([W_self_new, W_tm_new, W_ctx, W_cp_new], axis=1)
-    b_new = b - shift_self - shift_tm - shift_cp
+    W_new = np.concatenate([W_self_new, W_tm, W_ctx, W_cp_new], axis=1)
+    b_new = b - shift_self - shift_cp
     
     layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
     layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
@@ -156,22 +157,32 @@ class A(N):
     def f(self,s,t,e,c):
         self.c=0
         w1,b1,w2,b2=self.gw(416),self.gw(32),self.gw(512),self.gw(16)
-        encs=[]
-        for en in e:
+        
+        # Helper for Encoder
+        def enc(inp):
             h=[0.0]*32
             for r in range(32):
                 a=b1[r]
-                for j in range(13): a+=en[j]*w1[r*13+j]
+                for j in range(13): a+=inp[j]*w1[r*13+j]
                 h[r]=max(0.0,a)
             z=[0.0]*16
             for r in range(16):
                 a=b2[r]
                 for j in range(32): a+=h[j]*w2[r*32+j]
                 z[r]=a
-            encs.append(z)
+            return z
+            
+        # Encode Enemies
+        encs=[]
+        for en in e: encs.append(enc(en))
         g=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
-        x=s+t+g+c
-        x=self.lin(x,49,HD,True)
+        
+        # Encode Teammate
+        tm = enc(t)
+        
+        # Backbone Input: Self(14)+TM(16)+Ctx(16)+CP(6) = 52
+        x=s+tm+g+c
+        x=self.lin(x,52,HD,True)
         x=self.lin(x,HD,HD,True)
         th=self.lin(x,HD,1)[0]
         an=self.lin(x,HD,1)[0]

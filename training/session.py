@@ -352,6 +352,8 @@ class TrainingSession:
                         self.loop.call_soon_threadsafe(self.playback_queue.put_nowait, msg)
                             
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(f"Consumer Error: {e}")
 
     def _telemetry_callback(self, step, sps, fps_train, reward, win_rate, env_idx, loss, log_line=None, is_done=False, step_rewards=None, step_actions=None, league_stats=None, collision_flags=None):
@@ -424,7 +426,9 @@ class TrainingSession:
                 pass
 
         except Exception as e:
-            pass
+            import traceback
+            traceback.print_exc()
+            print(f"Callback Error: {e}")
 
     def _run_loop(self):
         try:

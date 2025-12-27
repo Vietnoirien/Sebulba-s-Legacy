@@ -52,6 +52,8 @@ class TelemetryWorker(mp.Process):
                     self.process_step(data)
                     
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(f"Telemetry Worker Error: {e}")
                 time.sleep(0.1)
 
