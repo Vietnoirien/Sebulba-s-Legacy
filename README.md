@@ -19,8 +19,8 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
 *   **Split DeepSets Architecture**:  
     *   **Teammate Awareness**: Explicitly feeds teammate observations (Position, Velocity, Shield) directly to the backbone, enabling precise cooperative strategies (e.g., blocking, drafting).
     *   **Heterogeneous Dual-Brain**: We deploy two specialized networks within the same agent:
-        *   **Runner Brain** (Hidden 128): Optimized for racing lines and speed.
-        *   **Blocker Brain** (Hidden 128): Optimized for interception and disruption.
+        *   **Runner Brain** (Hidden 160): Optimized for racing lines and speed.
+        *   **Blocker Brain** (Hidden 160): Optimized for interception and disruption.
         *   This setup fits within the 100k char export limit (~68k chars) while allowing role specialization.
     *   **Enemy Permutation Invariance**: Processes enemy observations via a **DeepSets Encoders** to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
     *   **Observation Space**: Flattened structure: `[Self Params, Teammate Params, Enemy Context (DeepSets), Checkpoint Vector]`.
@@ -52,11 +52,13 @@ The training process is automated through distinct stages of difficulty:
         *   **Standard**: Difficulty increases (+0.05) if Win Rate > **70%**.
         *   **Turbo**: Difficulty increases (+0.10) if Win Rate > **90%**.
         *   **Super Turbo**: Difficulty jumps (+0.20) if Win Rate > **98%**.
+        *   **Insane Turbo**: Difficulty jumps (+0.50) if Win Rate > **99%**.
     *   **Regression Mechanism**:
         *   **Immediate**: Difficulty drops (-0.05) if Win Rate falls below **30%**.
         *   **Persistent**: Difficulty drops if Win Rate stays below **40%** for 2 consecutive checks (2000 games).
 3.  **Stage 2: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. 
     *   **Mitosis Transition**: Upon entering Stage 2, the **Runner's weights are cloned to the Blocker**. This ensures the team starts with two competent drivers, preventing the "Dead Weight Blocker" problem. The Blocker then evolves independently towards aggression.
+    *   **Graduation Thresholds**: Transition to Stage 3 requires **WR >= 0.88** OR (**WR > 0.85** for 5 sequential consistency checks).
     *   **Reward Decoupling**: Rewards are initially calculated per-pod (Individual) to help agents learn basic control in the new environment.
     *   **Team Spirit**: A blending factor (`0.0` to `0.5`) linearly blends the reward signal from "Selfish" (My Velocity/Checkpoints) to "Cooperative" (Team Average) as difficulty increases.
     *   **Adaptive Evolution**: The evolution interval scales dynamically with difficulty (every 16 iterations at Diff 0.0 → every 4 iterations at Diff 1.0) to ensure robust selection during the initial high-variance phase.
@@ -240,8 +242,10 @@ Key configurations can be found in `config.py` and `simulation/env.py`.
 *   **Map Size**: 16000 x 9000
 *   **Physics**: Large Pod Radius (400), High Friction (0.85).
 *   **Reward Function**: 
-    *   Velocity uses a **Dot Product Projection** ($$\vec{v} \cdot \hat{d}$$) where we reward the component of velocity that is aligned with the direction to the next checkpoint. This explicitly encourages moving *towards* the objective while ignoring perpendicular movement.
-    *   Orientation uses a cosine alignment metric with specific penalties for driving the wrong way.
+    *   **Velocity**: Scaled down (weight 0.1) and uses a **Dot Product Projection** ($$\vec{v} \cdot \hat{d}$$) where we reward the component of velocity that is aligned with the direction to the next checkpoint. This explicitly encourages moving *towards* the objective while ignoring perpendicular movement.
+    *   **Orientation**: Uses a cosine alignment metric with specific penalties for driving the wrong way.
+    *   **Proximity**: A dense reward for Blockers proportional to their closeness to enemy Runners (within 3000 units), encouraging interception.
+    *   **Collisions**: High emphasis on Blocker collisions (Weight 1000.0) compared to Race objectives.
     
 ## 🏆 Credits
 
