@@ -1,16 +1,34 @@
 import React, { useRef, useLayoutEffect } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
-import { OrbitControls, Grid } from '@react-three/drei'
+import { OrbitControls, Grid, useTexture } from '@react-three/drei'
 import { useGameState } from '../../context/GameStateContext'
 import * as THREE from 'three'
+import bgImage from '../../assets/background.jpg'
 
 // Constants matching backend (Physics world is roughly 16000x9000)
 const SCALE_FACTOR = 0.01
+const MAP_WIDTH = 16000 * SCALE_FACTOR // 160
+const MAP_HEIGHT = 9000 * SCALE_FACTOR // 90
+const MAP_CENTER_X = MAP_WIDTH / 2     // 80
+const MAP_CENTER_Z = MAP_HEIGHT / 2    // 45
 
 const TEAM_COLORS = [
-    new THREE.Color('#00ffff'), // Team 0: Cyan
-    new THREE.Color('#ff00ff'), // Team 1: Magenta (Pink)
+    new THREE.Color('#ff2222'), // Team 0: Red
+    new THREE.Color('#eeeeee'), // Team 1: White
 ]
+
+const BackgroundRenderer: React.FC = () => {
+    const texture = useTexture(bgImage)
+
+    // Background is 16000x9000. 
+    // Position center at [80, -0.2, 45] to align with game coordinates starting at 0,0
+    return (
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[MAP_CENTER_X, -0.2, MAP_CENTER_Z]}>
+            <planeGeometry args={[MAP_WIDTH, MAP_HEIGHT]} />
+            <meshBasicMaterial map={texture} toneMapped={false} />
+        </mesh>
+    )
+}
 
 const CheckpointsRenderer: React.FC = () => {
     const { telemetry } = useGameState()
@@ -43,7 +61,7 @@ const CheckpointsRenderer: React.FC = () => {
         <instancedMesh ref={meshRef} args={[undefined, undefined, checkpoints.length]}>
             {/* Inner Radius 0.9, Outer 1.0 -> Thin Ring effect. 32 segments */}
             <ringGeometry args={[0.85, 1.0, 32]} />
-            <meshBasicMaterial color="#555" transparent opacity={0.4} side={THREE.DoubleSide} />
+            <meshBasicMaterial color="#555" transparent opacity={0.6} side={THREE.DoubleSide} />
         </instancedMesh>
     )
 }
@@ -51,12 +69,6 @@ const CheckpointsRenderer: React.FC = () => {
 const PodsRenderer: React.FC = () => {
     const { telemetry } = useGameState()
     const meshRef = useRef<THREE.InstancedMesh>(null)
-
-    // We use a ref to accessing telemetry in loop without re-render
-    // But useGameState returns current value. 
-    // Ideally we want the RAW telemetry object reference which stays stable or use a Ref context.
-    // However, `telemetry` from context updates on every frame from the hook.
-    // So passing it via prop or context is fine, but we must use it inside useFrame cautiously.
 
     useFrame(() => {
         if (!meshRef.current || !telemetry?.race_state?.pods) return
@@ -76,41 +88,28 @@ const PodsRenderer: React.FC = () => {
             // Orientation Logic
             // 1. Reset Rotation
             tempObject.rotation.set(0, 0, 0)
-
-            // 2. Rotate to lie flat (Cone Y-up -> Point Z-forward? No, let's point X-forward like backend 0 deg)
-            // Backend 0 rad = East (+X).
-            // Cone Default: Tip at +Y.
-            // Rotate Z -90 deg ( -PI/2 ) -> Tip at +X.
+            // 2. Rotate to lie flat
             tempObject.rotateZ(-Math.PI / 2)
 
             // 3. Determine Heading Angle from Velocity
-            // User requested: "Orient in the way of their last speed vector"
             let heading = pod.angle
             const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
-            if (speed > 5.0) { // Threshold to avoid jitter at near-zero speed
+            if (speed > 5.0) {
                 heading = Math.atan2(pod.vy, pod.vx)
             }
 
-            // 4. Apply Heading (Rotate around GLOBAL Y, which is LOCAL X after previous rotation?)
-            // No, Euler rotations are applied in order (default XYZ).
-            // If we use rotateOnAxis (world) it's easier, or construct Quaternion.
-
-            // Quaternion approach for stability
-            // A: Base orientation (Tip +X)
+            // 4. Apply Heading (Rotate around GLOBAL Y)
             const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2)
-            // B: Heading rotation (around Y axis)
             const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
 
-            // Combine: Apply Heading * Base
+            // Combine
             qHeading.multiply(qBase)
             tempObject.quaternion.copy(qHeading)
 
             tempObject.scale.set(2, 2, 2)
-
             tempObject.updateMatrix()
             meshRef.current!.setMatrixAt(i, tempObject.matrix)
 
-            // Color logic
             const color = TEAM_COLORS[pod.team % TEAM_COLORS.length]
             meshRef.current!.setColorAt(i, color)
         })
@@ -121,9 +120,129 @@ const PodsRenderer: React.FC = () => {
 
     return (
         <instancedMesh ref={meshRef} args={[undefined, undefined, 4]}>
-            {/* Cone pointing forward? Cone points UP by default. Rotate geometry to point +X */}
             <coneGeometry args={[1, 3, 8]} />
             <meshStandardMaterial />
+        </instancedMesh>
+    )
+}
+
+const ThrustRenderer: React.FC = () => {
+    const { telemetry } = useGameState()
+    const meshRef = useRef<THREE.InstancedMesh>(null)
+
+    useFrame(() => {
+        if (!meshRef.current || !telemetry?.race_state?.pods) return
+
+        const pods = telemetry.race_state.pods
+        const tempObject = new THREE.Object3D()
+
+        pods.forEach((pod, i) => {
+            // Check thrust (0-100) or check 200 for boost
+            const thrust = (pod as any).thrust ?? 0
+
+            if (thrust > 1.0) {
+                const x = pod.x * SCALE_FACTOR
+                const z = pod.y * SCALE_FACTOR
+
+                tempObject.position.set(x, 2, z)
+
+                // Orientation matches Pod
+                tempObject.rotation.set(0, 0, 0)
+                tempObject.rotateZ(-Math.PI / 2)
+
+                let heading = pod.angle
+                const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
+                if (speed > 5.0) heading = Math.atan2(pod.vy, pod.vx)
+
+                const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2)
+                const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
+                qHeading.multiply(qBase)
+                tempObject.quaternion.copy(qHeading)
+
+                tempObject.translateX(-4.2)
+                tempObject.rotateZ(Math.PI)
+
+                const tScale = Math.min(thrust / 100.0, 1.5)
+
+                tempObject.scale.set(1, tScale, 1)
+
+                tempObject.updateMatrix()
+                meshRef.current!.setMatrixAt(i, tempObject.matrix)
+            } else {
+                tempObject.scale.set(0, 0, 0)
+                tempObject.updateMatrix()
+                meshRef.current!.setMatrixAt(i, tempObject.matrix)
+            }
+        })
+
+        meshRef.current.instanceMatrix.needsUpdate = true
+    })
+
+    return (
+        <instancedMesh ref={meshRef} args={[undefined, undefined, 4]}>
+            <coneGeometry args={[0.4, 3, 8]} />
+            <meshBasicMaterial color="#ffaa00" transparent opacity={0.8} />
+        </instancedMesh>
+    )
+}
+
+const ShieldsRenderer: React.FC = () => {
+    const { telemetry } = useGameState()
+    const meshRef = useRef<THREE.InstancedMesh>(null)
+    const shieldTimers = useRef<number[]>([])
+
+    useFrame(() => {
+        if (!meshRef.current || !telemetry?.race_state?.pods) return
+
+        const pods = telemetry.race_state.pods
+        const tempObject = new THREE.Object3D()
+
+        if (shieldTimers.current.length !== pods.length) {
+            shieldTimers.current = new Array(pods.length).fill(0)
+        }
+
+        pods.forEach((pod, i) => {
+            // Check collision flag
+            if ((pod as any).collision > 0.5) {
+                // Set decay timer to ~15 frames (250ms)
+                shieldTimers.current[i] = 15
+            }
+
+            // Decrement
+            if (shieldTimers.current[i] > 0) {
+                shieldTimers.current[i]--
+            }
+
+            if (shieldTimers.current[i] > 0) {
+                const x = pod.x * SCALE_FACTOR
+                const z = pod.y * SCALE_FACTOR
+
+                tempObject.position.set(x, 2, z)
+                tempObject.scale.set(3.5, 3.5, 3.5)
+                tempObject.updateMatrix()
+
+                meshRef.current!.setMatrixAt(i, tempObject.matrix)
+            } else {
+                tempObject.scale.set(0, 0, 0)
+                tempObject.updateMatrix()
+                meshRef.current!.setMatrixAt(i, tempObject.matrix)
+            }
+        })
+
+        meshRef.current.instanceMatrix.needsUpdate = true
+    })
+
+    return (
+        <instancedMesh ref={meshRef} args={[undefined, undefined, 4]}>
+            <sphereGeometry args={[1, 16, 16]} />
+            <meshStandardMaterial
+                color="#0088ff"
+                transparent
+                opacity={0.4}
+                emissive="#0044aa"
+                emissiveIntensity={0.5}
+                depthWrite={false}
+            />
         </instancedMesh>
     )
 }
@@ -136,6 +255,7 @@ const SceneContent: React.FC = () => {
             <directionalLight position={[-100, 200, 50]} intensity={1.5} castShadow />
 
             <Grid
+                position={[MAP_CENTER_X, -0.1, MAP_CENTER_Z]}
                 args={[200, 200]}
                 cellSize={10}
                 cellThickness={0.5}
@@ -147,17 +267,13 @@ const SceneContent: React.FC = () => {
                 infiniteGrid
             />
 
-            {/* Ground Plane */}
-            <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
-                <planeGeometry args={[1000, 1000]} />
-                <meshStandardMaterial color="#080808" roughness={0.8} />
-            </mesh>
-
-            {/* Renderers */}
+            <BackgroundRenderer />
             <CheckpointsRenderer />
             <PodsRenderer />
+            <ThrustRenderer />
+            <ShieldsRenderer />
 
-            <OrbitControls makeDefault maxPolarAngle={Math.PI / 2} />
+            <OrbitControls makeDefault target={[MAP_CENTER_X, 0, MAP_CENTER_Z]} maxPolarAngle={Math.PI / 2} />
         </>
     )
 }
@@ -165,9 +281,8 @@ const SceneContent: React.FC = () => {
 export const RaceScene3D: React.FC = () => {
     return (
         <div className="relative w-full aspect-[16/9] bg-black">
-            {/* Note: Parent container in App.tsx sets height */}
             <Canvas
-                camera={{ position: [0, 150, 100], fov: 60 }}
+                camera={{ position: [MAP_CENTER_X, 100, MAP_CENTER_Z + 80], fov: 60 }}
                 shadows
                 dpr={[1, 2]}
                 className="w-full h-full"
@@ -179,8 +294,6 @@ export const RaceScene3D: React.FC = () => {
             <div className="absolute top-4 left-4 text-white/50 text-xs font-mono pointer-events-none select-none z-10">
                 3D MODE (Experimental)
             </div>
-
-            {/* Info Overlay */}
             <div className="absolute bottom-4 right-4 text-right text-white/30 text-[10px] font-mono pointer-events-none select-none z-10">
                 LMB: Rotate | RMB: Pan | Wheel: Zoom
             </div>
