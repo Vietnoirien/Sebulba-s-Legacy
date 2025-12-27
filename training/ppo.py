@@ -937,20 +937,20 @@ class PPOTrainer:
 
 
             # --- Dynamic Config Check ---
-            current_stage = self.env.curriculum_stage
-            target_steps = 256
-            target_evolve = 2
-            
-            if current_stage == STAGE_SOLO:
-                target_steps = 256
-                target_evolve = 2
-            elif current_stage == STAGE_DUEL:
-                target_steps = 512
-                target_evolve = 4
-            else: # STAGE_TEAM or STAGE_LEAGUE
-                target_steps = 256
-                target_evolve = 8
-            
+            current_stage            if self.env.curriculum_stage == STAGE_SOLO:
+                self.current_num_steps = 512
+                self.current_evolve_interval = 4 # Frequent updates for micro-opt
+            elif self.env.curriculum_stage == STAGE_DUEL:
+                self.current_num_steps = 512
+                self.current_evolve_interval = 4
+            elif self.env.curriculum_stage == STAGE_TEAM:
+                self.current_num_steps = 256
+                # Dynamic Interval: Diff 0.0 -> 16, Diff 1.0 -> 4
+                self.current_evolve_interval = int(16 - 12 * self.env.bot_difficulty)
+                self.current_evolve_interval = max(4, self.current_evolve_interval) # Safety clamp
+            elif self.env.curriculum_stage == STAGE_LEAGUE:
+                self.current_num_steps = 512
+                self.current_evolve_interval = 8 # Stable league training         
             # Check Active Pods Change
             current_active_pods_ids = self.get_active_pods()
             active_count = len(current_active_pods_ids)

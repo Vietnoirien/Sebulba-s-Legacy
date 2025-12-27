@@ -50,6 +50,7 @@ The training process is automated through distinct stages of difficulty:
 3.  **Stage 2: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. 
     *   **Reward Decoupling**: Rewards are initially calculated per-pod (Individual) to help agents learn basic control in the new environment.
     *   **Team Spirit**: A blending factor (`0.0` to `0.5`) linearly blends the reward signal from "Selfish" (My Velocity/Checkpoints) to "Cooperative" (Team Average) as difficulty increases.
+    *   **Adaptive Evolution**: The evolution interval scales dynamically with difficulty (every 16 iterations at Diff 0.0 → every 4 iterations at Diff 1.0) to ensure robust selection during the initial high-variance phase.
 4.  **Stage 3: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
 
 ### 📊 Real-Time Visualization
