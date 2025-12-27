@@ -18,6 +18,10 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
 *   **PPO + GAE**: Utilizes Proximal Policy Optimization with Generalized Advantage Estimation for stable and sample-efficient learning.
 *   **Split DeepSets Architecture**:  
     *   **Teammate Awareness**: Explicitly feeds teammate observations (Position, Velocity, Shield) directly to the backbone, enabling precise cooperative strategies (e.g., blocking, drafting).
+    *   **Heterogeneous Dual-Brain**: We deploy two specialized networks within the same agent:
+        *   **Runner Brain** (Hidden 128): Optimized for racing lines and speed.
+        *   **Blocker Brain** (Hidden 128): Optimized for interception and disruption.
+        *   This setup fits within the 100k char export limit (~68k chars) while allowing role specialization.
     *   **Enemy Permutation Invariance**: Processes enemy observations via a **DeepSets Encoders** to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
     *   **Observation Space**: Flattened structure: `[Self Params, Teammate Params, Enemy Context (DeepSets), Checkpoint Vector]`.
 *   **Intrinsic Curiosity (RND)**: Incorporates **Random Network Distillation** to encourage exploration in sparse reward scenarios, preventing premature convergence.
@@ -48,10 +52,24 @@ The training process is automated through distinct stages of difficulty:
         *   **Immediate**: Difficulty drops (-0.05) if Win Rate falls below **30%**.
         *   **Persistent**: Difficulty drops if Win Rate stays below **40%** for 2 consecutive checks (2000 games).
 3.  **Stage 2: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. 
+    *   **Mitosis Transition**: Upon entering Stage 2, the **Runner's weights are cloned to the Blocker**. This ensures the team starts with two competent drivers, preventing the "Dead Weight Blocker" problem. The Blocker then evolves independently towards aggression.
     *   **Reward Decoupling**: Rewards are initially calculated per-pod (Individual) to help agents learn basic control in the new environment.
     *   **Team Spirit**: A blending factor (`0.0` to `0.5`) linearly blends the reward signal from "Selfish" (My Velocity/Checkpoints) to "Cooperative" (Team Average) as difficulty increases.
     *   **Adaptive Evolution**: The evolution interval scales dynamically with difficulty (every 16 iterations at Diff 0.0 → every 4 iterations at Diff 1.0) to ensure robust selection during the initial high-variance phase.
 4.  **Stage 3: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
+
+### 📊 Real-Time Visualization
+*   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.
+
+### 🧬 Evolutionary Strategy (NSGA-II)
+We use a **Multi-Objective Genetic Algorithm** to select the best agents for the next generation.
+*   **Stage 0 (Solo)**: `[Consistency, -Efficiency, Novelty]`
+*   **Stage 1 (Duel)**: `[Win Rate, -Efficiency, Novelty]`
+*   **Stage 2 (Team)**: **Role-Specific Selection**
+    *   **Win Rate**: Primary objective.
+    *   **Runner Velocity**: Maximize average velocity of the Runner pod.
+    *   **Blocker Damage**: Maximize impact damage dealt by the Blocker pod.
+*   **Stage 3 (League)**: `[Win Rate, Laps, -Efficiency]`
 
 ### 📊 Real-Time Visualization
 *   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.

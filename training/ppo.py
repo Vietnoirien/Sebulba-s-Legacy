@@ -111,12 +111,16 @@ class PPOTrainer:
                 'total_cp_steps': 0,
                 'total_cp_hits': 0,
                 'avg_steps': 0.0,
+                'avg_runner_vel': 0.0,
+                'avg_blocker_dmg': 0.0,
                 
                 # --- GA Robustness (EMA Stats) ---
                 'ema_efficiency': None, # Lower is better? We will invert or handle logic.
                 'ema_consistency': None, # Checkpoint Score
                 'ema_wins': None,
                 'ema_laps': None,
+                'ema_runner_vel': None,
+                'ema_blocker_dmg': None,
                 'ema_dist': None, # Novelty Distance
                 
                 # --- Behavior Characterization ---
@@ -633,6 +637,9 @@ class PPOTrainer:
             p['ema_consistency'] = update_ema(float(checkpoints), p['ema_consistency'], self.ema_alpha)
             p['ema_laps'] = update_ema(float(laps), p['ema_laps'], self.ema_alpha)
             
+            p['ema_runner_vel'] = update_ema(p['avg_runner_vel'], p['ema_runner_vel'], self.ema_alpha)
+            p['ema_blocker_dmg'] = update_ema(p['avg_blocker_dmg'], p['ema_blocker_dmg'], self.ema_alpha)
+            
             # EMA Behavior is tricky (Vector)
             # Just overwrite for now or EMA vector? EMA vector is better.
             # p['behavior'] contains current.
@@ -672,27 +679,42 @@ class PPOTrainer:
                 obj = [
                     p['ema_consistency'],
                     -p['ema_efficiency'], 
-                    p['novelty_score'] * 100.0 # Scale up slightly to be comparable magnitude? Normalized sort handles it.
+                    p['novelty_score'] * 100.0
                 ]
                 objectives_list.append(obj)
                 
-        elif stage == STAGE_DUEL or stage == STAGE_TEAM:
+        elif stage == STAGE_DUEL:
             # Objectives:
             # 1. Win Rate (EMA Win Rate) -> Max
             # 2. Efficiency -> Minimize
             # 3. Novelty -> Max
             
             for p in self.population:
-                # ema_wins now tracks Win Rate (0.0 to 1.0)
-                # Scale it up for numerical parity? (e.g. 100.0) 
-                # NSGA-II doesn't strictly need scaling but it helps interpretation.
-                # Let's keep raw 0-1.
                 obj = [
                     p['ema_wins'],
                     -p['ema_efficiency'],
                     p['novelty_score'] * 100.0
                 ]
                 objectives_list.append(obj)
+
+        elif stage == STAGE_TEAM:
+            # Objectives (Role-Specific):
+            # 1. Win Rate (EMA Win Rate) -> Max (Primary)
+            # 2. Runner Velocity (EMA) -> Max
+            # 3. Blocker Damage (EMA) -> Max
+            
+            for p in self.population:
+                 # Safety check for Nones
+                rv = p['ema_runner_vel'] if p['ema_runner_vel'] is not None else 0.0
+                bd = p['ema_blocker_dmg'] if p['ema_blocker_dmg'] is not None else 0.0
+                
+                obj = [
+                    p['ema_wins'],
+                    rv,
+                    bd
+                ]
+                objectives_list.append(obj)
+                
         else: # LEAGUE
              # Objectives:
              # 1. Win Rate (EMA Win Rate) -> Max
@@ -774,6 +796,8 @@ class PPOTrainer:
             loser['ema_wins'] = parent['ema_wins']
             loser['ema_consistency'] = parent['ema_consistency']
             loser['ema_laps'] = parent['ema_laps']
+            loser['ema_runner_vel'] = parent['ema_runner_vel']
+            loser['ema_blocker_dmg'] = parent['ema_blocker_dmg']
             loser['ema_behavior'] = parent['ema_behavior'].clone() if parent.get('ema_behavior') is not None else None
             
             # Mutate Rewards (Still useful for PPO inner loop)
@@ -818,6 +842,8 @@ class PPOTrainer:
             p['max_streak'] = 0
             p['total_cp_steps'] = 0
             p['total_cp_hits'] = 0
+            p['avg_runner_vel'] = 0.0
+            p['avg_blocker_dmg'] = 0.0
             # Reset Behavior Buffer
             p['behavior_buffer'].zero_()
             
@@ -932,25 +958,45 @@ class PPOTrainer:
             # If Stage Changed, we MUST reset the environment to spawn new pods/apply new logic immediately.
             if self.env.curriculum_stage != prev_stage:
                  self.log(f"Config: Stage Transition {prev_stage} -> {self.env.curriculum_stage}. Resetting Environment...")
+                 
+                 # --- Mitosis Strategy (Transition to Team Mode) ---
+                 # If moving from Solo/Duel (Stage < 2) to Team (Stage 2),
+                 # Clone Runner Brain to Blocker Brain to avoid "Dead Weight".
+                 if prev_stage < STAGE_TEAM and self.env.curriculum_stage >= STAGE_TEAM:
+                      self.log("Approaching Team Stage: Executing Mitosis (Cloning Runner -> Blocker)...")
+                      for p in self.population:
+                           agent = p['agent']
+                           # Clone Weights
+                           agent.blocker_actor.load_state_dict(agent.runner_actor.state_dict())
+                           # Reset Optimizer (Critical to break old momentum)
+                           p['optimizer'] = optim.Adam(agent.parameters(), lr=p['lr'], eps=1e-5)
+                           
                  self.env.reset()
                  obs_data = self.env.get_obs()
 
 
             # --- Dynamic Config Check ---
-            current_stage            if self.env.curriculum_stage == STAGE_SOLO:
-                self.current_num_steps = 512
-                self.current_evolve_interval = 4 # Frequent updates for micro-opt
-            elif self.env.curriculum_stage == STAGE_DUEL:
-                self.current_num_steps = 512
-                self.current_evolve_interval = 4
-            elif self.env.curriculum_stage == STAGE_TEAM:
-                self.current_num_steps = 256
+            current_stage = self.env.curriculum_stage
+            target_steps = 256
+            target_evolve = 8
+            
+            if current_stage == STAGE_SOLO:
+                target_steps = 512
+                target_evolve = 4 # Frequent updates for micro-opt
+            elif current_stage == STAGE_DUEL:
+                target_steps = 512
+                target_evolve = 4
+            elif current_stage == STAGE_TEAM:
+                target_steps = 256
                 # Dynamic Interval: Diff 0.0 -> 16, Diff 1.0 -> 4
-                self.current_evolve_interval = int(16 - 12 * self.env.bot_difficulty)
-                self.current_evolve_interval = max(4, self.current_evolve_interval) # Safety clamp
-            elif self.env.curriculum_stage == STAGE_LEAGUE:
-                self.current_num_steps = 512
-                self.current_evolve_interval = 8 # Stable league training         
+                target_evolve = int(16 - 12 * self.env.bot_difficulty)
+                target_evolve = max(4, target_evolve) # Safety clamp
+            elif current_stage == STAGE_LEAGUE:
+                target_steps = 512
+                target_evolve = 8 # Stable league training
+            
+            # Apply Evolve Interval
+            self.current_evolve_interval = target_evolve         
             # Check Active Pods Change
             current_active_pods_ids = self.get_active_pods()
             active_count = len(current_active_pods_ids)
@@ -1294,6 +1340,25 @@ class PPOTrainer:
                          
                     self.population[i]['laps_score'] += active_laps
                     self.population[i]['checkpoints_score'] += active_cps
+                    
+                    # Accumulate Role Metrics
+                    # Velocity is "Speed per Step", so we sum it and later divide by total_steps? 
+                    # Actually logic: We likely want "Avg Velocity". 
+                    # But for now, just Sum it. We can normalize later.
+                    # Or better: Accumulate Sum and Count? Count = Steps * ActivePods (Already known)
+                    
+                    agent_infos_vel = infos['runner_velocity'][start_env:end_env] # [128, 4]
+                    agent_infos_dmg = infos['blocker_damage'][start_env:end_env] # [128, 4]
+                    
+                    active_vel_sum = 0.0
+                    active_dmg_sum = 0.0
+                    
+                    for pid in active_pods:
+                         active_vel_sum += agent_infos_vel[:, pid].sum().item()
+                         active_dmg_sum += agent_infos_dmg[:, pid].sum().item()
+                         
+                    self.population[i]['avg_runner_vel'] += active_vel_sum
+                    self.population[i]['avg_blocker_dmg'] += active_dmg_sum
                     
                     # Track New Metrics
                     start_streak = infos['current_streak'][start_env:end_env] # [128, 4]

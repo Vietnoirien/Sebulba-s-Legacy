@@ -5,122 +5,91 @@ import argparse
 import sys
 import numpy as np
 import os
-from models.deepsets import PodAgent
+from models.deepsets import PodAgent, PodActor
 from config import *
 
 # Constants
 MAX_CHARS = 100000
 
-def fuse_normalization(model, rms_stats):
+def fuse_normalization_actor(model, rms_stats):
     """
-    Fuses RunningMeanStd statistics into the first layer weights.
-    model: PodAgent
+    Fuses RunningMeanStd statistics into a PodActor.
+    model: PodActor
     rms_stats: Dict {'self': state_dict, 'ent': state_dict, 'cp': state_dict}
     """
-    print("Fusing Normalization Statistics...")
+    print(f"Fusing Normalization Statistics into Actor...")
     
-    # helper to get mean/std from state dict
     def get_ms(sd):
         mean = sd['mean'].cpu().numpy()
         var = sd['var'].cpu().numpy()
-        std = np.sqrt(var + 1e-4) # epsilon match
+        std = np.sqrt(var + 1e-4) 
         return mean, std
         
     mean_s, std_s = get_ms(rms_stats['self'])
     mean_e, std_e = get_ms(rms_stats['ent'])
     mean_c, std_c = get_ms(rms_stats['cp'])
     
-    # 1. Fuse Enemy Encoder [0] (Linear 13->32)
-    # W_new = W / std
-    # b_new = b - W * mean / std
-    
+    # 1. Enemy Encoder [0]
     layer = model.enemy_encoder[0]
-    W = layer.weight.data.cpu().numpy() # [32, 13]
-    b = layer.bias.data.cpu().numpy()   # [32]
-    
-    # Fuse
-    # Broadcast std [13] to [32, 13]
+    W = layer.weight.data.cpu().numpy() 
+    b = layer.bias.data.cpu().numpy()
     W_new = W / std_e[None, :]
-    
-    # Bias shift
-    # sum(W_new * mean)
     bias_shift = np.sum(W_new * mean_e[None, :], axis=1)
     b_new = b - bias_shift
-    
-    # Update Layer
     layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
     layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
     
-    # 2. Fuse Backbone [0] (Linear 49->Hidden)
-    # Structure: [Self(14), Teammate(13), Context(16), CP(6)]
-    # Context(16) is internal, no fusion.
-    # Teammate(13) uses rms_ent.
-    
+    # 2. Backbone [0]
     layer = model.backbone[0]
-    W = layer.weight.data.cpu().numpy() # [HD, 49]
-    b = layer.bias.data.cpu().numpy()   # [HD]
+    W = layer.weight.data.cpu().numpy() 
+    b = layer.bias.data.cpu().numpy()
     
-    # Split W into sections
     W_self = W[:, 0:14]
     W_tm   = W[:, 14:27]
     W_ctx  = W[:, 27:43]
     W_cp   = W[:, 43:49]
     
-    # Fuse Self
     W_self_new = W_self / std_s[None, :]
     shift_self = np.sum(W_self_new * mean_s[None, :], axis=1)
 
-    # Fuse Teammate (Use std_e/mean_e)
     W_tm_new = W_tm / std_e[None, :]
     shift_tm = np.sum(W_tm_new * mean_e[None, :], axis=1)
     
-    # Fuse CP
     W_cp_new = W_cp / std_c[None, :]
     shift_cp = np.sum(W_cp_new * mean_c[None, :], axis=1)
     
-    # Reassemble
     W_new = np.concatenate([W_self_new, W_tm_new, W_ctx, W_cp_new], axis=1)
     b_new = b - shift_self - shift_tm - shift_cp
     
-    # Update Layer
     layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
     layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
-    
-    print("Fusion Complete.")
 
 def quantize_weights(model):
     """
-    Extracts weights from model, quantizes them to int8, and returns metadata.
+    Extracts weights from PodActor, returns quantized int8 list.
     """
     weights = []
-    
     ordered_layers = [
-        model.enemy_encoder[0], # Linear 13->32
-        model.enemy_encoder[2], # Linear 32->16
-        model.backbone[0],       # Linear 49->HD
-        model.backbone[2],       # Linear HD->HD
-        model.actor_thrust_mean, # Linear HD->1
-        model.actor_angle_mean,  # Linear HD->1
-        model.actor_shield,      # Linear HD->2
-        model.actor_boost        # Linear HD->2
+        model.enemy_encoder[0], 
+        model.enemy_encoder[2], 
+        model.backbone[0],       
+        model.backbone[2],       
+        model.actor_thrust_mean, 
+        model.actor_angle_mean,  
+        model.actor_shield,      
+        model.actor_boost        
     ]
     
     for layer in ordered_layers:
-        # Weights: [Out, In]
         w = layer.weight.data.cpu().numpy().flatten()
         if layer.bias is not None:
             b = layer.bias.data.cpu().numpy().flatten()
         else:
             b = np.zeros(layer.out_features)
-            
         weights.extend(w)
         weights.extend(b)
         
-    print(f"Total Parameters: {len(weights)}")
-    
     # Quantization
-    # Simple MinMax scaling
-    # Map [Min, Max] -> [-127, 127]
     min_val = min(weights)
     max_val = max(weights)
     scale = max(abs(min_val), abs(max_val)) / 127.0
@@ -134,42 +103,25 @@ def quantize_weights(model):
     return quantized, scale
 
 def encode_data(quantized_data):
-    # Base85 Encoding
     byte_valid = []
     for q in quantized_data:
-        if q < 0:
-            byte_valid.append(q + 256)
-        else:
-            byte_valid.append(q)
-            
-    # Pad to multiple of 4
+        if q < 0: byte_valid.append(q + 256)
+        else: byte_valid.append(q)
     while len(byte_valid) % 4 != 0:
         byte_valid.append(0)
-        
     encoded_str = ""
-    # Process 4 bytes at a time
     for i in range(0, len(byte_valid), 4):
         chunk = byte_valid[i:i+4]
-        # value = (b0 << 24) | (b1 << 16) | ...
         val = (chunk[0] << 24) | (chunk[1] << 16) | (chunk[2] << 8) | chunk[3]
-        
-        # Convert to base 85 (5 chars)
         chars = []
         for _ in range(5):
             chars.append(val % 85)
             val //= 85
-        
-        # Reverse because we want Big Endian for string?
         chars.reverse()
-        
-        for c in chars:
-            encoded_str += chr(c + 33)
-            
-        # Line break every 100 chars? No, keep it compact.
-            
+        for c in chars: encoded_str += chr(c + 33)
     return encoded_str
 
-SINGLE_FILE_TEMPLATE = """import sys, math
+DUAL_FILE_TEMPLATE = """import sys, math
 W,H = {WIDTH},{HEIGHT}
 SP = 1.0/{WIDTH}.0
 SV = 1.0/1000.0
@@ -229,8 +181,11 @@ class A(N):
         an=(math.exp(2*an)-1)/(math.exp(2*an)+1)
         return [th,an,1 if sh[1]>sh[0] else 0,1 if bo[1]>bo[0] else 0]
 
-W_BLOB="{WEIGHTS_BLOB}"
-SC={SCALE_VAL}
+WR="{BLOB_RUNNER}"
+SC_R={SCALE_VAL_R}
+
+WB="{BLOB_BLOCKER}"
+SC_B={SCALE_VAL_B}
 
 def tl(vx,vy,a):
     r=math.radians(a)
@@ -238,7 +193,7 @@ def tl(vx,vy,a):
     return vx*c+vy*s, -vx*s+vy*c
 
 def solve():
-    m=A(W_BLOB,SC)
+    mr=A(WR,SC_R); mb=A(WB,SC_B)
     try:
         input(); C=int(input())
         cps=[list(map(int,input().split())) for _ in range(C)]
@@ -305,7 +260,11 @@ def solve():
                 cx,cy=c2[0]-c1[0],c2[1]-c1[1]
                 cf,cr=tl(cx,cy,p['a'])
                 ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
-                out=m.f(oself,otm,oen,ocp)
+                
+                # --- DUAL LOGIC ---
+                if run[i]: out=mr.f(oself,otm,oen,ocp)
+                else: out=mb.f(oself,otm,oen,ocp)
+                
                 pw=str(int(out[0]*100))
                 if out[2]==1 and scd[i]==0: pw="SHIELD"; scd[i]=4
                 elif out[3]==1 and bavl[0]: pw="BOOST"; bavl[0]=False
@@ -319,45 +278,49 @@ if __name__=="__main__": solve()
 """
 
 def export_model(model_path, output_path="submission.py"):
-    # Load Model
-    agent = PodAgent()
+    # Load Model (Dual Architecture)
+    agent = PodAgent(hidden_dim=160) # Ensure hidden dim matches training
     try:
         agent.load_state_dict(torch.load(model_path, map_location='cpu'))
     except Exception as e:
         print(f"Error loading model: {e}")
-        # Try loading simple state dict if Wrapper present
         ckpt = torch.load(model_path, map_location='cpu')
         if 'state_dict' in ckpt:
             agent.load_state_dict(ckpt['state_dict'])
         else:
             raise e
             
-    # Try Loading Normalization Stats
+    # Normalize
     model_dir = os.path.dirname(model_path)
-    # Assuming standard structure data/generations/gen_X/agent_Y.pt
-    # Stats are in data/generations/gen_X/rms_stats.pt
     rms_path = os.path.join(model_dir, "rms_stats.pt")
     
     if os.path.exists(rms_path):
         print(f"Loading RMS stats from {rms_path}")
         rms_stats = torch.load(rms_path, map_location='cpu')
-        fuse_normalization(agent, rms_stats)
+        fuse_normalization_actor(agent.runner_actor, rms_stats)
+        fuse_normalization_actor(agent.blocker_actor, rms_stats)
     else:
-        print("WARNING: No RMS stats found! Model export will lack normalization.")
+        print("WARNING: No RMS stats found!")
             
-    # Quantize
-    q_data, scale = quantize_weights(agent)
-    encoded = encode_data(q_data)
+    # Quantize Both
+    q_run, scale_run = quantize_weights(agent.runner_actor)
+    q_blk, scale_blk = quantize_weights(agent.blocker_actor)
     
-    print(f"Encoded Size: {len(encoded)} chars")
+    enc_run = encode_data(q_run)
+    enc_blk = encode_data(q_blk)
+    
+    print(f"Encoded Sizes: Runner {len(enc_run)}, Blocker {len(enc_blk)}")
     
     # Escape
-    encoded_escaped = encoded.replace("\\", "\\\\").replace("\"", "\\\"")
+    run_esc = enc_run.replace("\\", "\\\\").replace("\"", "\\\"")
+    blk_esc = enc_blk.replace("\\", "\\\\").replace("\"", "\\\"")
     
-    hidden_dim = getattr(agent, 'hidden_dim', 256) # Default to 256 now
+    hidden_dim = agent.hidden_dim
     
-    script = SINGLE_FILE_TEMPLATE.replace("{WEIGHTS_BLOB}", encoded_escaped)\
-        .replace("{SCALE_VAL}", str(scale))\
+    script = DUAL_FILE_TEMPLATE.replace("{BLOB_RUNNER}", run_esc)\
+        .replace("{SCALE_VAL_R}", str(scale_run))\
+        .replace("{BLOB_BLOCKER}", blk_esc)\
+        .replace("{SCALE_VAL_B}", str(scale_blk))\
         .replace("{WIDTH}", str(WIDTH))\
         .replace("{HEIGHT}", str(HEIGHT))\
         .replace("{HIDDEN_DIM}", str(hidden_dim))
@@ -365,7 +328,8 @@ def export_model(model_path, output_path="submission.py"):
     with open(output_path, 'w') as f:
         f.write(script)
         
-    print(f"Exported to {output_path}")
+    print(f"Exported to {output_path} (Dual Heterogeneous Brain)")
+    print(f"Total Params: {len(q_run) + len(q_blk)}")
     return output_path
 
 def main():

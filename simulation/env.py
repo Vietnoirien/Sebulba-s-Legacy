@@ -910,17 +910,15 @@ class PodRacerEnv:
                 self.stage_metrics["recent_games"] += n_games
 
             elif self.curriculum_stage == STAGE_TEAM:
-                # Team Mode: Winner = 0 means Team 0 won?
-                # winner tensor is 0 if Team 0 won, 1 if Team 1 won.
-                # "winners" logic needs verification:
-                # Currently winners = team_idx (0 or 1).
-                
                 n_wins = mask_w0.sum().item() # Number of Team 0 wins
                 n_games = env_won.sum().item() # Total games finished
                 
                 self.stage_metrics["recent_wins"] += n_wins
                 self.stage_metrics["recent_games"] += n_games
-
+        
+        # Norm Constants
+        S_VEL = 1.0 / 1000.0
+        
         # Update Progress Metric for Next Step
         self.update_progress_metric(torch.arange(self.num_envs, device=self.device))
         
@@ -938,6 +936,10 @@ class PodRacerEnv:
         #   - Hit Enemy Runner (+2.0 * I)
         #   - Push Enemy Backwards (+5.0 * DeltaVel) (TODO: Need velocity delta from physics? Maybe Phase 4 optimization)
         
+        # Metrics Export
+        runner_velocity_metric = torch.zeros((self.num_envs, 4), device=self.device)
+        blocker_damage_metric = torch.zeros((self.num_envs, 4), device=self.device)
+        
         for i in range(4):
             team = i // 2
             enemy_team = 1 - team
@@ -946,61 +948,43 @@ class PodRacerEnv:
             # Am I Runner?
             is_run = self.is_runner[:, i] # [B]
             
+            # Record Velocity Metric (Runner Only)
+            v_mag = torch.norm(self.physics.vel[:, i], dim=1)
+            runner_velocity_metric[:, i] = v_mag * is_run.float() * S_VEL # Normalized or Raw? Let's use Normalized [0..1]
+            
             # My Collisions with Enemies
-            # collisions[:, i, e1] + collisions[:, i, e2]
             impact_e1 = collisions[:, i, enemy_indices[0]]
             impact_e2 = collisions[:, i, enemy_indices[1]]
             total_impact = impact_e1 + impact_e2
             
             # 1. Runner Penalty
-            # If I am runner, penalize impact
-            runner_pen = -w_col_run * total_impact # w_col_run is [B]
-            # Apply only if Runner
-            # Add to INDIVIDUAL reward
+            runner_pen = -w_col_run * total_impact
             self.rewards[:, i] += runner_pen * is_run.float()
             
             # 2. Blocker Bonus
-            # If I am Blocker, Reward collision with ENEMY RUNNER.
-            # Which enemy is runner?
             is_block = ~is_run
-            
             enemy_runner_mask = self.is_runner[:, enemy_indices] # [B, 2]
-            
-            # We need to pick the impact corresponding to the enemy runner
-            # impact_e1 corresponds to enemy_indices[0]
-            # impact_e2 corresponds to enemy_indices[1]
-            
-            # e1_is_run: enemy_runner_mask[:, 0]
-            # e2_is_run: enemy_runner_mask[:, 1]
             
             bonus = torch.zeros(self.num_envs, device=self.device)
             bonus += impact_e1 * enemy_runner_mask[:, 0].float()
             bonus += impact_e2 * enemy_runner_mask[:, 1].float()
             
+            # Record Damage Metric (Blocker Only)
+            blocker_damage_metric[:, i] = bonus * is_block.float()
+            
             # Scale
             blocker_reward = w_col_block * bonus
-            
             self.rewards[:, i] += blocker_reward * is_block.float()
         
             # 3. Teammate Collision Penalty
-            # Defined as collision with my mate
-            # mate_idx logic: 
-            # if i is 0, mate is 1. If 1, mate is 0. 
-            # if 2, mate 3. if 3, mate 2.
-            # mate_idx = i ^ 1
             mate_idx = i ^ 1
-            impact_mate = collisions[:, i, mate_idx] # [B]
-            
-            mate_pen = -w_col_mate * impact_mate
+            impact_mate = collisions[:, i, mate_idx]
             mate_pen = -w_col_mate * impact_mate
             self.rewards[:, i] += mate_pen
             
         # --- Proximity Reward (Blocker -> Enemy Runner) ---
-        # Guide Blockers to be near their targets
         if self.curriculum_stage >= STAGE_DUEL:
-             # For each pod, if I am Blocker, find my Enemy Runner
              for i in range(4):
-                 # active mask? Proximity reward cheap enough to run always, just zeroed by weights.
                  is_block = ~self.is_runner[:, i]
                  if not is_block.any(): continue
                  
@@ -1008,47 +992,21 @@ class PodRacerEnv:
                  enemy_team = 1 - team
                  enemy_indices = torch.tensor([2*enemy_team, 2*enemy_team + 1], device=self.device)
                  
-                 # Identify Enemy Runner
-                 # self.is_runner is [B, 4]. We need [B] index of enemy runner.
-                 # 0 or 1.
-                 e_runner_mask = self.is_runner[:, enemy_indices] # [B, 2]
-                 
-                 # We need dist to Enemy Runner.
-                 # Gather enemy pos.
-                 # We have 2 enemies. We need the one that is runner.
-                 # If both (confusion?), pick 0?
-                 # If neither? Pick 0?
-                 
-                 # Simpler: Iterate enemies. If enemy is runner, calc dist.
+                 e_runner_mask = self.is_runner[:, enemy_indices]
                  prox_rew = torch.zeros(self.num_envs, device=self.device)
-                 
                  p_pos = self.physics.pos[:, i]
                  
                  for e_idx in [0, 1]:
-                      real_e_idx = enemy_indices[e_idx] # Scalar 0..3 (e.g 2) is wrong. tensor.
-                      # manually:
+                      real_e_idx = enemy_indices[e_idx] # tensor
                       real_e = 2 * enemy_team + e_idx
-                      
                       is_e_run = self.is_runner[:, real_e]
-                      
                       e_pos = self.physics.pos[:, real_e]
                       dist = torch.norm(e_pos - p_pos, dim=1)
-                      
-                      # Reward Config:
-                      # Max Reward at 0 distance.
-                      # Radius: 3000.0
                       PROX_RADIUS = 3000.0
-                      
-                      # usage = 1.0 - (dist / Radius)
                       bonus = torch.clamp(1.0 - (dist / PROX_RADIUS), 0.0, 1.0)
-                      
-                      # Only if E is Runner AND I am Blocker
                       condition = is_block & is_e_run
-                      
                       prox_rew[condition] += bonus[condition]
                  
-                 # Apply
-                 # w_prox is [B]
                  self.rewards[:, i] += prox_rew * w_prox * is_block.float()
                  
         # Decrement Role Timer
@@ -1057,11 +1015,10 @@ class PodRacerEnv:
         # Update Roles for Next Step
         all_ids = torch.arange(self.num_envs, device=self.device)
         self._update_roles(all_ids)
-
-        # --- DEBUG: Monitor Pod 0 (Team 0) ---
-        # Only print for Env 0 every 10 steps to reduce spam
-
-
+        
+        # Add Metrics to Info
+        infos['runner_velocity'] = runner_velocity_metric
+        infos['blocker_damage'] = blocker_damage_metric
 
         return rewards, self.dones.clone(), infos
 
