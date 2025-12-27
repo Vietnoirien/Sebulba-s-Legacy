@@ -570,6 +570,9 @@ class PPOTrainer:
             self.team_spirit = target_spirit
         else: # LEAGUE
             self.team_spirit = 1.0
+            
+        # Update Step Penalty based on new difficulty/stage
+        self.update_step_penalty_annealing()
 
     def get_active_pods(self):
         stage = self.env.curriculum_stage
@@ -923,9 +926,13 @@ class PPOTrainer:
         
         # Format Table
         border = "=" * 80
+        
+        # Get Current Step Penalty (Mean, as it might vary slightly or be uniform)
+        curr_step_pen = self.reward_weights_tensor[:, RW_STEP_PENALTY].mean().item()
+        
         self.log(border)
         self.log(f" ITERATION {self.iteration} | Gen {self.generation} | Step {global_step} | SPS {sps}")
-        self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f}")
+        self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f} | Step Pen: {curr_step_pen:.1f}")
         self.log("-" * 80)
         self.log(f" {'Metric':<15} | {'Leader':<10} | {'Pop Avg':<10} | {'Best':<10}")
         self.log("-" * 80)
@@ -936,6 +943,31 @@ class PPOTrainer:
         self.log("-" * 80)
         self.log(f" Loss: {avg_loss:.4f}")
         self.log(border)
+
+    def update_step_penalty_annealing(self):
+        """
+        Anneals Step Penalty based on Curriculum Stage and Bot Difficulty.
+        Stage 0 (Solo): Full Penalty (10.0)
+        Stage > 0: Linear Decay based on Bot Difficulty.
+        """
+        stage = self.env.curriculum_stage
+        base_penalty = DEFAULT_REWARD_WEIGHTS[RW_STEP_PENALTY] # 10.0
+        
+        if stage == STAGE_LEAGUE:
+            # League Mode: No Step Penalty (Pure Win/Loss/Metrics)
+            new_val = 0.0
+        elif stage == STAGE_SOLO:
+            # Full Penalty
+            new_val = base_penalty
+        else:
+            # Anneal: Val = Base * (1.0 - Diff * 0.8)
+            # At Diff 0.0 -> 10.0
+            # At Diff 1.0 -> 2.0
+            anneal_factor = 1.0 - (self.env.bot_difficulty * 0.8)
+            new_val = base_penalty * anneal_factor
+            
+        # Update Tensor
+        self.reward_weights_tensor[:, RW_STEP_PENALTY] = new_val
         
     def train_loop(self, stop_event=None, telemetry_callback=None):
         self.log(f"Starting Evolutionary PPO (Pop: {POP_SIZE}, Envs/Agent: {ENVS_PER_AGENT})...")
