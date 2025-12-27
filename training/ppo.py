@@ -1351,22 +1351,9 @@ class PPOTrainer:
                 # dones is [NUM_ENVS]
                 rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau, team_spirit=self.team_spirit)
                 
-                # --- Reward Blending (Individual vs Team) ---
-                # Team 0: Pod 0, 1. Team 1: Pod 2, 3.
-                r0, r1 = rewards_all[:, 0], rewards_all[:, 1]
-                r2, r3 = rewards_all[:, 2], rewards_all[:, 3]
-                
-                mean_t0 = (r0 + r1) * 0.5
-                mean_t1 = (r2 + r3) * 0.5
-                
-                # Blend
-                blended_rewards = torch.zeros_like(rewards_all)
-                s = self.team_spirit
-                
-                blended_rewards[:, 0] = (1.0 - s) * r0 + s * mean_t0
-                blended_rewards[:, 1] = (1.0 - s) * r1 + s * mean_t0
-                blended_rewards[:, 2] = (1.0 - s) * r2 + s * mean_t1
-                blended_rewards[:, 3] = (1.0 - s) * r3 + s * mean_t1
+                # --- Reward Processing ---
+                # Blending is now handled in Env (Hybrid: Individual Dense + Shared Sparse)
+                blended_rewards = rewards_all
                 
                 # --- Reward Normalization ---
                 # 1. Update Returns Buffer (All 4 channels)
