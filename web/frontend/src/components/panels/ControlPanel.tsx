@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { Play, Square, RotateCcw, Save, Loader, Trash2 } from 'lucide-react'
 import { Button } from '../common/Button'
 import { useGameState, useGameActions } from '../../context/GameStateContext'
@@ -8,8 +9,9 @@ export const ControlPanel: React.FC = () => {
     const { selectedModel, setSelectedModel } = useGameActions()
     const [checkpoints, setCheckpoints] = useState<any[]>([])
     // const [selectedModel, setSelectedModel] = useState<string>("scratch") // Moved to Context
-    const [curriculumMode, setCurriculumMode] = useState<string>("auto")
-    const [curriculumStage, setCurriculumStage] = useState<number>(0)
+    // const [selectedModel, setSelectedModel] = useState<string>("scratch") // Moved to Context
+    const [curriculumMode, setCurriculumMode] = useLocalStorage("spt2_control_curriculumMode", "auto")
+    const [curriculumStage, setCurriculumStage] = useLocalStorage("spt2_control_curriculumStage", 0)
 
     const [generations, setGenerations] = useState<any[]>([])
 

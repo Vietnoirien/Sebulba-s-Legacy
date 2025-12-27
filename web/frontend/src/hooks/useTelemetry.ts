@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import useWebSocket, { ReadyState } from 'react-use-websocket'
 
 const WS_URL = 'ws://localhost:8000/ws/telemetry'
@@ -230,10 +230,10 @@ export const useTelemetry = () => {
     const [playbackSpeed, _setPlaybackSpeed] = useState(0.5)
     const playbackSpeedRef = useRef(0.5)
 
-    const setPlaybackSpeed = (speed: number) => {
+    const setPlaybackSpeed = useCallback((speed: number) => {
         _setPlaybackSpeed(speed)
         playbackSpeedRef.current = speed
-    }
+    }, [])
 
     return {
         telemetry,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { Slider } from '../common/Slider'
 import { useGameActions } from '../../context/GameStateContext'
+import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { Save, Upload, Trash2, Play, Target, Zap, ShieldAlert, Cpu, Database, Shuffle, Rocket } from 'lucide-react'
 
 // Reward Indices (Must match Backend)
@@ -25,10 +26,10 @@ interface ConfigPreset {
 
 export const ConfigPanel: React.FC = () => {
     const { sendMessage, selectedModel } = useGameActions()
-    const [activeTab, setActiveTab] = useState<'general' | 'objectives' | 'physics' | 'combat' | 'transitions' | 'presets'>('general')
+    const [activeTab, setActiveTab] = useLocalStorage<'general' | 'objectives' | 'physics' | 'combat' | 'transitions' | 'presets'>('spt2_config_activeTab', 'general')
 
     // --- State ---
-    const [rewards, setRewards] = useState({
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 5000.0,
@@ -46,17 +47,17 @@ export const ConfigPanel: React.FC = () => {
         team_spirit: 0.0
     })
 
-    const [curriculum, setCurriculum] = useState({
+    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum', {
         stage: 0,
         difficulty: 0.0
     })
 
-    const [hyperparams, setHyperparams] = useState({
+    const [hyperparams, setHyperparams] = useLocalStorage('spt2_config_hyperparams', {
         lr: 1e-4,
         ent_coef: 0.01
     })
 
-    const [transitions, setTransitions] = useState({
+    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions', {
         solo_efficiency_threshold: 28.0,
         solo_consistency_threshold: 2400.0,
         duel_consistency_wr: 0.82,
@@ -69,7 +70,7 @@ export const ConfigPanel: React.FC = () => {
 
     // Presets
     const [presets, setPresets] = useState<ConfigPreset[]>([])
-    const [selectedPreset, setSelectedPreset] = useState<string>("")
+    const [selectedPreset, setSelectedPreset] = useLocalStorage<string>("spt2_config_selectedPreset", "")
     const [saveName, setSaveName] = useState("")
 
     // Fetch Presets on Mount

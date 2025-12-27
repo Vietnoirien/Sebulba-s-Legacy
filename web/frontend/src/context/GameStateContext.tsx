@@ -1,4 +1,5 @@
 import React, { createContext, useContext, type ReactNode, useMemo } from 'react'
+import { useLocalStorage } from '../hooks/useLocalStorage'
 import { useTelemetry, type Telemetry, type ConnectionStatus } from '../hooks/useTelemetry'
 import { ReadyState } from 'react-use-websocket'
 
@@ -27,8 +28,8 @@ const GameActionContext = createContext<GameActionContextType | undefined>(undef
 
 export const GameStateProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const telemetryData = useTelemetry()
-    const [selectedModel, setSelectedModel] = React.useState<string>("scratch")
-    const [viewMode, setViewMode] = React.useState<'2d' | '3d'>('2d')
+    const [selectedModel, setSelectedModel] = useLocalStorage<string>("spt2_ctx_selectedModel", "scratch")
+    const [viewMode, setViewMode] = useLocalStorage<'2d' | '3d'>("spt2_ctx_viewMode", '2d')
 
     // Stable Action Value
     const actionValue = useMemo(() => ({
