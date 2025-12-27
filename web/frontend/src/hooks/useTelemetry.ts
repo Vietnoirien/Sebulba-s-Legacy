@@ -76,9 +76,9 @@ export const useTelemetry = () => {
                 // PUSH to Pending Stack instead of immediate playback queue
                 pendingRaces.current.push(frames)
 
-                // Optimize: If stack is too big (e.g. > 5), drop the oldest ones to save memory
+                // Optimize: If stack is too big (e.g. > 100), drop the oldest ones to save memory
                 // We only care about the latest anyway.
-                if (pendingRaces.current.length > 5) {
+                if (pendingRaces.current.length > 100) {
                     pendingRaces.current.shift() // Remove oldest
                 }
 
@@ -153,10 +153,11 @@ export const useTelemetry = () => {
                     if (pendingRaces.current.length > 0) {
                         // SWAP PRELOAD BUFFER
                         // Strategy: LIFO (Stack) - Take the LATEST, discard older pending
+                        // UPDATE: Do NOT clear the rest. If we have a gap, we want to be able to
+                        // fall back to the next-newest race in the stack.
                         const latestRace = pendingRaces.current.pop();
 
-                        // Clear the rest of the pending stack (Skip intermediate generations)
-                        pendingRaces.current = [];
+                        // pendingRaces.current = []; // REMOVED: Keep the reserve!
 
                         if (latestRace) {
                             replayQueue.current = latestRace;

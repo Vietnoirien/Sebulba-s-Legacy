@@ -150,8 +150,8 @@ class PPOTrainer:
         
         # Telemetry
         # Track 2 distinct streams for visualization continuity
-        # Updated to track 8 streams for "Playlist" behavior
-        self.telemetry_env_indices = [0, 512, 1024, 1536, 2048, 2560, 3072, 3584] 
+        # Updated to track 32 streams (One per agent) to ensure "Playlist" saturation
+        self.telemetry_env_indices = [i * 128 for i in range(32)] 
         self.stats_interval = 100
         
         # EMA Alpha (Smoothing Factor)
