@@ -126,66 +126,6 @@ const PodsRenderer: React.FC = () => {
     )
 }
 
-const ThrustRenderer: React.FC = () => {
-    const { telemetry } = useGameState()
-    const meshRef = useRef<THREE.InstancedMesh>(null)
-
-    useFrame(() => {
-        if (!meshRef.current || !telemetry?.race_state?.pods) return
-
-        const pods = telemetry.race_state.pods
-        const tempObject = new THREE.Object3D()
-
-        pods.forEach((pod, i) => {
-            // Check thrust (0-100) or check 200 for boost
-            const thrust = (pod as any).thrust ?? 0
-
-            if (thrust > 1.0) {
-                const x = pod.x * SCALE_FACTOR
-                const z = pod.y * SCALE_FACTOR
-
-                tempObject.position.set(x, 2, z)
-
-                // Orientation matches Pod
-                tempObject.rotation.set(0, 0, 0)
-                tempObject.rotateZ(-Math.PI / 2)
-
-                let heading = pod.angle
-                const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
-                if (speed > 5.0) heading = Math.atan2(pod.vy, pod.vx)
-
-                const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2)
-                const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
-                qHeading.multiply(qBase)
-                tempObject.quaternion.copy(qHeading)
-
-                tempObject.translateX(-4.2)
-                tempObject.rotateZ(Math.PI)
-
-                const tScale = Math.min(thrust / 100.0, 1.5)
-
-                tempObject.scale.set(1, tScale, 1)
-
-                tempObject.updateMatrix()
-                meshRef.current!.setMatrixAt(i, tempObject.matrix)
-            } else {
-                tempObject.scale.set(0, 0, 0)
-                tempObject.updateMatrix()
-                meshRef.current!.setMatrixAt(i, tempObject.matrix)
-            }
-        })
-
-        meshRef.current.instanceMatrix.needsUpdate = true
-    })
-
-    return (
-        <instancedMesh ref={meshRef} args={[undefined, undefined, 4]}>
-            <coneGeometry args={[0.4, 3, 8]} />
-            <meshBasicMaterial color="#ffaa00" transparent opacity={0.8} />
-        </instancedMesh>
-    )
-}
-
 const ShieldsRenderer: React.FC = () => {
     const { telemetry } = useGameState()
     const meshRef = useRef<THREE.InstancedMesh>(null)
@@ -270,7 +210,6 @@ const SceneContent: React.FC = () => {
             <BackgroundRenderer />
             <CheckpointsRenderer />
             <PodsRenderer />
-            <ThrustRenderer />
             <ShieldsRenderer />
 
             <OrbitControls makeDefault target={[MAP_CENTER_X, 0, MAP_CENTER_Z]} maxPolarAngle={Math.PI / 2} />

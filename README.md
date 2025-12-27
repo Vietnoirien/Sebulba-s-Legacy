@@ -64,6 +64,12 @@ The training process is automated through distinct stages of difficulty:
 
 ### 📊 Real-Time Visualization
 *   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.
+*   **3D Mode (Experimental)**: A new immersive view built with **React Three Fiber**.
+    *   **Visuals**: 
+        *   **Pods**: Rendered as cones with team colors (Red for Self, White for Opponent).
+        *   **Shields**: Visualized as a translucent blue force field extending 250ms after collision.
+        *   **Checkpoints**: Represented as flat rings on the map.
+    *   **Controls**: Full OrbitControls (LMB to Rotate, RMB to Pan, Wheel to Zoom).
 
 ### 🧬 Evolutionary Strategy (NSGA-II)
 We use a **Multi-Objective Genetic Algorithm** to select the best agents for the next generation.
