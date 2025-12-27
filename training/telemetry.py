@@ -68,18 +68,14 @@ class TelemetryWorker(mp.Process):
             
         buffer_obj = self.buffers[env_idx]
         
-        if not is_done:
-            # Pack Frame
-            # Sampling Rate: Record every 4 steps
-            step = int(data['step'])
-            if step % 4 == 0:
-                frame_bytes = self.pack_frame(data)
-                buffer_obj["frames"].append(frame_bytes)
-                
-                # CHUNKED STREAMING
-                # If buffer size > Threshold (e.g. 50 frames ~ 100-200 bytes * 50 = 10KB)
-                if len(buffer_obj["frames"]) >= 50:
-                    self.flush_chunk(env_idx, is_final=False, data_ref=data)
+        # ALWAYS Pack Frame (Throttling is handled by PPO upstream at 20Hz)
+        frame_bytes = self.pack_frame(data)
+        buffer_obj["frames"].append(frame_bytes)
+        
+        # CHUNKED STREAMING
+        # If buffer size > Threshold (e.g. 50 frames ~ 100-200 bytes * 50 = 10KB)
+        if len(buffer_obj["frames"]) >= 50:
+             self.flush_chunk(env_idx, is_final=False, data_ref=data)
 
         if is_done:
             # Flush remaining frames as final chunk

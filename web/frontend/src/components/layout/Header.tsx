@@ -1,10 +1,11 @@
 import React from 'react'
-import { Activity } from 'lucide-react'
-import { useGameState } from '../../context/GameStateContext'
+import { Activity, Box, Layers } from 'lucide-react'
+import { useGameState, useGameActions } from '../../context/GameStateContext'
 import { ReadyState } from 'react-use-websocket'
 
 export const Header: React.FC = () => {
     const { telemetry, readyState, connectionStatus, history } = useGameState()
+    const { viewMode, setViewMode } = useGameActions()
 
     const currentStage = telemetry?.stats?.curriculum_stage || 0
     const winRate = history.length > 0 ? history[history.length - 1].win_rate : 0
@@ -32,6 +33,23 @@ export const Header: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-4 font-mono text-sm">
+
+                {/* View Mode Toggle */}
+                <div className="flex bg-slate-800 rounded border border-gray-700 p-0.5">
+                    <button
+                        onClick={() => setViewMode('2d')}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold uppercase transition-colors ${viewMode === '2d' ? 'bg-teal-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                    >
+                        <Layers size={12} /> 2D
+                    </button>
+                    <button
+                        onClick={() => setViewMode('3d')}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold uppercase transition-colors ${viewMode === '3d' ? 'bg-purple-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                    >
+                        <Box size={12} /> 3D
+                    </button>
+                </div>
+
                 <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-md">
                     <span className="text-gray-400 uppercase text-[10px]">Model</span>
                     <span className="text-neon-cyan font-bold truncate max-w-[150px]">

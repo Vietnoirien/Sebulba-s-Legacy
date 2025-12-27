@@ -139,10 +139,10 @@ export const useTelemetry = () => {
 
                 if (queue.length > 0) {
                     // Playback Speed Factor.
-                    // 5 updates per sec recorded (every 4th step of 20Hz).
                     // Loop runs at 20Hz (50ms).
-                    // We want to advance 0.25 frames per tick.
-                    const PLAYBACK_SPEED = 0.25;
+                    // Backend now sends every step (20Hz).
+                    // So we advance 1.0 frames per tick.
+                    const PLAYBACK_SPEED = 1.0;
                     const nextCursor = cursor + PLAYBACK_SPEED;
 
                     // Check boundaries
@@ -157,10 +157,10 @@ export const useTelemetry = () => {
 
                     // Buffer Cleanup
                     // Keep a window of past frames to avoid indefinite memory growth
-                    // But don't splice too often.
-                    // Increased to 2000 (~100s) to buffer multiple races
-                    if (cursor > 500 && queue.length > 2500) {
-                        const removeCount = 500;
+                    // At 20Hz, 500 frames = 25 seconds.
+                    // Increased thresholds to handle higher frame rate data
+                    if (cursor > 1000 && queue.length > 5000) {
+                        const removeCount = 1000;
                         replayQueue.current.splice(0, removeCount);
                         replayCursor.current -= removeCount;
                         cursor -= removeCount;

@@ -16,6 +16,8 @@ interface GameActionContextType {
     sendMessage: (message: string) => void
     selectedModel: string
     setSelectedModel: (model: string) => void
+    viewMode: '2d' | '3d'
+    setViewMode: (mode: '2d' | '3d') => void
 }
 
 const GameStateContext = createContext<GameStateContextType | undefined>(undefined)
@@ -24,13 +26,16 @@ const GameActionContext = createContext<GameActionContextType | undefined>(undef
 export const GameStateProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const telemetryData = useTelemetry()
     const [selectedModel, setSelectedModel] = React.useState<string>("scratch")
+    const [viewMode, setViewMode] = React.useState<'2d' | '3d'>('2d')
 
     // Stable Action Value
     const actionValue = useMemo(() => ({
         sendMessage: telemetryData.sendMessage,
         selectedModel,
-        setSelectedModel
-    }), [telemetryData.sendMessage, selectedModel])
+        setSelectedModel,
+        viewMode,
+        setViewMode
+    }), [telemetryData.sendMessage, selectedModel, viewMode])
 
     // Volatile State Value
     const stateValue = {
