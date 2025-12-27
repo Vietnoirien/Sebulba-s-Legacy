@@ -5,6 +5,7 @@ import uuid
 import random
 import os
 import queue
+import torch
 from training.ppo import PPOTrainer, NUM_ENVS
 from training.telemetry import TelemetryWorker
 
@@ -128,6 +129,10 @@ class TrainingSession:
                              gen_num = int(match.group(1))
                              self.trainer.generation = gen_num
                              self.trainer.log(f"Resumed from Generation {gen_num}")
+                         
+                         # Load RMS Stats
+                         self._load_rms_stats(path)
+                             
                      else:
                          self.trainer.log(f"No valid agent files found in {model_name}")
                          
@@ -147,6 +152,11 @@ class TrainingSession:
                         gen_num = int(match.group(1))
                         self.trainer.generation = gen_num
                         self.trainer.log(f"Resumed from Generation {gen_num}")
+                    
+                    # Try to load RMS from parent dir (assuming standard structure data/generations/gen_X/agent_Y.pt)
+                    parent_dir = os.path.dirname(path)
+                    self._load_rms_stats(parent_dir)
+                    
                  except Exception as e:
                      self.trainer.log(f"Failed to load {model_name}: {e}")
              else:
@@ -154,6 +164,26 @@ class TrainingSession:
             
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
+
+    def _load_rms_stats(self, directory):
+        """Helper to load normalization statistics if present."""
+        rms_path = os.path.join(directory, "rms_stats.pt")
+        if os.path.exists(rms_path):
+            try:
+                state = torch.load(rms_path, map_location=self.trainer.device)
+                
+                if 'self' in state:
+                    self.trainer.rms_self.load_state_dict(state['self'])
+                if 'ent' in state:
+                    self.trainer.rms_ent.load_state_dict(state['ent'])
+                if 'cp' in state:
+                    self.trainer.rms_cp.load_state_dict(state['cp'])
+                    
+                self.trainer.log(f"Successfully loaded normalization statistics from {rms_path}")
+            except Exception as e:
+                self.trainer.log(f"Failed to load RMS stats from {rms_path}: {e}")
+        else:
+            self.trainer.log(f"Warning: No normalization statistics found at {rms_path}. Agents may perform poorly.")
 
         # Start Playback Task
         if self.loop:

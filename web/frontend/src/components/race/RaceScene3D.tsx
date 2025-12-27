@@ -83,7 +83,15 @@ const PodsRenderer: React.FC = () => {
             // Rotate Z -90 deg ( -PI/2 ) -> Tip at +X.
             tempObject.rotateZ(-Math.PI / 2)
 
-            // 3. Apply Heading (Rotate around GLOBAL Y, which is LOCAL X after previous rotation?)
+            // 3. Determine Heading Angle from Velocity
+            // User requested: "Orient in the way of their last speed vector"
+            let heading = pod.angle
+            const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
+            if (speed > 5.0) { // Threshold to avoid jitter at near-zero speed
+                heading = Math.atan2(pod.vy, pod.vx)
+            }
+
+            // 4. Apply Heading (Rotate around GLOBAL Y, which is LOCAL X after previous rotation?)
             // No, Euler rotations are applied in order (default XYZ).
             // If we use rotateOnAxis (world) it's easier, or construct Quaternion.
 
@@ -91,14 +99,7 @@ const PodsRenderer: React.FC = () => {
             // A: Base orientation (Tip +X)
             const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2)
             // B: Heading rotation (around Y axis)
-            // Backend angle: CCW from +X.
-            // ThreeJS Y-axis rotation: CCW from +X? Yes.
-            // But 2D y is 3D z. 
-            // 0 deg -> +X. 90 deg -> +Y(2D) -> +Z(3D).
-            // So -angle? In 3D +Z is "Down/South" usually or "Back".
-            // Let's rely on standard mapping: 3D Y-rotation -angle usually aligns 2D/3D coord systems.
-
-            const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -pod.angle)
+            const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
 
             // Combine: Apply Heading * Base
             qHeading.multiply(qBase)
