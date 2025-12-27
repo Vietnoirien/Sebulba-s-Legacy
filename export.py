@@ -205,86 +205,86 @@ def tl(vx,vy,a):
 
 def solve():
     mr=A(WR,SC_R); mb=A(WB,SC_B)
-    try:
-        input(); C=int(input())
-        cps=[list(map(int,input().split())) for _ in range(C)]
-        laps,p_ncp,to,scd,bavl=[0]*4,[1]*4,[100]*4,[0]*4,[True,True]
-        while True:
-            pods=[]
-            for i in range(2): x,y,vx,vy,a,n=map(int,input().split()); pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':i,'tm':0})
-            for i in range(2): x,y,vx,vy,a,n=map(int,input().split()); pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':i+2,'tm':1})
-            for i in range(4):
-                p=pods[i]
-                if p['n']!=p_ncp[i]:
-                    if p['n']==1 and p_ncp[i]==C: laps[i]+=1
-                    elif p['n']==0 and p_ncp[i]==C-1: laps[i]+=1
-                    to[i]=100
-                else: to[i]-=1
-                p_ncp[i]=p['n']
-            scrs=[]
-            for i in range(4):
-                p=pods[i]; cp=cps[p['n']] if p['n']<len(cps) else cps[0]
-                d=math.sqrt((p['x']-cp[0])**2+(p['y']-cp[1])**2)
-                scrs.append(laps[i]*50000+p['n']*500+(20000-d))
-            run=[False]*4
-            if scrs[0]>=scrs[1]: run[0]=True
-            else: run[1]=True
+
+    # print("Init done", file=sys.stderr)
+    input(); C=int(input())
+    cps=[list(map(int,input().split())) for _ in range(C)]
+    laps,p_ncp,to,scd,bavl=[0]*4,[1]*4,[100]*4,[0]*4,[True,True]
+    while True:
+        pods=[]
+        for i in range(2): x,y,vx,vy,a,n=map(int,input().split()); pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':i,'tm':0})
+        for i in range(2): x,y,vx,vy,a,n=map(int,input().split()); pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':i+2,'tm':1})
+        for i in range(4):
+            p=pods[i]
+            if p['n']!=p_ncp[i]:
+                if p['n']==1 and p_ncp[i]==C: laps[i]+=1
+                elif p['n']==0 and p_ncp[i]==C-1: laps[i]+=1
+                to[i]=100
+            else: to[i]-=1
+            p_ncp[i]=p['n']
+        scrs=[]
+        for i in range(4):
+            p=pods[i]; cp=cps[p['n']] if p['n']<len(cps) else cps[0]
+            d=math.sqrt((p['x']-cp[0])**2+(p['y']-cp[1])**2)
+            scrs.append(laps[i]*50000+p['n']*500+(20000-d))
+        run=[False]*4
+        if scrs[0]>=scrs[1]: run[0]=True
+        else: run[1]=True
+        
+        for i in range(2):
+            p=pods[i]
+            vf,vr=tl(p['vx'],p['vy'],p['a'])
+            fvf,fvr=vf*SV,vr*SV
+            tar=cps[p['n']]
+            gx,gy=tar[0]-p['x'],tar[1]-p['y']
+            tf,tr=tl(gx,gy,p['a'])
+            ftf,ftr=tf*SP,tr*SP
+            ftd=math.sqrt(gx**2+gy**2)*SP
+            ds=ftd+1e-6
+            fac,fas=(ftf/SP)/(ds/SP),(ftr/SP)/(ds/SP)
+            fsh=scd[i]/3.0
+            fbo=1.0 if bavl[0] else 0.0
+            fto=to[i]/100.0
+            fla=laps[i]/3.0
+            fle=1.0 if run[i] else 0.0
+            vm=math.sqrt(p['vx']**2+p['vy']**2)*SV
+            oself=[fvf,fvr,ftf,ftr,ftd,fac,fas,fsh,fbo,fto,fla,fle,vm,0.0]
+            otm,oen=[],[]
+            for j in range(4):
+                if i==j: continue
+                o=pods[j]
+                dx,dy=o['x']-p['x'],o['y']-p['y']
+                dvx,dvy=o['vx']-p['vx'],o['vy']-p['vy']
+                dpf,dpr=tl(dx,dy,p['a'])
+                dvf,dvr=tl(dvx,dvy,p['a'])
+                ra=o['a']-p['a']; rr=math.radians(ra)
+                dist=math.sqrt(dx**2+dy**2)*SP
+                mate=1.0 if o['tm']==p['tm'] else 0.0
+                osh=1.0 if scd[j]>0 else 0.0
+                ot=cps[o['n']]
+                otx,oty=ot[0]-p['x'],ot[1]-p['y']
+                otf,otr=tl(otx,oty,p['a'])
+                feat=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dist,mate,osh,otf*SP,otr*SP,0.0,0.0]
+                if o['tm']==p['tm']: otm.extend(feat)
+                else: oen.append(feat)
+            if not otm: otm=[0.0]*13
+            c1=cps[p['n']]; c2=cps[(p['n']+1)%len(cps)]
+            cx,cy=c2[0]-c1[0],c2[1]-c1[1]
+            cf,cr=tl(cx,cy,p['a'])
+            ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
             
-            for i in range(2):
-                p=pods[i]
-                vf,vr=tl(p['vx'],p['vy'],p['a'])
-                fvf,fvr=vf*SV,vr*SV
-                tar=cps[p['n']]
-                gx,gy=tar[0]-p['x'],tar[1]-p['y']
-                tf,tr=tl(gx,gy,p['a'])
-                ftf,ftr=tf*SP,tr*SP
-                ftd=math.sqrt(gx**2+gy**2)*SP
-                ds=ftd+1e-6
-                fac,fas=(ftf/SP)/(ds/SP),(ftr/SP)/(ds/SP)
-                fsh=scd[i]/3.0
-                fbo=1.0 if bavl[0] else 0.0
-                fto=to[i]/100.0
-                fla=laps[i]/3.0
-                fle=1.0 if run[i] else 0.0
-                vm=math.sqrt(p['vx']**2+p['vy']**2)*SV
-                oself=[fvf,fvr,ftf,ftr,ftd,fac,fas,fsh,fbo,fto,fla,fle,vm,0.0]
-                otm,oen=[],[]
-                for j in range(4):
-                    if i==j: continue
-                    o=pods[j]
-                    dx,dy=o['x']-p['x'],o['y']-p['y']
-                    dvx,dvy=o['vx']-p['vx'],o['vy']-p['vy']
-                    dpf,dpr=tl(dx,dy,p['a'])
-                    dvf,dvr=tl(dvx,dvy,p['a'])
-                    ra=o['a']-p['a']; rr=math.radians(ra)
-                    dist=math.sqrt(dx**2+dy**2)*SP
-                    mate=1.0 if o['tm']==p['tm'] else 0.0
-                    osh=1.0 if scd[j]>0 else 0.0
-                    ot=cps[o['n']]
-                    otx,oty=ot[0]-p['x'],ot[1]-p['y']
-                    otf,otr=tl(otx,oty,p['a'])
-                    feat=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dist,mate,osh,otf*SP,otr*SP,0.0,0.0]
-                    if o['tm']==p['tm']: otm.extend(feat)
-                    else: oen.append(feat)
-                if not otm: otm=[0.0]*13
-                c1=cps[p['n']]; c2=cps[(p['n']+1)%len(cps)]
-                cx,cy=c2[0]-c1[0],c2[1]-c1[1]
-                cf,cr=tl(cx,cy,p['a'])
-                ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
-                
-                # --- DUAL LOGIC ---
-                if run[i]: out=mr.f(oself,otm,oen,ocp)
-                else: out=mb.f(oself,otm,oen,ocp)
-                
-                pw=str(int(out[0]*100))
-                if out[2]==1 and scd[i]==0: pw="SHIELD"; scd[i]=4
-                elif out[3]==1 and bavl[0]: pw="BOOST"; bavl[0]=False
-                if scd[i]>0: scd[i]-=1
-                tx=int(p['x']+math.cos(math.radians(p['a']+out[1]*18.0))*10000)
-                ty=int(p['y']+math.sin(math.radians(p['a']+out[1]*18.0))*10000)
-                print(f"{tx} {ty} {pw}")
-            turn+=1
-    except: pass   
+            # --- DUAL LOGIC ---
+            if run[i]: out=mr.f(oself,otm,oen,ocp)
+            else: out=mb.f(oself,otm,oen,ocp)
+            
+            pw=str(int(out[0]*100))
+            if out[2]==1 and scd[i]==0: pw="SHIELD"; scd[i]=4
+            elif out[3]==1 and bavl[0]: pw="BOOST"; bavl[0]=False
+            if scd[i]>0: scd[i]-=1
+            tx=int(p['x']+math.cos(math.radians(p['a']+out[1]*18.0))*10000)
+            ty=int(p['y']+math.sin(math.radians(p['a']+out[1]*18.0))*10000)
+            print(f"{tx} {ty} {pw}", flush=True)
+
 if __name__=="__main__": solve()
 """
 
