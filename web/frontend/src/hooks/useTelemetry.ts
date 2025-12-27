@@ -58,8 +58,9 @@ export const useTelemetry = () => {
     const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
     const [history, setHistory] = useState<any[]>([])
 
-    // Replay State - Use Refs for high-frequency updates and buffering without re-renders
-    const replayQueue = useRef<ParsedFrame[]>([])
+    // Replay State
+    const replayQueue = useRef<ParsedFrame[]>([]) // The CURRENT race being played
+    const pendingRaces = useRef<ParsedFrame[][]>([]) // Stack of incoming races
     const replayCursor = useRef(0)
     const lastFrameTime = useRef(0)
 
@@ -71,8 +72,15 @@ export const useTelemetry = () => {
             if (msg.type === "race_replay" && msg.format === "binary_base64") {
                 // New Binary Format
                 const frames = parseBinaryReplay(msg.payload, msg.checkpoints, msg.race_id)
-                // Append to queue BUFFER
-                replayQueue.current.push(...frames)
+
+                // PUSH to Pending Stack instead of immediate playback queue
+                pendingRaces.current.push(frames)
+
+                // Optimize: If stack is too big (e.g. > 5), drop the oldest ones to save memory
+                // We only care about the latest anyway.
+                if (pendingRaces.current.length > 5) {
+                    pendingRaces.current.shift() // Remove oldest
+                }
 
                 // Update Metadata immediately (useful for iteration/gen info)
                 setTelemetry(prev => {
@@ -134,14 +142,34 @@ export const useTelemetry = () => {
             if (diff > 50) {
                 lastFrameTime.current = timestamp
 
-                const queue = replayQueue.current
                 let cursor = replayCursor.current
 
+                // CHECK TRANSITION: If queue empty OR at end of race
+                // We check if we have pending races to jump to.
+                const atEndOfRace = (replayQueue.current.length > 0 && cursor >= replayQueue.current.length - 1);
+                const queueEmpty = replayQueue.current.length === 0;
+
+                if (queueEmpty || atEndOfRace) {
+                    if (pendingRaces.current.length > 0) {
+                        // SWAP PRELOAD BUFFER
+                        // Strategy: LIFO (Stack) - Take the LATEST, discard older pending
+                        const latestRace = pendingRaces.current.pop();
+
+                        // Clear the rest of the pending stack (Skip intermediate generations)
+                        pendingRaces.current = [];
+
+                        if (latestRace) {
+                            replayQueue.current = latestRace;
+                            replayCursor.current = 0;
+                            cursor = 0;
+                            // console.log("Switched to new race. Length:", latestRace.length);
+                        }
+                    }
+                }
+
+                // PLAYBACK
+                const queue = replayQueue.current
                 if (queue.length > 0) {
-                    // Playback Speed Factor.
-                    // Loop runs at 20Hz (50ms).
-                    // Backend now sends every step (20Hz).
-                    // So we advance 1.0 frames per tick.
                     const PLAYBACK_SPEED = playbackSpeedRef.current;
                     const nextCursor = cursor + PLAYBACK_SPEED;
 
@@ -153,17 +181,6 @@ export const useTelemetry = () => {
                     } else {
                         replayCursor.current = nextCursor;
                         cursor = nextCursor;
-                    }
-
-                    // Buffer Cleanup
-                    // Keep a window of past frames to avoid indefinite memory growth
-                    // At 20Hz, 500 frames = 25 seconds.
-                    // Increased thresholds to handle higher frame rate data
-                    if (cursor > 1000 && queue.length > 5000) {
-                        const removeCount = 1000;
-                        replayQueue.current.splice(0, removeCount);
-                        replayCursor.current -= removeCount;
-                        cursor -= removeCount;
                     }
 
                     // Render
