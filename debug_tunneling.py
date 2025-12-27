@@ -28,7 +28,7 @@ def test_tunneling():
     
     # 3. Step
     actions = torch.zeros((1, 4, 4))
-    rewards, dones = env.step(actions)
+    rewards, dones, _ = env.step(actions, None)
     
     # 4. Results
     print(f"Final Pos: {env.physics.pos[0, 0]}")

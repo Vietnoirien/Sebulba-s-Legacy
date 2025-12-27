@@ -65,7 +65,7 @@ class PPOTrainer:
         self.iteration = 0
         
         # Reward Tensors [4096, 11]
-        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 11), device=self.device)
+        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 12), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((14,), device=self.device)
@@ -79,7 +79,7 @@ class PPOTrainer:
         
         # Reward Normalization
         self.rms_ret = RunningMeanStd((1,), device=self.device)
-        self.returns_buffer = torch.zeros(NUM_ENVS, device=self.device)
+        self.returns_buffer = torch.zeros((NUM_ENVS, 4), device=self.device)
         
         for i in range(POP_SIZE):
             agent = PodAgent().to(self.device)
@@ -789,8 +789,10 @@ class PPOTrainer:
             # Mutate Hyperparams
             if random.random() < 0.3:
                 loser['lr'] *= random.uniform(0.8, 1.2)
-                for param_group in loser['optimizer'].param_groups:
-                    param_group['lr'] = loser['lr']
+                
+            # Reset Optimizer to clear bad momentum!
+            # We must create a NEW optimizer instance with the parameters of the cloned model.
+            loser['optimizer'] = optim.Adam(loser['agent'].parameters(), lr=loser['lr'], eps=1e-5)
             
             if random.random() < 0.3:
                 loser['ent_coef'] *= random.uniform(0.8, 1.2)
@@ -1184,6 +1186,8 @@ class PPOTrainer:
                 current_tau = 0.0
                 if self.env.curriculum_stage == STAGE_DUEL:
                     current_tau = 0.5
+                elif self.env.curriculum_stage == STAGE_TEAM:
+                    current_tau = 0.0
                 elif self.env.curriculum_stage == STAGE_LEAGUE:
                     current_tau = 0.9
                 
@@ -1194,127 +1198,81 @@ class PPOTrainer:
                 # dones is [NUM_ENVS]
                 rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau, team_spirit=self.team_spirit)
                 
-                # Extract Team 0 Reward for Training
-                # We assume we are training Team 0.
-                rewards = rewards_all[:, 0]
+                # --- Reward Blending (Individual vs Team) ---
+                # Team 0: Pod 0, 1. Team 1: Pod 2, 3.
+                r0, r1 = rewards_all[:, 0], rewards_all[:, 1]
+                r2, r3 = rewards_all[:, 2], rewards_all[:, 3]
+                
+                mean_t0 = (r0 + r1) * 0.5
+                mean_t1 = (r2 + r3) * 0.5
+                
+                # Blend
+                blended_rewards = torch.zeros_like(rewards_all)
+                s = self.team_spirit
+                
+                blended_rewards[:, 0] = (1.0 - s) * r0 + s * mean_t0
+                blended_rewards[:, 1] = (1.0 - s) * r1 + s * mean_t0
+                blended_rewards[:, 2] = (1.0 - s) * r2 + s * mean_t1
+                blended_rewards[:, 3] = (1.0 - s) * r3 + s * mean_t1
                 
                 # --- Reward Normalization ---
-                # Based on SB3 implementation: Normalize rewards by dividing by std(returns).
-                # We track returns: ret = r + gamma * ret * (1-dones)
-                # Then update RMS(ret).
-                # Then r_norm = r / sqrt(var + epsilon)
+                # 1. Update Returns Buffer (All 4 channels)
+                dones_exp = dones.unsqueeze(1).expand(-1, 4)
+                self.returns_buffer = blended_rewards + GAMMA * self.returns_buffer * (~dones_exp).float()
                 
-                # 1. Update Returns Buffer
-                # rewards, dones are [NUM_ENVS].
-                self.returns_buffer = rewards + GAMMA * self.returns_buffer * (~dones).float()
-                
-                # 2. Update RMS
-                self.rms_ret.update(self.returns_buffer)
+                # 2. Update RMS (Flattened)
+                self.rms_ret.update(self.returns_buffer.view(-1))
                 
                 # 3. Normalize
-                # Scale between 0.01 and 10 to avoid explosions or vanishing
-                # We use the std (sqrt(var))
-                # clamp min var to 1e-4
                 rew_var = torch.clamp(self.rms_ret.var, min=1e-4)
                 rew_std = torch.sqrt(rew_var)
-                
-                # Clip max scaling to avoid massive rewards early on
-                # But typically we just divide.
-                # Normalize:
-                norm_rewards = torch.clamp(rewards / rew_std, -10.0, 10.0)
+                norm_rewards = torch.clamp(blended_rewards / rew_std, -10.0, 10.0) # [B, 4]
                 
                 # --- Intrinsic Curiosity Update ---
-                # Calculate RND Reward on Normalized Observations
-                # We need normalized obs for CURRENT step.
-                # norm_self is [N_Active, NUM_ENVS, 14]. We need active slice?
-                # Actually, norm_self contains ALL active agents' obs.
-                # But we only want to optimize RND for active agents?
-                # RND update usually done on Mini-Batches during Optimization Phase to match Policy?
-                # Or Online?
-                # Standard RND: Update Predictor on collection batch or minibatch.
-                # Usually Minibatch for stability.
-                # But computing intrinsic reward must happen HERE for collection.
-                
-                # We need normalized 'self' obs for the active pods corresponding to 'rewards' (team 0).
-                # active_pods could be [0] (Solo) or [0, 1] (League)
-                # norm_self structure: [N_Active_Pods, NUM_ENVS, 14]
-                # If Solo (active=[0]), norm_self is [1, 4096, 14].
-                # If League (active=[0,1]), norm_self is [2, 4096, 14].
-                
-                # We combine all active experiences for RND reward calculation
+                # RND Logic
                 rnd_input = norm_self.reshape(-1, 14).detach() # [N_Active * NUM_ENVS, 14]
-                
-                # Compute Intrinsic Reward
                 intrinsic_rewards = self.rnd.compute_intrinsic_reward(rnd_input) # [N_Active * NUM_ENVS]
                 
-                # Normalize Intrinsic Reward? RND paper suggests normalizing by running std of intrinsic.
-                # For simplicity, we just scale by coefficient.
-                # But typically intrinsic rewards decay.
-                # For now: Raw RND * Coef.
-                
-                # We need to map intrinsic rewards back to Agents [POP_SIZE]
-                # intrinsic_rewards matches the flattening of norm_self.
-                # norm_self was ordered: Pod0(EnableEnvs), Pod1(EnableEnvs)...
-                # agent_batches logic:
-                # for i in range(POP_SIZE): start..end.
-                # But wait, norm_self was [N_Active, NUM_ENVS, 14].
-                # If we flattened to [N*E, 14], it's Pod 0 (All Envs), Pod 1 (All Envs).
-                
-                # We need to slice per agent.
-                # This is tricky if we have multiple pods per agent.
-                # Let's keep it simple: Add to extrinsic.
-                
-                # Re-shape intrinsic to [N_Active, NUM_ENVS]
+                # Map Intrinsic to Pods
                 r_int = intrinsic_rewards.view(len(active_pods), NUM_ENVS)
                 
-                # We want to add this to 'norm_rewards' which is [NUM_ENVS] (Team Reward).
-                # If multiple pods, we Average or Sum intrinsic? 
-                # Team Intrinsic = Sum(Pod Intrinsic).
-                team_intrinsic = r_int.sum(dim=0) # [NUM_ENVS]
-                
-                # Add to Extrinsic (Weighted)
-                # Note: norm_rewards is ALREADY normalized extrinsic.
-                # Adding unnormalized intrinsic might be unbalanced.
-                # But typically RND is auxiliary.
-                # Let's add it.
-                
-                # Optimize: only apply during Stage 0 (Solo)? 
-                # User asked to "speed up Solver phase of Stage 0".
-                # RND is expensive. Let's apply only if Stage == 0?
-                # User: "Missing Intrinsic Curiosity... could speed up... Stage 0".
-                # Let's enabled it always or just Stage 0?
-                # Safe to enable always but maybe decay coef.
-                
                 if self.env.curriculum_stage == STAGE_SOLO:
-                     norm_rewards += team_intrinsic * self.rnd_coef
+                     # Only add to Pod 0 (active_pods[0])
+                     norm_rewards[:, 0] += r_int[0] * self.rnd_coef
 
-                
                 # Split rewards back to agents
                 for i in range(POP_SIZE):
                     start_env = i * ENVS_PER_AGENT
                     end_env = start_env + ENVS_PER_AGENT
                     
-                    r_slice = norm_rewards[start_env:end_env]  # Normalized
-                    raw_r_slice = rewards[start_env:end_env]   # For logging score
+                    r_chunks = []
+                    d_chunks = []
+                    
+                    raw_sum = 0
+                    raw_count = 0
+                    
                     d_slice = dones[start_env:end_env]
                     
-                    # Store in batch
-                    # Filter for active team/pods
-                    # If multiple active pods, we replicate the TEAM reward/done signal.
-                    # Because env.step returns TEAM reward.
-                    
-                    if len(active_pods) > 1:
-                        flat_r = torch.cat([r_slice] * len(active_pods), dim=0)
-                        flat_d = torch.cat([d_slice] * len(active_pods), dim=0)
-                    else:
-                        flat_r = r_slice
-                        flat_d = d_slice
+                    for p_idx, pid in enumerate(active_pods):
+                        r_slice = norm_rewards[start_env:end_env, pid]
+                        r_chunks.append(r_slice)
+                        d_chunks.append(d_slice)
+                        
+                        # Logging Raw (Blended or Pure? Let's log Blended as that's what we see)
+                        # Actually pure env feedback is useful (rewards_all).
+                        raw_r = rewards_all[start_env:end_env, pid]
+                        raw_sum += raw_r.mean().item()
+                        raw_count += 1
+                        
+                    flat_r = torch.cat(r_chunks, dim=0)
+                    flat_d = torch.cat(d_chunks, dim=0)
                         
                     self.agent_batches[i]['rewards'][step] = flat_r.detach()
                     self.agent_batches[i]['dones'][step] = flat_d.float().detach()
                     
                     # Track Score for Evolution (Use RAW rewards)
-                    self.population[i]['reward_score'] += raw_r_slice.mean().item()
+                    if raw_count > 0:
+                        self.population[i]['reward_score'] += (raw_sum / raw_count)
                     
                     # Track Cumulative Metrics (Laps & Checkpoints)
                     # infos['laps_completed'] is [4096, 4]

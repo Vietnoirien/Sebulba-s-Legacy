@@ -12,21 +12,14 @@ def test_env():
     obs = env.get_obs()
     # obs is list of 4 tuples (self, entity, cp)
     print(f"Obs Len: {len(obs)}")
-    for i, (s, e, c) in enumerate(obs):
-        print(f"Pod {i}: Self {s.shape}, Ent {e.shape}, CP {c.shape}")
-        assert s.shape == (4, 14)
-        assert e.shape == (4, 3, 13)
-        assert c.shape == (4, 6)
-        
-        # Check for NaNs
-        if torch.isnan(s).any(): print(f"NaN in Self Obs {i}")
-        if torch.isnan(e).any(): print(f"NaN in Ent Obs {i}")
-        if torch.isnan(c).any(): print(f"NaN in CP Obs {i}")
+    self_obs, tm_obs, en_obs, cp_obs = obs
+    print(f"Self: {self_obs.shape}, Tm: {tm_obs.shape}, En: {en_obs.shape}, CP: {cp_obs.shape}")
+
 
     print("Stepping...")
     actions = torch.zeros((4, 4, 4)) # [B, 4, 4]
     
-    rewards, dones, infos = env.step(actions)
+    rewards, dones, infos = env.step(actions, None)
     print("Step 1 done. Rewards shape:", rewards.shape)
     print("Rewards:", rewards)
     

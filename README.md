@@ -47,7 +47,9 @@ The training process is automated through distinct stages of difficulty:
     *   **Regression Mechanism**:
         *   **Immediate**: Difficulty drops (-0.05) if Win Rate falls below **30%**.
         *   **Persistent**: Difficulty drops if Win Rate stays below **40%** for 2 consecutive checks (2000 games).
-3.  **Stage 2: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. Rewards include **"Team Spirit"** factors to encourage cooperative play (e.g., Blocker protecting the Runner).
+3.  **Stage 2: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. 
+    *   **Reward Decoupling**: Rewards are initially calculated per-pod (Individual) to help agents learn basic control in the new environment.
+    *   **Team Spirit**: A blending factor (`0.0` to `0.5`) linearly blends the reward signal from "Selfish" (My Velocity/Checkpoints) to "Cooperative" (Team Average) as difficulty increases.
 4.  **Stage 3: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
 
 ### 📊 Real-Time Visualization
@@ -166,7 +168,7 @@ The new configuration interface allows for **Live Tuning** of the training sessi
     *   **Curriculum**: Manually adjust Curriculum Stage and Bot Difficulty (0.0 - 1.0).
     *   **Training**: Real-time tuning of Hyperparameters (Learning Rate, Entropy Coefficient).
 *   **Objectives**:
-    *   **Strategic**: Adjust Dense Factor (Tau) and **Team Spirit** (0.0 = Selfish, 1.0 = Fully Cooperative).
+    *   **Strategic**: Adjust Dense Factor (Tau) and **Team Spirit** (Blend factor: 0.0=Individual Rewards, 1.0=Team Average).
     *   **Outcome**: Configure weights for Win, Loss, Checkpoint, and Checkpoint Streak Scale.
 *   **Physics**: 
     *   **Movement**: Tune Velocity (Dot Product) and Step Penalty weights.

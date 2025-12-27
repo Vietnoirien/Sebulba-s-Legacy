@@ -16,6 +16,7 @@ RW_STEP_PENALTY = 7
 RW_ORIENTATION = 8
 RW_WRONG_WAY = 9
 RW_COLLISION_MATE = 10
+RW_PROXIMITY = 11
 
 DEFAULT_REWARD_WEIGHTS = {
     RW_WIN: 10000.0,
@@ -28,7 +29,8 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_STEP_PENALTY: 10.0, # Reduced to balance with lower velocity
     RW_ORIENTATION: 0.005, # SOTA: De-emphasized to prevent "Orientation Trap". Implicit in velocity.
     RW_WRONG_WAY: 10.0,
-    RW_COLLISION_MATE: 2.0 # Penalty for hitting teammate
+    RW_COLLISION_MATE: 2.0, # Penalty for hitting teammate
+    RW_PROXIMITY: 5.0 # Reward for getting close to enemy/teammate (Dense)
 }
 
 class PodRacerEnv:
@@ -64,7 +66,7 @@ class PodRacerEnv:
         }
         
         # Rewards / Done
-        self.rewards = torch.zeros((num_envs, 2), device=self.device) # Team 0, Team 1
+        self.rewards = torch.zeros((num_envs, 4), device=self.device) # Pod 0, 1, 2, 3
         self.dones = torch.zeros((num_envs,), dtype=torch.bool, device=self.device)
         self.winners = torch.full((num_envs,), -1, dtype=torch.long, device=self.device)
         
@@ -76,6 +78,9 @@ class PodRacerEnv:
         self.prev_dist = torch.zeros((num_envs, 4), device=self.device)
         
         self.bot_difficulty = 0.0 # 0.0 to 1.0
+        
+        # Role Hysteresis
+        self.role_lock_timer = torch.zeros((num_envs,), dtype=torch.long, device=self.device)
 
 
         
@@ -215,15 +220,41 @@ class PodRacerEnv:
         s3 = total_score[:, 3]
         runner2 = (s2 >= s3)
         
-        # Set Flags
-        # Pod 0
-        self.is_runner[env_ids, 0] = runner0
-        # Pod 1
-        self.is_runner[env_ids, 1] = ~runner0
-        # Pod 2
-        self.is_runner[env_ids, 2] = runner2
-        # Pod 3
-        self.is_runner[env_ids, 3] = ~runner2
+        # Hysteresis Logic
+        # Filter for current envs
+        current_timers = self.role_lock_timer[env_ids]
+        can_update_mask = (current_timers == 0) # [len(env_ids)]
+        
+        # Get indices of envs that CAN update (subset of env_ids)
+        # We need these to index global tensors like self.is_runner
+        update_env_ids = env_ids[can_update_mask]
+        
+        if len(update_env_ids) > 0:
+             # Extract new values for these specific envs
+             new_r0 = runner0[can_update_mask]
+             new_r2 = runner2[can_update_mask]
+             
+             # Extract old values for change detection
+             old_r0 = self.is_runner[update_env_ids, 0]
+             old_r2 = self.is_runner[update_env_ids, 2]
+             
+             # Update Global State
+             self.is_runner[update_env_ids, 0] = new_r0
+             self.is_runner[update_env_ids, 1] = ~new_r0
+             self.is_runner[update_env_ids, 2] = new_r2
+             self.is_runner[update_env_ids, 3] = ~new_r2
+             
+             # Change Detection
+             changed0 = (old_r0 != new_r0)
+             changed2 = (old_r2 != new_r2)
+             
+             env_changed = changed0 | changed2
+             
+             # Indices of envs that CHANGED
+             changed_env_ids = update_env_ids[env_changed]
+             
+             if len(changed_env_ids) > 0:
+                 self.role_lock_timer[changed_env_ids] = 50
 
 
     def update_progress_metric(self, env_ids):
@@ -254,13 +285,13 @@ class PodRacerEnv:
         """
         Stepping the Environment.
         actions: [B, 4, 4] (Thrust, Angle, Shift, Boost)
-        reward_weights: [B, 11] (Per-environment weights, taken from Agent)
+        reward_weights: [B, 12] (Per-environment weights, taken from Agent)
         tau: float, Dense Reward Annealing factor (0.0 = Full Dense, 1.0 = Full Sparse)
         team_spirit: float, 0.0=Selfish, 1.0=Cooperative. Blends rewards.
         """
         if reward_weights is None:
             # Construct default tensor
-            reward_weights = torch.zeros((self.num_envs, 10), device=self.device)
+            reward_weights = torch.zeros((self.num_envs, 12), device=self.device)
             # Use default dict to fill 
             # Note: We can pre-compute this but for robust fallback:
             for k, v in DEFAULT_REWARD_WEIGHTS.items():
@@ -277,7 +308,10 @@ class PodRacerEnv:
         w_step_pen = reward_weights[:, RW_STEP_PENALTY]
         w_orient = reward_weights[:, RW_ORIENTATION]
         w_wrong_way = reward_weights[:, RW_WRONG_WAY]
+        w_orient = reward_weights[:, RW_ORIENTATION]
+        w_wrong_way = reward_weights[:, RW_WRONG_WAY]
         w_col_mate = reward_weights[:, RW_COLLISION_MATE]
+        w_prox = reward_weights[:, RW_PROXIMITY]
         
         # --- Team Spirit Blending ---
         # Modify weights based on spirit
@@ -288,8 +322,11 @@ class PodRacerEnv:
         w_win = w_win * (1.0 + team_spirit)
         w_loss = w_loss * (1.0 + team_spirit)
         
-        # Individual Multiplier: 1.0 - (0.5 * team_spirit) (Reduces to 50% at full spirit)
-        indiv_mult = 1.0 - (0.5 * team_spirit)
+        # Individual Multiplier: REMOVED penalty for Team Spirit.
+        # We want robust navigation always, even if cooperative.
+        # indiv_mult = 1.0 - (0.5 * team_spirit) 
+        indiv_mult = 1.0 # Constant
+        
         w_checkpoint = w_checkpoint * indiv_mult
         w_chk_scale = w_chk_scale * indiv_mult
         w_velocity = w_velocity * indiv_mult
@@ -393,7 +430,7 @@ class PodRacerEnv:
 
         
         # 2. Game Logic
-        rewards = torch.zeros((self.num_envs, 2), device=self.device)
+        rewards = torch.zeros((self.num_envs, 4), device=self.device)
 
         # Metric Helpers
         infos = {
@@ -452,8 +489,10 @@ class PodRacerEnv:
         if isinstance(dense_mult, torch.Tensor):
              dense_mult = dense_mult.squeeze()
 
-        rewards[:, 0] += (v_scaled[:, 0] + v_scaled[:, 1]) * dense_mult
-        rewards[:, 1] += (v_scaled[:, 2] + v_scaled[:, 3]) * dense_mult
+        rewards[:, 0] += v_scaled[:, 0] * dense_mult
+        rewards[:, 1] += v_scaled[:, 1] * dense_mult
+        rewards[:, 2] += v_scaled[:, 2] * dense_mult
+        rewards[:, 3] += v_scaled[:, 3] * dense_mult
 
         # Orientation Reward (Guide to face next checkpoint)
         # ------------------------------------------------
@@ -524,8 +563,10 @@ class PodRacerEnv:
                 orientation_rewards[:, 3] = 0.0
 
             # Add to rewards
-            rewards[:, 0] += (orientation_rewards[:, 0] + orientation_rewards[:, 1]) * dense_mult
-            rewards[:, 1] += (orientation_rewards[:, 2] + orientation_rewards[:, 3]) * dense_mult
+            rewards[:, 0] += orientation_rewards[:, 0] * dense_mult
+            rewards[:, 1] += orientation_rewards[:, 1] * dense_mult
+            rewards[:, 2] += orientation_rewards[:, 2] * dense_mult
+            rewards[:, 3] += orientation_rewards[:, 3] * dense_mult
 
         # Step Penalty (Discourage circling/loitering)
         # Apply to all
@@ -604,25 +645,24 @@ class PodRacerEnv:
             else:
                 active_mask[:] = True
                 
-            # Team 0 Alphas
-            # alphas for pod 0, 1
-            t0_alphas = alpha[:, 0:2]
-            t0_mask = active_mask[:, 0:2]
-            # Valid count
-            t0_cnt = t0_mask.sum(dim=1).float() # [B]
-            t0_cnt[t0_cnt == 0] = 1.0 # Avoid div/0
+            # Apply Step Penalty Individually (Broadcast alpha)
+            # w_step_pen is [B]
             
-            t0_val = (t0_alphas * t0_mask.float()).sum(dim=1) / t0_cnt
-            rewards[:, 0] -= w_step_pen * t0_val
-            
-            # Team 1 Alphas
-            t1_alphas = alpha[:, 2:4]
-            t1_mask = active_mask[:, 2:4]
-            t1_cnt = t1_mask.sum(dim=1).float()
-            t1_cnt[t1_cnt == 0] = 1.0
-            
-            t1_val = (t1_alphas * t1_mask.float()).sum(dim=1) / t1_cnt
-            rewards[:, 1] -= w_step_pen * t1_val
+            # Pod 0
+            if active_mask[:, 0].any():
+                 rewards[:, 0] -= w_step_pen * alpha[:, 0]
+                 
+            # Pod 1
+            if active_mask[:, 1].any():
+                 rewards[:, 1] -= w_step_pen * alpha[:, 1]
+                 
+            # Pod 2
+            if active_mask[:, 2].any():
+                 rewards[:, 2] -= w_step_pen * alpha[:, 2]
+
+            # Pod 3
+            if active_mask[:, 3].any():
+                 rewards[:, 3] -= w_step_pen * alpha[:, 3]
 
         
         # Check Checkpoints
@@ -755,9 +795,9 @@ class PodRacerEnv:
                 
                 total_reward = base_reward + (streak - 1.0) * scale_reward
                 
-                # DIRECT REWARD (No Splitting)
-                team = i // 2
-                rewards[pass_idx, team] += total_reward
+                # DIRECT REWARD (Individual)
+                # rewards[pass_idx, i] += total_reward
+                rewards[pass_idx, i] += total_reward
                 
                 # Correction for Dense Reward Overshoot
                 # If we passed, we reached the target (distance 0). 
@@ -770,8 +810,8 @@ class PodRacerEnv:
                 # Overshoot correction should be immediate? 
                 # Yes, it's a correction for THIS step's dense calculation.
                 # correction for THIS step's dense calculation.
-                # Team already defined above
-                rewards[pass_idx, team] += overshoot_dist * scale[pass_idx, 0] * dense_mult # scale is [B,1]
+                # Correction applies to POD i
+                rewards[pass_idx, i] += overshoot_dist * scale[pass_idx, 0] * dense_mult # scale is [B,1]
         
         # Increment Step Counter for Efficiency
         self.steps_last_cp += 1
@@ -848,10 +888,14 @@ class PodRacerEnv:
             mask_w1 = (self.winners == 1) & env_won
             
             rewards[mask_w0, 0] += w_win[mask_w0]
-            rewards[mask_w0, 1] -= w_loss[mask_w0]
+            rewards[mask_w0, 1] += w_win[mask_w0]
+            rewards[mask_w0, 2] -= w_loss[mask_w0]
+            rewards[mask_w0, 3] -= w_loss[mask_w0]
             
-            rewards[mask_w1, 1] += w_win[mask_w1]
+            rewards[mask_w1, 2] += w_win[mask_w1]
+            rewards[mask_w1, 3] += w_win[mask_w1]
             rewards[mask_w1, 0] -= w_loss[mask_w1]
+            rewards[mask_w1, 1] -= w_loss[mask_w1]
             
             # --- Curriculum Metric: Duel Win ---
             if self.curriculum_stage == STAGE_DUEL:
@@ -912,8 +956,8 @@ class PodRacerEnv:
             # If I am runner, penalize impact
             runner_pen = -w_col_run * total_impact # w_col_run is [B]
             # Apply only if Runner
-            # Add to TEAM reward
-            self.rewards[:, team] += runner_pen * is_run.float()
+            # Add to INDIVIDUAL reward
+            self.rewards[:, i] += runner_pen * is_run.float()
             
             # 2. Blocker Bonus
             # If I am Blocker, Reward collision with ENEMY RUNNER.
@@ -936,7 +980,7 @@ class PodRacerEnv:
             # Scale
             blocker_reward = w_col_block * bonus
             
-            self.rewards[:, team] += blocker_reward * is_block.float()
+            self.rewards[:, i] += blocker_reward * is_block.float()
         
             # 3. Teammate Collision Penalty
             # Defined as collision with my mate
@@ -948,7 +992,67 @@ class PodRacerEnv:
             impact_mate = collisions[:, i, mate_idx] # [B]
             
             mate_pen = -w_col_mate * impact_mate
-            self.rewards[:, team] += mate_pen
+            mate_pen = -w_col_mate * impact_mate
+            self.rewards[:, i] += mate_pen
+            
+        # --- Proximity Reward (Blocker -> Enemy Runner) ---
+        # Guide Blockers to be near their targets
+        if self.curriculum_stage >= STAGE_DUEL:
+             # For each pod, if I am Blocker, find my Enemy Runner
+             for i in range(4):
+                 # active mask? Proximity reward cheap enough to run always, just zeroed by weights.
+                 is_block = ~self.is_runner[:, i]
+                 if not is_block.any(): continue
+                 
+                 team = i // 2
+                 enemy_team = 1 - team
+                 enemy_indices = torch.tensor([2*enemy_team, 2*enemy_team + 1], device=self.device)
+                 
+                 # Identify Enemy Runner
+                 # self.is_runner is [B, 4]. We need [B] index of enemy runner.
+                 # 0 or 1.
+                 e_runner_mask = self.is_runner[:, enemy_indices] # [B, 2]
+                 
+                 # We need dist to Enemy Runner.
+                 # Gather enemy pos.
+                 # We have 2 enemies. We need the one that is runner.
+                 # If both (confusion?), pick 0?
+                 # If neither? Pick 0?
+                 
+                 # Simpler: Iterate enemies. If enemy is runner, calc dist.
+                 prox_rew = torch.zeros(self.num_envs, device=self.device)
+                 
+                 p_pos = self.physics.pos[:, i]
+                 
+                 for e_idx in [0, 1]:
+                      real_e_idx = enemy_indices[e_idx] # Scalar 0..3 (e.g 2) is wrong. tensor.
+                      # manually:
+                      real_e = 2 * enemy_team + e_idx
+                      
+                      is_e_run = self.is_runner[:, real_e]
+                      
+                      e_pos = self.physics.pos[:, real_e]
+                      dist = torch.norm(e_pos - p_pos, dim=1)
+                      
+                      # Reward Config:
+                      # Max Reward at 0 distance.
+                      # Radius: 3000.0
+                      PROX_RADIUS = 3000.0
+                      
+                      # usage = 1.0 - (dist / Radius)
+                      bonus = torch.clamp(1.0 - (dist / PROX_RADIUS), 0.0, 1.0)
+                      
+                      # Only if E is Runner AND I am Blocker
+                      condition = is_block & is_e_run
+                      
+                      prox_rew[condition] += bonus[condition]
+                 
+                 # Apply
+                 # w_prox is [B]
+                 self.rewards[:, i] += prox_rew * w_prox * is_block.float()
+                 
+        # Decrement Role Timer
+        self.role_lock_timer = torch.clamp(self.role_lock_timer - 1, min=0)
             
         # Update Roles for Next Step
         all_ids = torch.arange(self.num_envs, device=self.device)
