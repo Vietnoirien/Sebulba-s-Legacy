@@ -1,5 +1,8 @@
 
 import unittest
+import sys
+import os
+sys.path.append(os.getcwd())
 import torch
 from training.ppo import PPOTrainer
 import time

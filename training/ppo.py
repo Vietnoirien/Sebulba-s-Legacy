@@ -316,6 +316,11 @@ class PPOTrainer:
                 if self.curriculum_mode == "auto":
                     self.env.curriculum_stage = STAGE_DUEL
                     self.env.bot_difficulty = 0.0
+                    
+                    # Reset Checkpoint Reward to 2000.0 for Duel+ (Win Rate focus)
+                    self.reward_weights_tensor[:, RW_CHECKPOINT] = 2000.0
+                    self.log("Config Update: Resetting RW_CHECKPOINT to 2000.0 for Stage 1+")
+
 
         elif stage == STAGE_DUEL:
             # Dynamic Difficulty
@@ -766,7 +771,14 @@ class PPOTrainer:
         elite_ids = [p['id'] for p in elites]
         self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
         self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
-        self.log(f"Top Stats: Eff {elites[0]['ema_efficiency']:.1f}, Wins {elites[0]['ema_wins']:.1f}, Nov {elites[0]['novelty_score']:.2f}")
+        if self.env.curriculum_stage == STAGE_SOLO:
+             # Stage 0: Show Consistency and Score (Cons - Eff)
+             eff = elites[0]['ema_efficiency']
+             cons = elites[0]['ema_consistency']
+             score = cons - eff
+             self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Score: {score:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
+        else:
+             self.log(f"Elite (Crowded) Stats | Eff: {elites[0]['ema_efficiency']:.1f} | Wins: {elites[0]['ema_wins']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
 
         # 6. Tournament Selection & Replacement
         # Identify Culls (Bottom 25% by Rank/Crowding)
@@ -820,9 +832,30 @@ class PPOTrainer:
             if random.random() < 0.3:
                 loser['lr'] *= random.uniform(0.8, 1.2)
                 
-            # Reset Optimizer to clear bad momentum!
-            # We must create a NEW optimizer instance with the parameters of the cloned model.
+            # Reset Optimizer logic updated:
+            # We want to PRESERVE Momentum to avoid "lobotomy".
+            # Solution: Create new optimizer (linked to new parameters), then copy state.
+            
             loser['optimizer'] = optim.Adam(loser['agent'].parameters(), lr=loser['lr'], eps=1e-5)
+            
+            # Copy Optimizer State (Momentum) from Parent
+            parent_opt = parent['optimizer']
+            loser_opt = loser['optimizer']
+            
+            # Adam state is mapped by Parameter object.
+            # We need to map Parent Param -> State -> Loser Param -> State.
+            # Since architectures are identical, we can use index mapping.
+            
+            parent_params = list(parent['agent'].parameters())
+            loser_params = list(loser['agent'].parameters())
+            
+            for p_src, p_dst in zip(parent_params, loser_params):
+                if p_src in parent_opt.state:
+                    # Deep copy the state (exp_avg, exp_avg_sq, step) to fresh buffer
+                    # We must ensure tensors are on correct device (should be same device)
+                    src_state = parent_opt.state[p_src]
+                    dst_state = copy.deepcopy(src_state) # Safe copy
+                    loser_opt.state[p_dst] = dst_state
             
             if random.random() < 0.3:
                 loser['ent_coef'] *= random.uniform(0.8, 1.2)
@@ -944,6 +977,28 @@ class PPOTrainer:
         l_nov = leader.get('novelty_score')
         if l_nov is None: l_nov = 0.0
         
+        # Best Agent Stats (Not Column Max)
+        # Find the agent that would be selected as leader (Best per Stage Criteria)
+        # Re-use logic or just pick the one with best metric?
+        # Let's find "Best Available" based on Stage criteria just for display.
+        stage = self.env.curriculum_stage
+        
+        if stage == STAGE_SOLO:
+            # Best is highest (Consistency - Efficiency)
+            # Actually just showing the one with Max Consistency is clearer for user "Best".
+            best_agent = max(self.population, key=lambda p: p.get('ema_consistency', 0.0) if p.get('ema_consistency') is not None else 0.0)
+        else:
+            # Best is Max Win Rate
+            best_agent = max(self.population, key=lambda p: p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0)
+            
+        b_eff = best_agent.get('ema_efficiency', 999.0)
+        if b_eff is None: b_eff = 999.0
+        b_con = best_agent.get('ema_consistency', 0.0)
+        if b_con is None: b_con = 0.0
+        b_win = best_agent.get('ema_wins', 0.0)
+        if b_win is None: b_win = 0.0
+        b_nov = best_agent.get('novelty_score', 0.0)
+        
         # Format Table
         border = "=" * 80
         
@@ -954,12 +1009,12 @@ class PPOTrainer:
         self.log(f" ITERATION {self.iteration} | Gen {self.generation} | Step {global_step} | SPS {sps}")
         self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f} | Step Pen: {curr_step_pen:.1f}")
         self.log("-" * 80)
-        self.log(f" {'Metric':<15} | {'Leader':<10} | {'Pop Avg':<10} | {'Best':<10}")
+        self.log(f" {'Metric':<15} | {'Leader':<10} | {'Pop Avg':<10} | {'Best Agt':<10}")
         self.log("-" * 80)
-        self.log(f" {'Efficiency':<15} | {l_eff:<10.1f} | {avg_eff:<10.1f} | {min(effs) if effs else 0:<10.1f}")
-        self.log(f" {'Consistency':<15} | {l_con:<10.1f} | {avg_con:<10.1f} | {max(cons) if cons else 0:<10.1f}")
-        self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1f} | {avg_win:<10.1f} | {max(wins) if wins else 0:<10.1f}")
-        self.log(f" {'Novelty':<15} | {l_nov:<10.2f} | {avg_nov:<10.2f} | {max(novs) if novs else 0:<10.2f}")
+        self.log(f" {'Efficiency':<15} | {l_eff:<10.1f} | {avg_eff:<10.1f} | {b_eff:<10.1f}")
+        self.log(f" {'Consistency':<15} | {l_con:<10.1f} | {avg_con:<10.1f} | {b_con:<10.1f}")
+        self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1f} | {avg_win:<10.1f} | {b_win:<10.1f}")
+        self.log(f" {'Novelty':<15} | {l_nov:<10.2f} | {avg_nov:<10.2f} | {b_nov:<10.2f}")
         self.log("-" * 80)
         self.log(f" Loss: {avg_loss:.4f}")
         self.log(border)
@@ -967,22 +1022,22 @@ class PPOTrainer:
     def update_step_penalty_annealing(self):
         """
         Anneals Step Penalty based on Curriculum Stage and Bot Difficulty.
-        Stage 0 (Solo): Full Penalty (10.0)
+        Stage 0 (Solo): Full Penalty (5.0)
         Stage > 0: Linear Decay based on Bot Difficulty.
         """
         stage = self.env.curriculum_stage
-        base_penalty = DEFAULT_REWARD_WEIGHTS[RW_STEP_PENALTY] # 10.0
+        base_penalty = DEFAULT_REWARD_WEIGHTS[RW_STEP_PENALTY] # 5.0
         
         if stage == STAGE_LEAGUE:
             # League Mode: No Step Penalty (Pure Win/Loss/Metrics)
             new_val = 0.0
         elif stage == STAGE_SOLO:
-            # Full Penalty
+            # Full Penalty (No annealing in Stage 0)
             new_val = base_penalty
         else:
             # Anneal: Val = Base * (1.0 - Diff * 0.8)
-            # At Diff 0.0 -> 10.0
-            # At Diff 1.0 -> 2.0
+            # At Diff 0.0 -> 100% of Base
+            # At Diff 1.0 -> 20% of Base
             anneal_factor = 1.0 - (self.env.bot_difficulty * 0.8)
             new_val = base_penalty * anneal_factor
             
@@ -1041,7 +1096,7 @@ class PPOTrainer:
             
             if current_stage == STAGE_SOLO:
                 target_steps = 512
-                target_evolve = 4 # Frequent updates for micro-opt
+                target_evolve = 4 # Increased from 2 to stabilize momentum
             elif current_stage == STAGE_DUEL:
                 target_steps = 512
                 target_evolve = 4

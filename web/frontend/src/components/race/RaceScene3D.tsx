@@ -1,9 +1,12 @@
-import React, { useRef, useLayoutEffect } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
-import { OrbitControls, Grid, useTexture } from '@react-three/drei'
+import React, { useRef, useLayoutEffect, useState } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { OrbitControls, Grid, useTexture, useGLTF } from '@react-three/drei'
+import { SkeletonUtils } from 'three-stdlib'
 import { useGameState } from '../../context/GameStateContext'
 import * as THREE from 'three'
 import bgImage from '../../assets/background.jpg'
+// @ts-ignore
+import podModelUrl from '../../assets/models/race_pod.glb'
 
 // Constants matching backend (Physics world is roughly 16000x9000)
 const SCALE_FACTOR = 0.01
@@ -66,65 +69,131 @@ const CheckpointsRenderer: React.FC = () => {
     )
 }
 
-const PodsRenderer: React.FC = () => {
-    const { telemetry } = useGameState()
-    const meshRef = useRef<THREE.InstancedMesh>(null)
+const PodModel: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) => {
+    // Load Model (Cached)
+    const { scene } = useGLTF(podModelUrl)
+    // Clone Scene per instance
+    const clone = React.useMemo(() => SkeletonUtils.clone(scene), [scene])
 
-    useFrame(() => {
-        if (!meshRef.current || !telemetry?.race_state?.pods) return
+    // References for Animation
+    const flamesMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
+    const arcsMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
+    const bodyMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
 
-        const pods = telemetry.race_state.pods
-        const count = pods.length
-        if (count === 0) return
+    // Setup Materials Once
+    useLayoutEffect(() => {
+        clone.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh
+                // Materials might be an array or single. Based on inspect_glb, we have one mesh with multiple matrials.
+                if (Array.isArray(mesh.material)) {
+                    // Clone materials so we can modify them per instance
+                    mesh.material = mesh.material.map((m) => m.clone())
 
-        const tempObject = new THREE.Object3D()
-
-        pods.forEach((pod, i) => {
-            const x = pod.x * SCALE_FACTOR
-            const z = pod.y * SCALE_FACTOR
-
-            tempObject.position.set(x, 2, z)
-
-            // Orientation Logic
-            // 1. Reset Rotation
-            tempObject.rotation.set(0, 0, 0)
-            // 2. Rotate to lie flat
-            tempObject.rotateZ(-Math.PI / 2)
-
-            // 3. Determine Heading Angle from Velocity
-            let heading = pod.angle
-            const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
-            if (speed > 5.0) {
-                heading = Math.atan2(pod.vy, pod.vx)
+                    // Identify by Name (Mapped from inspect_glb output)
+                    // Material 0: pod-skin
+                    // Material 1: flames
+                    // Material 2: cockpit
+                    // Material 3: arcs
+                    mesh.material.forEach((mat) => {
+                        const m = mat as THREE.MeshStandardMaterial
+                        // Safer matching
+                        if (m.name.includes('flames')) {
+                            flamesMatRef.current = m
+                            m.transparent = true
+                            m.opacity = 0 // Start invisible
+                            m.emissive = new THREE.Color('#ffaa00')
+                            m.emissiveIntensity = 2.0
+                            m.depthWrite = false
+                            m.blending = THREE.AdditiveBlending
+                        }
+                        if (m.name.includes('arcs')) {
+                            arcsMatRef.current = m
+                            m.transparent = true
+                            m.emissive = new THREE.Color('#00ffff')
+                            m.emissiveIntensity = 1.5
+                            // Ensure texture wraps for scrolling
+                            if (m.map) {
+                                m.map.wrapS = THREE.RepeatWrapping
+                                m.map.wrapT = THREE.RepeatWrapping
+                            }
+                        }
+                        if (m.name.includes('pod-skin')) {
+                            bodyMatRef.current = m
+                        }
+                    })
+                }
             }
-
-            // 4. Apply Heading (Rotate around GLOBAL Y)
-            const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2)
-            const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
-
-            // Combine
-            qHeading.multiply(qBase)
-            tempObject.quaternion.copy(qHeading)
-
-            tempObject.scale.set(2, 2, 2)
-            tempObject.updateMatrix()
-            meshRef.current!.setMatrixAt(i, tempObject.matrix)
-
-            const color = TEAM_COLORS[pod.team % TEAM_COLORS.length]
-            meshRef.current!.setColorAt(i, color)
         })
+    }, [clone])
 
-        meshRef.current.instanceMatrix.needsUpdate = true
-        if (meshRef.current.instanceColor) meshRef.current.instanceColor.needsUpdate = true
+    // Scale/Pos/Rot
+    const groupRef = useRef<THREE.Group>(null)
+
+    useFrame((_state, delta) => {
+        if (!groupRef.current) return
+
+        // 1. Position & Rotation
+        const x = pod.x * SCALE_FACTOR
+        const z = pod.y * SCALE_FACTOR
+        groupRef.current.position.set(x, 2, z)
+
+        // Rotation Logic
+        groupRef.current.rotation.set(0, 0, 0)
+
+        let heading = pod.angle
+        const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
+        if (speed > 5.0) heading = Math.atan2(pod.vy, pod.vx)
+
+        // Rotate around Y axis
+        groupRef.current.rotation.y = -heading
+
+        // Base Rotation: +90 degrees on X to lay it flat (User correction)
+        const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2)
+        // Heading Rotation: -heading around Y (Standard)
+        const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
+
+        // Combine
+        qHeading.multiply(qBase)
+        groupRef.current.quaternion.copy(qHeading)
+
+        // 3. Logic Updates (Flames, Team Color, Arcs)
+        const thrust = (pod as any).thrust ?? 0
+        if (flamesMatRef.current) {
+            const opacity = Math.max(0, thrust) / 100.0
+            flamesMatRef.current.opacity = opacity
+            flamesMatRef.current.visible = opacity > 0.01
+        }
+
+        // Color -> Team
+        if (bodyMatRef.current) {
+            const color = TEAM_COLORS[pod.team % TEAM_COLORS.length]
+            bodyMatRef.current.color.set(color)
+        }
+
+        // Arcs Animation -> Scroll X
+        if (arcsMatRef.current && arcsMatRef.current.map) {
+            arcsMatRef.current.map.offset.x -= delta * 2.0 // "defil on X axis"
+        }
     })
 
+    return <primitive object={clone} ref={groupRef} scale={[3, 3, 3]} visible={visible} />
+}
+
+const PodsRenderer: React.FC = () => {
+    const { telemetry } = useGameState()
+    const pods = telemetry?.race_state?.pods || []
+
     return (
-        <instancedMesh ref={meshRef} args={[undefined, undefined, 4]}>
-            <coneGeometry args={[1, 3, 8]} />
-            <meshStandardMaterial />
-        </instancedMesh>
+        <group>
+            {pods.map((pod, i) => (
+                <PodModel key={i} pod={pod} visible={true} />
+            ))}
+        </group>
     )
 }
+// Preload
+useGLTF.preload(podModelUrl)
 
 const ShieldsRenderer: React.FC = () => {
     const { telemetry } = useGameState()
@@ -187,7 +256,74 @@ const ShieldsRenderer: React.FC = () => {
     )
 }
 
-const SceneContent: React.FC = () => {
+// Controls Camera Movement based on mode
+const CameraController: React.FC<{
+    mode: 'orbit' | 'pod',
+    focusedPodIndex: number
+}> = ({ mode, focusedPodIndex }) => {
+    const { telemetry } = useGameState()
+    const { camera } = useThree()
+
+    // Smooth Follow Refs
+    const targetPos = useRef(new THREE.Vector3())
+    const lookAtPos = useRef(new THREE.Vector3())
+
+    useFrame((_state, delta) => {
+        if (mode === 'pod') {
+            const pods = telemetry?.race_state?.pods || []
+            const pod = pods[focusedPodIndex]
+
+            if (pod) {
+                // 1. Determine Target Position (Pod Position)
+                const x = pod.x * SCALE_FACTOR
+                const z = pod.y * SCALE_FACTOR
+
+                // 2. Determine Desired Camera Position
+                // User Request: Follow Speed Vector
+                // If moving meaningfully, use velocity vector. Otherwise use facing.
+                let heading = pod.angle
+                const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
+
+                // Threshold of 20 to ensure we have a stable vector
+                if (speed > 20.0) {
+                    heading = Math.atan2(pod.vy, pod.vx)
+                }
+
+                // Racing Game Style: Closer and lower
+                const dist = 20
+                const height = 8
+
+                const camX = x - Math.cos(heading) * dist
+                const camZ = z - Math.sin(heading) * dist
+                const camY = height
+
+                const desiredPos = new THREE.Vector3(camX, camY, camZ)
+
+                // 3. Smooth Lerp Camera Position
+                // Reduce lerp speed slightly to hide micro-stutter from telemetry updates
+                camera.position.lerp(desiredPos, delta * 4.0)
+
+                // 4. Smooth Look At
+                // Instead of snapping lookAt to the pod center, we lerp the lookAt target
+                // This prevents jitter when the pod position updates discretely
+                targetPos.current.set(x, 2, z) // Target: slightly above pod center
+                lookAtPos.current.lerp(targetPos.current, delta * 10.0) // Fast lerp for responsiveness, but smooths snaps
+                camera.lookAt(lookAtPos.current)
+            }
+        }
+    })
+
+    if (mode === 'orbit') {
+        return <OrbitControls makeDefault target={[MAP_CENTER_X, 0, MAP_CENTER_Z]} maxPolarAngle={Math.PI / 2} />
+    }
+
+    return null
+}
+
+const SceneContent: React.FC<{
+    mode: 'orbit' | 'pod',
+    focusedPodIndex: number
+}> = ({ mode, focusedPodIndex }) => {
     return (
         <>
             <ambientLight intensity={0.5} />
@@ -212,12 +348,32 @@ const SceneContent: React.FC = () => {
             <PodsRenderer />
             <ShieldsRenderer />
 
-            <OrbitControls makeDefault target={[MAP_CENTER_X, 0, MAP_CENTER_Z]} maxPolarAngle={Math.PI / 2} />
+            <CameraController mode={mode} focusedPodIndex={focusedPodIndex} />
         </>
     )
 }
 
 export const RaceScene3D: React.FC = () => {
+    const [cameraMode, setCameraMode] = useState<'orbit' | 'pod'>('orbit')
+    const [focusedPodIndex, setFocusedPodIndex] = useState(0)
+    const { telemetry } = useGameState()
+
+    const podsCount = telemetry?.race_state?.pods?.length || 0
+
+    const toggleMode = () => {
+        setCameraMode(prev => prev === 'orbit' ? 'pod' : 'orbit')
+    }
+
+    const nextPod = () => {
+        if (podsCount === 0) return
+        setFocusedPodIndex(prev => (prev + 1) % podsCount)
+    }
+
+    const prevPod = () => {
+        if (podsCount === 0) return
+        setFocusedPodIndex(prev => (prev - 1 + podsCount) % podsCount)
+    }
+
     return (
         <div className="relative w-full aspect-[16/9] bg-black">
             <Canvas
@@ -226,16 +382,49 @@ export const RaceScene3D: React.FC = () => {
                 dpr={[1, 2]}
                 className="w-full h-full"
             >
-                <SceneContent />
+                <SceneContent mode={cameraMode} focusedPodIndex={focusedPodIndex} />
             </Canvas>
 
             {/* Overlay UI */}
-            <div className="absolute top-4 left-4 text-white/50 text-xs font-mono pointer-events-none select-none z-10">
-                3D MODE (Experimental)
+            <div className="absolute top-4 left-4 flex gap-2 z-10">
+                <div className="text-white/50 text-xs font-mono pointer-events-none select-none">
+                    3D MODE {[cameraMode.toUpperCase()]}
+                </div>
             </div>
+
+            <div className="absolute top-4 right-4 flex gap-2 z-10">
+                <button
+                    onClick={toggleMode}
+                    className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white text-xs rounded border border-white/20 backdrop-blur-sm transition-colors"
+                >
+                    {cameraMode === 'orbit' ? 'Switch to Pod View' : 'Switch to Orbit View'}
+                </button>
+            </div>
+
+            {cameraMode === 'pod' && (
+                <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-4 z-10 glass-panel px-4 py-2 rounded-full border border-white/10">
+                    <button
+                        onClick={prevPod}
+                        className="w-8 h-8 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-colors"
+                    >
+                        ←
+                    </button>
+                    <div className="text-white/80 text-sm font-mono">
+                        POD {focusedPodIndex}
+                    </div>
+                    <button
+                        onClick={nextPod}
+                        className="w-8 h-8 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-colors"
+                    >
+                        →
+                    </button>
+                </div>
+            )}
+
             <div className="absolute bottom-4 right-4 text-right text-white/30 text-[10px] font-mono pointer-events-none select-none z-10">
-                LMB: Rotate | RMB: Pan | Wheel: Zoom
+                {cameraMode === 'orbit' ? 'LMB: Rotate | RMB: Pan | Wheel: Zoom' : 'Camera locked to Pod'}
             </div>
         </div>
     )
 }
+

@@ -24,11 +24,26 @@ def cleanup(backend_proc, frontend_proc):
         except ProcessLookupError:
             pass
 
-    # Wait for graceful exit
+    # Wait for graceful exit with Timeout
+    print("Waiting for grace period (5s)...")
+    
     if frontend_proc:
-        frontend_proc.wait()
+        try:
+            frontend_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print("Frontend unresponsive. Force killing...")
+            try:
+                os.killpg(os.getpgid(frontend_proc.pid), signal.SIGKILL)
+            except: pass
+
     if backend_proc:
-        backend_proc.wait()
+        try:
+            backend_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print("Backend unresponsive. Force killing...")
+            try:
+                os.killpg(os.getpgid(backend_proc.pid), signal.SIGKILL)
+            except: pass
         
     print("Services stopped.")
     sys.exit(0)

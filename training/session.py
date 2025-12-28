@@ -162,6 +162,10 @@ class TrainingSession:
              else:
                  self.trainer.log(f"Model file or directory not found: {path} | {model_name}")
             
+        # Start Playback Task correctly (Regardless of model loading)
+        if self.loop:
+            self.playback_task = asyncio.run_coroutine_threadsafe(self._playback_loop(), self.loop)
+
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
 
@@ -185,9 +189,7 @@ class TrainingSession:
         else:
             self.trainer.log(f"Warning: No normalization statistics found at {rms_path}. Agents may perform poorly.")
 
-        # Start Playback Task
-        if self.loop:
-            self.playback_task = asyncio.run_coroutine_threadsafe(self._playback_loop(), self.loop)
+
 
     def stop(self):
         if not self.running:
@@ -213,6 +215,17 @@ class TrainingSession:
             try: self.telemetry_in_queue.get_nowait()
             except: break
             
+        # Explicitly close queues to release underlying pipes
+        try:
+             self.telemetry_in_queue.close()
+             self.telemetry_in_queue.join_thread()
+        except: pass
+        
+        try:
+             self.telemetry_out_queue.close()
+             self.telemetry_out_queue.join_thread()
+        except: pass
+
         self.running = False
 
     def reset(self):
@@ -357,6 +370,9 @@ class TrainingSession:
                 print(f"Consumer Error: {e}")
 
     def _telemetry_callback(self, step, sps, fps_train, reward, win_rate, env_idx, loss, log_line=None, is_done=False, step_rewards=None, step_actions=None, league_stats=None, collision_flags=None):
+        if not self.running:
+            return
+
         try:
             if log_line:
                 stats_data = {
@@ -390,7 +406,12 @@ class TrainingSession:
             
             # Slice checkpoints to valid count
             n_cp = t_env.num_checkpoints[idx].item()
-            checkpoints = t_env.checkpoints[idx, :n_cp].detach().cpu().numpy() # [n_cp, 2]
+            if n_cp == 0:
+                # Fallback: Send all checkpoints (Stage 0 usually has fixed count)
+                # print(f"WARNING: n_cp is 0 for env {idx}. Sending all 8.") # Reduce spam 
+                checkpoints = t_env.checkpoints[idx].detach().cpu().numpy()
+            else:
+                checkpoints = t_env.checkpoints[idx, :n_cp].detach().cpu().numpy() # [n_cp, 2]
             
             # Identify Agent (assuming standard PBT config)
             # We can't easily import ENVS_PER_AGENT here due to circular deps if we aren't careful, 
@@ -423,9 +444,14 @@ class TrainingSession:
             try:
                 self.telemetry_in_queue.put_nowait(payload)
             except queue.Full:
+                print("WARNING: Telemetry Queue FULL. Dropping frame.")
                 pass
 
         except Exception as e:
+            # Ignore queue closed errors during shutdown
+            if isinstance(e, ValueError) and "closed" in str(e):
+                return
+                
             import traceback
             traceback.print_exc()
             print(f"Callback Error: {e}")
