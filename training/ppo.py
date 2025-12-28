@@ -864,8 +864,17 @@ class PPOTrainer:
         if not candidates: candidates = range(len(self.population))
         
         if self.env.curriculum_stage == STAGE_SOLO:
-             # Min Efficiency (Best)
-             best_guy = min(candidates, key=lambda i: self.population[i].get('ema_efficiency', 999.0) if self.population[i].get('ema_efficiency') is not None else 999.0)
+             # Combined Metric: Consistency - Efficiency (Maximize)
+             # Higher Consistency is better (Progress)
+             # Lower Efficiency is better (Speed)
+             # Maximize (Cons - Eff)
+             def combined_score(idx):
+                 p = self.population[idx]
+                 eff = p.get('ema_efficiency', 999.0) if p.get('ema_efficiency') is not None else 999.0
+                 cons = p.get('ema_consistency', 0.0) if p.get('ema_consistency') is not None else 0.0
+                 return cons - eff
+                 
+             best_guy = max(candidates, key=combined_score)
         else:
              # Max Win Rate (Best)
              best_guy = max(candidates, key=lambda i: self.population[i].get('ema_wins', 0.0) if self.population[i].get('ema_wins') is not None else 0.0)
