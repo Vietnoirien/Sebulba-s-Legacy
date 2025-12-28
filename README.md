@@ -34,7 +34,7 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
     *   **Implicit League Exploiter**: Standard PFSP agents that prey on the weaknesses of the entire history.
     *   **Implicit Main Exploiter**: A 10% chance to sample opponents from the **latest generation**, forcing the population to remain robust against the current meta.
 *   **Explicit League Exploiters**:
-    *   **Grouped Batch Inference**: In the League Stage, the system efficiently splits the 4096-environment batch to allow different agents to fight different opponents simultaneously (Main vs History, Exploiters vs Leader).
+    *   **Grouped Batch Inference**: In the League Stage, the system efficiently splits the 16,384-environment batch to allow different agents to fight different opponents simultaneously (Main vs History, Exploiters vs Leader).
     *   **Targeted Evolution**: A sub-population of "Exploiter" agents (dynamically scaled to **12.5% of population**) evolves purely to maximize Win Rate against the **Current Leader**, preventing cyclic drift while Main agents focus on historical robustness.
 
 ### 🧬 Evolutionary Strategy (GA + RL)
