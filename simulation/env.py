@@ -481,7 +481,9 @@ class PodRacerEnv:
         # scale is [B, 1]
         scale = w_velocity.unsqueeze(1)
         
-        v_scaled = vel_proj * scale
+        # Scaling for Dense Reward (prevent positive feedback loop)
+        S_VEL = 1.0 / 1000.0 
+        v_scaled = vel_proj * scale * S_VEL
         
         # Annealing
         dense_mult = (1.0 - tau)
