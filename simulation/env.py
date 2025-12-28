@@ -21,13 +21,13 @@ RW_PROXIMITY = 11
 DEFAULT_REWARD_WEIGHTS = {
     RW_WIN: 10000.0,
     RW_LOSS: 5000.0,
-    RW_CHECKPOINT: 4000.0, # Increased to 5000.0 for Stage 0 Urgency
+    RW_CHECKPOINT: 2000.0, # Increased to 5000.0 for Stage 0 Urgency
     RW_CHECKPOINT_SCALE: 50.0, # Kept as is, minor influence
-    RW_VELOCITY: 0.1, # Increased to 0.5 to provide immediate feedback loop (120 * 0.5 = 60 vs step pen)
+    RW_VELOCITY: 0.5, # Increased to 0.5 to provide immediate feedback loop (120 * 0.5 = 60 vs step pen)
     RW_COLLISION_RUNNER: 0.5,
     RW_COLLISION_BLOCKER: 1000.0, # Increased 10x to prioritize Blocking over Checkpoints for Blocker
-    RW_STEP_PENALTY: 10.0, # Reduced to 4.0 (Constant) to ensure urgency without excessive harshness
-    RW_ORIENTATION: 0.05, # SOTA: De-emphasized to prevent "Orientation Trap". Implicit in velocity.
+    RW_STEP_PENALTY: 25.0, # Reduced to 4.0 (Constant) to ensure urgency without excessive harshness
+    RW_ORIENTATION: 0.5, # SOTA: De-emphasized to prevent "Orientation Trap". Implicit in velocity.
     RW_WRONG_WAY: 10.0,
     RW_COLLISION_MATE: 2.0, # Penalty for hitting teammate
     RW_PROXIMITY: 5.0 # Reward for getting close to enemy/teammate (Dense)

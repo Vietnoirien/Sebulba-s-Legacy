@@ -7,14 +7,17 @@
 
 **Sebulba's Legacy** is an advanced Reinforcement Learning (RL) system designed to train super-human autonomous racers for the *Mad Pod Racing* environment. This project replaces the original Sebulba pod trainer, introducing a fully **vectorized environment**, enhanced **model infrastructure**, and refined **Genetic Algorithm** techniques. 
 
-Unlike traditional RL implementations that run a handful of environments, this project leverages a custom **GPU-Accelerated Physics Engine** to simulate **4096 environments in parallel** on a single consumer GPU (achieving **>20,000 Steps Per Second** on an RTX 5070). This massive throughput allows for the training of robust agents using **Population-Based Training (PBT)** within hours rather than days.
+Unlike traditional RL implementations that run a handful of environments, this project leverages a custom **GPU-Accelerated Physics Engine** to simulate **32,768 environments in parallel** on a single consumer GPU (achieving **>40,000 Steps Per Second** on an RTX 5070). This massive throughput allows for the training of robust agents using **Population-Based Training (PBT)** within hours rather than days.
+
+> [!WARNING]
+> **Hardware Limits**: The configuration of **32,768 environments** (where **Minibatch Size ≈ Batch Size / 2**) is the confirmed stability limit for **12GB VRAM** GPUs (e.g., RTX 4070/5070). Exceeding these values may cause system freezes or OOM errors. For stability, we recommend **16,384 environments** (where **Minibatch Size ≈ Batch Size**).
 
 The system combines state-of-the-art techniques from Deep Learning and Evolutionary Algorithms to solve complex continuous control problems.
 
 ## 🚀 Key Features
 
 ### 🧠 Advanced Reinforcement Learning
-*   **Massive Parallelism**: Trains on **4096 concurrent environments** using pure PyTorch operations (Sim-to-Tensor), bypassing CPU bottlenecks.
+*   **Massive Parallelism**: Trains on **16,384 concurrent environments** using pure PyTorch operations (Sim-to-Tensor), bypassing CPU bottlenecks.
 *   **PPO + GAE**: Utilizes Proximal Policy Optimization with Generalized Advantage Estimation for stable and sample-efficient learning.
 *   **Split DeepSets Architecture**:  
     *   **Teammate Awareness**: Explicitly feeds teammate observations (Position, Velocity, Shield) directly to the backbone, enabling precise cooperative strategies (e.g., blocking, drafting).
@@ -32,10 +35,10 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
     *   **Implicit Main Exploiter**: A 10% chance to sample opponents from the **latest generation**, forcing the population to remain robust against the current meta.
 *   **Explicit League Exploiters**:
     *   **Grouped Batch Inference**: In the League Stage, the system efficiently splits the 4096-environment batch to allow different agents to fight different opponents simultaneously (Main vs History, Exploiters vs Leader).
-    *   **Targeted Evolution**: A sub-population of "Exploiter" agents evolves purely to maximize Win Rate against the **Current Leader**, preventing cyclic drift while Main agents focus on historical robustness.
+    *   **Targeted Evolution**: A sub-population of "Exploiter" agents (dynamically scaled to **12.5% of population**) evolves purely to maximize Win Rate against the **Current Leader**, preventing cyclic drift while Main agents focus on historical robustness.
 
 ### 🧬 Evolutionary Strategy (GA + RL)
-*   **Population-Based Training (PBT)**: Evolves a population of 32 distinct agents. Agents don't just learn a policy; they evolve their hyperparameters (**Learning Rate**, **Entropy Coefficient**, **Clip Range**) and reward weights over time. This allows the population to dynamically adjust its "conservativeness" and exploration vs exploitation balance.
+*   **Population-Based Training (PBT)**: Evolves a population of **128 distinct agents**. Agents don't just learn a policy; they evolve their hyperparameters (**Learning Rate**, **Entropy Coefficient**, **Clip Range**) and reward weights over time. This allows the population to dynamically adjust its "conservativeness" and exploration vs exploitation balance.
 *   **NSGA-II Selection**: Uses **Non-Dominated Sorting Genetic Algorithm II** to select elite agents based on multiple conflicting objectives that change per stage:
     *   **Stage 0 (Solo)**: Minimize Steps (Efficiency) + Maximize Checkpoint Streak (Consistency).
     *   **Stage 1 (Duel)**: Maximize Win Streak + Minimize Steps.

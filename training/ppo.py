@@ -39,18 +39,23 @@ VF_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 DIV_COEF = 0.05 # Role Regularization Coefficient
 TOTAL_TIMESTEPS = 2_000_000_000
-NUM_ENVS = 4096
+NUM_ENVS = 16384
 NUM_STEPS = 256
 # PBT Settings
-POP_SIZE = 32
-ENVS_PER_AGENT = NUM_ENVS // POP_SIZE # 128
+POP_SIZE = 128
+ENVS_PER_AGENT = NUM_ENVS // POP_SIZE # 512
 assert NUM_ENVS % POP_SIZE == 0, "NUM_ENVS must be divisible by POP_SIZE"
 EVOLVE_INTERVAL = 2 # Updates between evolutions
 
+# Exploiter Config
+EXPLOITER_RATIO = 0.125 # 1/8th of population
+NUM_EXPLOITERS = int(POP_SIZE * EXPLOITER_RATIO)
+SPLIT_INDEX = POP_SIZE - NUM_EXPLOITERS # Index where Main ends and Exploiters start
+
 # Batch Size per Agent
+UPDATE_EPOCHS = 1
 BATCH_SIZE = 2 * ENVS_PER_AGENT * NUM_STEPS 
-MINIBATCH_SIZE = 16384 # 12GB VRAM can handle this easily
-UPDATE_EPOCHS = 4
+MINIBATCH_SIZE = BATCH_SIZE // UPDATE_EPOCHS # Maximize for speed (careful with OOM on low-end GPUs)
 REPORT_INTERVAL = 1 
 
 class PPOTrainer:
@@ -97,7 +102,7 @@ class PPOTrainer:
             
             self.population.append({
                 'id': i,
-                'type': 'exploiter' if i >= 28 else 'main', # 4 Explicit Exploiters
+                'type': 'exploiter' if i >= SPLIT_INDEX else 'main', # Dynamic Exploiter Split
                 'agent': agent,
                 'optimizer': optimizer,
                 'weights': weights, # Python Dict for mutation logic
@@ -684,13 +689,12 @@ class PPOTrainer:
             # Objectives: 
             # 1. Consistency (EMA Checkpoints) -> Max
             # 2. Efficiency (EMA Proficiency) -> Minimize (So Maximize -EMA)
-            # 3. Novelty -> Max
+            # REMOVED: Novelty (To avoid prioritizing incompetence in Stage 0)
             
             for p in self.population:
                 obj = [
                     p['ema_consistency'],
-                    -p['ema_efficiency'], 
-                    p['novelty_score'] * 100.0
+                    -p['ema_efficiency']
                 ]
                 objectives_list.append(obj)
                 
@@ -1347,9 +1351,9 @@ class PPOTrainer:
                      opp_norm_cp = self.rms_cp(opp_raw_cp.view(-1, D_cp), fixed=True).view(B_o, N_e, D_cp)
                      
                      # Split Indices
-                     # Main: Agents 0-27 -> Envs 0 to 28*128 = 3584
-                     # Exploiter: Agents 28-31 -> Envs 3584 to 4096
-                     split_idx = 28 * ENVS_PER_AGENT
+                     # Main: Agents 0 to SPLIT_INDEX -> Envs 0 to Split * EnvsPerAgent
+                     # Exploiter: Agents Split to End -> Envs ...
+                     split_idx = SPLIT_INDEX * ENVS_PER_AGENT
                      
                      # --- MAIN GROUP INFERENCE ---
                      # Slice: Everything before split_idx
