@@ -24,7 +24,7 @@ STAGE_LEAGUE = 3
 
 # Graduation Thresholds (Stage 0 -> 1)
 # Efficiency: Avg Steps per Checkpoint (Lower is better). 30 = ~Decent driving.
-STAGE_SOLO_EFFICIENCY_THRESHOLD = 29.0
+STAGE_SOLO_EFFICIENCY_THRESHOLD = 30.0
 # Consistency: Sum of CPs passed by all 128 envs in a generation (512 steps).
 # Max theoretical ~3072 (128 * 24). Goal 3000 = ~80% success rate.
-STAGE_SOLO_CONSISTENCY_THRESHOLD = 4500.0
+STAGE_SOLO_CONSISTENCY_THRESHOLD = 2000.0

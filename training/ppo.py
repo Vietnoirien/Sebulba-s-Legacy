@@ -65,8 +65,8 @@ class PPOTrainer:
         self.generation = 0
         self.iteration = 0
         
-        # Reward Tensors [4096, 13]
-        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 13), device=self.device)
+        # Reward Tensors [4096, 11]
+        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 12), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((14,), device=self.device)
@@ -858,8 +858,19 @@ class PPOTrainer:
             p['behavior_buffer'].zero_()
             
         self.generation += 1
-        # Leader is Elite 0
-        self.leader_idx = elites[0]['id']
+        # --- LEADER SELECTION (Performance Based) ---
+        # Select strictly best performer from Front 0 (or population if empty)
+        candidates = fronts[0] 
+        if not candidates: candidates = range(len(self.population))
+        
+        if self.env.curriculum_stage == STAGE_SOLO:
+             # Min Efficiency (Best)
+             best_guy = min(candidates, key=lambda i: self.population[i].get('ema_efficiency', 999.0) if self.population[i].get('ema_efficiency') is not None else 999.0)
+        else:
+             # Max Win Rate (Best)
+             best_guy = max(candidates, key=lambda i: self.population[i].get('ema_wins', 0.0) if self.population[i].get('ema_wins') is not None else 0.0)
+             
+        self.leader_idx = self.population[best_guy]['id']
 
     def save_generation(self):
         gen_dir = f"data/generations/gen_{self.generation}"
@@ -957,8 +968,8 @@ class PPOTrainer:
             # League Mode: No Step Penalty (Pure Win/Loss/Metrics)
             new_val = 0.0
         elif stage == STAGE_SOLO:
-            # Reduced Penalty for Exploration
-            new_val = 2.0 # Was 10.0
+            # Full Penalty
+            new_val = base_penalty
         else:
             # Anneal: Val = Base * (1.0 - Diff * 0.8)
             # At Diff 0.0 -> 10.0
