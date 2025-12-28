@@ -380,6 +380,9 @@ class TrainingSession:
                 return
 
             # Fetch Data
+            if self.trainer is None:
+                return
+
             t_env = self.trainer.env
             idx = int(env_idx)
             pos = t_env.physics.pos[idx].detach().cpu().numpy() # [4, 2]

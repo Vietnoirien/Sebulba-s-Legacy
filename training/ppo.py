@@ -65,8 +65,8 @@ class PPOTrainer:
         self.generation = 0
         self.iteration = 0
         
-        # Reward Tensors [4096, 11]
-        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 12), device=self.device)
+        # Reward Tensors [4096, 13]
+        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 13), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((14,), device=self.device)
@@ -957,8 +957,8 @@ class PPOTrainer:
             # League Mode: No Step Penalty (Pure Win/Loss/Metrics)
             new_val = 0.0
         elif stage == STAGE_SOLO:
-            # Full Penalty
-            new_val = base_penalty
+            # Reduced Penalty for Exploration
+            new_val = 2.0 # Was 10.0
         else:
             # Anneal: Val = Base * (1.0 - Diff * 0.8)
             # At Diff 0.0 -> 10.0

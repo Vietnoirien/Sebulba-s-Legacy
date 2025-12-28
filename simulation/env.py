@@ -17,6 +17,7 @@ RW_ORIENTATION = 8
 RW_WRONG_WAY = 9
 RW_COLLISION_MATE = 10
 RW_PROXIMITY = 11
+RW_TIMEOUT = 12
 
 DEFAULT_REWARD_WEIGHTS = {
     RW_WIN: 10000.0,
@@ -30,7 +31,8 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_ORIENTATION: 0.005, # SOTA: De-emphasized to prevent "Orientation Trap". Implicit in velocity.
     RW_WRONG_WAY: 10.0,
     RW_COLLISION_MATE: 2.0, # Penalty for hitting teammate
-    RW_PROXIMITY: 5.0 # Reward for getting close to enemy/teammate (Dense)
+    RW_PROXIMITY: 5.0, # Reward for getting close to enemy/teammate (Dense)
+    RW_TIMEOUT: 500.0 # Penalty for timing out
 }
 
 class PodRacerEnv:
@@ -310,6 +312,7 @@ class PodRacerEnv:
         w_wrong_way = reward_weights[:, RW_WRONG_WAY] # Individual
         w_col_mate = reward_weights[:, RW_COLLISION_MATE] # Individual
         w_prox = reward_weights[:, RW_PROXIMITY] # Individual
+        w_timeout = reward_weights[:, RW_TIMEOUT] # Individual penalty for timeout
         
         # --- Team Spirit Blending ---
         # Modify weights based on spirit
@@ -808,6 +811,25 @@ class PodRacerEnv:
             env_timed_out = timed_out[:, 0] | timed_out[:, 2]
         else:
             env_timed_out = timed_out.any(dim=1)
+            
+        # Apply Timeout Penalty (Individual)
+        # Apply to any pod that timed out
+        if w_timeout.sum() > 0:
+             # timed_out is [B, 4] boolean
+             # w_timeout is [B]
+             # rewards_indiv [B, 4]
+             
+             # Expand weights
+             w_to_exp = w_timeout.unsqueeze(1).expand(-1, 4)
+             
+             # Penalty
+             pen = -w_to_exp * timed_out.float()
+             
+             # Apply only to active pods?
+             # timed_out is only tracked for active pods (others are static/managed?)
+             # Actually others are reset too but they are "at infinity".
+             # Active logic is handled in reset.
+             rewards_indiv += pen
 
         self.dones = self.dones | env_timed_out
         
