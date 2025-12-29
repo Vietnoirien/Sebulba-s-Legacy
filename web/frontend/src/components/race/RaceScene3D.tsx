@@ -1,12 +1,19 @@
 import React, { useRef, useLayoutEffect, useState } from 'react'
-import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls, Grid, useTexture, useGLTF } from '@react-three/drei'
-import { SkeletonUtils } from 'three-stdlib'
+import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber'
+import { OrbitControls, Grid, useTexture } from '@react-three/drei'
+import { SkeletonUtils, OBJLoader } from 'three-stdlib'
 import { useGameState } from '../../context/GameStateContext'
 import * as THREE from 'three'
 import bgImage from '../../assets/background.jpg'
 // @ts-ignore
-import podModelUrl from '../../assets/models/race_pod.glb'
+import podObjUrl from '../../assets/models/Pods/pod_1_test/pod.obj'
+// @ts-ignore
+import flamesObjUrl from '../../assets/models/Pods/pod_1_test/flames.obj'
+// @ts-ignore
+import arcsObjUrl from '../../assets/models/Pods/pod_1_test/arcs.obj'
+// @ts-ignore
+import thrustersObjUrl from '../../assets/models/Pods/pod_1_test/thrusters.obj'
+import podSkinUrl from '../../assets/models/Pods/pod_1_test/pod-1-skin.png'
 
 // Constants matching backend (Physics world is roughly 16000x9000)
 const SCALE_FACTOR = 0.01
@@ -70,67 +77,107 @@ const CheckpointsRenderer: React.FC = () => {
 }
 
 const PodModel: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) => {
-    // Load Model (Cached)
-    const { scene } = useGLTF(podModelUrl)
+    // Load Models
+    const [podMesh, flamesMesh, arcsMesh, thrustersMesh] = useLoader(OBJLoader, [
+        podObjUrl,
+        flamesObjUrl,
+        arcsObjUrl,
+        thrustersObjUrl
+    ]) as THREE.Group[]
+
+    const podTexture = useTexture(podSkinUrl)
+    // Flip Y correction for OBJ textures if needed, usually OBJ UVs expect bottom-left 0,0 which is standard for images?
+    // Actually ThreeJS TextureLoader defaults flipY=true, which is usually correct for OBJ.
+    // However, if the texture looks inverted, we might need to toggle this. Default is usually safe for OBJ.
+
     // Clone Scene per instance
-    const clone = React.useMemo(() => SkeletonUtils.clone(scene), [scene])
+    const podClone = React.useMemo(() => SkeletonUtils.clone(podMesh), [podMesh])
+    const flamesClone = React.useMemo(() => SkeletonUtils.clone(flamesMesh), [flamesMesh])
+    const arcsClone = React.useMemo(() => SkeletonUtils.clone(arcsMesh), [arcsMesh])
+    const thrustersClone = React.useMemo(() => SkeletonUtils.clone(thrustersMesh), [thrustersMesh])
 
     // References for Animation
     const flamesMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
     const arcsMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
     const bodyMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
 
-    // Setup Materials Once
+    // Setup Materials
     useLayoutEffect(() => {
-        clone.traverse((child) => {
+        // 1. Pod Body
+        podClone.traverse((child) => {
             if ((child as THREE.Mesh).isMesh) {
                 const mesh = child as THREE.Mesh
-                // Materials might be an array or single. Based on inspect_glb, we have one mesh with multiple matrials.
-                if (Array.isArray(mesh.material)) {
-                    // Clone materials so we can modify them per instance
-                    mesh.material = mesh.material.map((m) => m.clone())
-
-                    // Identify by Name (Mapped from inspect_glb output)
-                    // Material 0: pod-skin
-                    // Material 1: flames
-                    // Material 2: cockpit
-                    // Material 3: arcs
-                    mesh.material.forEach((mat) => {
-                        const m = mat as THREE.MeshStandardMaterial
-                        // Safer matching
-                        if (m.name.includes('flames')) {
-                            flamesMatRef.current = m
-                            m.transparent = true
-                            m.opacity = 0 // Start invisible
-                            m.emissive = new THREE.Color('#ffaa00')
-                            m.emissiveIntensity = 2.0
-                            m.depthWrite = false
-                            m.blending = THREE.AdditiveBlending
-                        }
-                        if (m.name.includes('arcs')) {
-                            arcsMatRef.current = m
-                            m.transparent = true
-                            m.emissive = new THREE.Color('#00ffff')
-                            m.emissiveIntensity = 1.5
-                            // Ensure texture wraps for scrolling
-                            if (m.map) {
-                                m.map.wrapS = THREE.RepeatWrapping
-                                m.map.wrapT = THREE.RepeatWrapping
-                            }
-                        }
-                        if (m.name.includes('pod-skin')) {
-                            bodyMatRef.current = m
-                        }
-                    })
-                }
+                // Create a standard material for team coloring if not present
+                // Assuming OBJ loads with MeshPhongMaterial or similar
+                const newMat = new THREE.MeshStandardMaterial({
+                    map: podTexture,
+                    color: 0xffffff,
+                    roughness: 0.4,
+                    metalness: 0.6
+                })
+                mesh.material = newMat
+                bodyMatRef.current = newMat
             }
         })
-    }, [clone])
+
+        // 2. Flames
+        flamesClone.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh
+                const newMat = new THREE.MeshStandardMaterial({
+                    map: podTexture,
+                    color: 0xffaa00, // Orange tint
+                    emissive: 0xffaa00,
+                    emissiveIntensity: 2.0,
+                    transparent: true,
+                    opacity: 0,
+                    depthWrite: false,
+                    blending: THREE.AdditiveBlending,
+                    side: THREE.DoubleSide
+                })
+                mesh.material = newMat
+                flamesMatRef.current = newMat
+            }
+        })
+
+        // 3. Arcs
+        arcsClone.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh
+                const newMat = new THREE.MeshStandardMaterial({
+                    map: podTexture,
+                    color: 0x00ffff,
+                    emissive: 0x00ffff,
+                    emissiveIntensity: 1.5,
+                    transparent: true,
+                    opacity: 0.8,
+                    side: THREE.DoubleSide
+                })
+                mesh.material = newMat
+                arcsMatRef.current = newMat
+            }
+        })
+
+        // 4. Thrusters (Static?)
+        thrustersClone.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh
+                // Thrusters
+                mesh.material = new THREE.MeshStandardMaterial({
+                    map: podTexture,
+                    color: 0xffffff,
+                    roughness: 0.3,
+                    metalness: 0.8
+                })
+            }
+        })
+
+    }, [podClone, flamesClone, arcsClone, thrustersClone])
 
     // Scale/Pos/Rot
     const groupRef = useRef<THREE.Group>(null)
 
-    useFrame((_state, delta) => {
+    useFrame((_state, _delta) => {
         if (!groupRef.current) return
 
         // 1. Position & Rotation
@@ -145,13 +192,12 @@ const PodModel: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) =>
         const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
         if (speed > 5.0) heading = Math.atan2(pod.vy, pod.vx)
 
-        // Rotate around Y axis
-        groupRef.current.rotation.y = -heading
 
-        // Base Rotation: +90 degrees on X to lay it flat (User correction)
-        const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2)
-        // Heading Rotation: -heading around Y (Standard)
-        const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
+
+        // Base Rotation: -90 degrees on X to align Z-up model to Y-up world
+        const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2)
+        // Heading Rotation: -heading around Y (Standard) + -90 degrees offset for "Left" facing fix
+        const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading + Math.PI / 2)
 
         // Combine
         qHeading.multiply(qBase)
@@ -171,13 +217,18 @@ const PodModel: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) =>
             bodyMatRef.current.color.set(color)
         }
 
-        // Arcs Animation -> Scroll X
-        if (arcsMatRef.current && arcsMatRef.current.map) {
-            arcsMatRef.current.map.offset.x -= delta * 2.0 // "defil on X axis"
-        }
+        // Arcs Animation -> Scroll X? (Maybe not needed if no texture, but let's keep ref)
+        // if (arcsMatRef.current && arcsMatRef.current.map) ...
     })
 
-    return <primitive object={clone} ref={groupRef} scale={[3, 3, 3]} visible={visible} />
+    return (
+        <group ref={groupRef} scale={[3, 3, 3]} visible={visible}>
+            <primitive object={podClone} />
+            <primitive object={flamesClone} />
+            <primitive object={arcsClone} />
+            <primitive object={thrustersClone} />
+        </group>
+    )
 }
 
 const PodsRenderer: React.FC = () => {
@@ -193,7 +244,8 @@ const PodsRenderer: React.FC = () => {
     )
 }
 // Preload
-useGLTF.preload(podModelUrl)
+// useLoader.preload(OBJLoader, podObjUrl) // Preload if needed
+
 
 const ShieldsRenderer: React.FC = () => {
     const { telemetry } = useGameState()

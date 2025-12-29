@@ -1,3 +1,4 @@
+import React from 'react'
 import { GameStateProvider, useGameActions } from './context/GameStateContext'
 import { DashboardLayout } from './components/layout/DashboardLayout'
 import { ControlPanel } from './components/panels/ControlPanel'
@@ -20,7 +21,11 @@ const AppContent: React.FC = () => {
       <section className="flex-1 bg-[#121212] relative flex flex-col h-full overflow-hidden">
         {/* 1. Game View - Top */}
         <div className="w-full bg-black shadow-lg relative z-10 shrink-0">
-          {viewMode === '3d' ? <RaceScene3D /> : <RaceCanvas />}
+          {viewMode === '3d' ? (
+            <React.Suspense fallback={<div className="w-full aspect-[16/9] flex items-center justify-center text-white font-mono">Loading 3D Assets...</div>}>
+              <RaceScene3D />
+            </React.Suspense>
+          ) : <RaceCanvas />}
         </div>
 
         {/* 2. Console Log - Remaining Space */}
