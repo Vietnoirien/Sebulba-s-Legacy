@@ -23,11 +23,11 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_LOSS: 5000.0,
     RW_CHECKPOINT: 2000.0, # Increased to 5000.0 for Stage 0 Urgency
     RW_CHECKPOINT_SCALE: 50.0, # Kept as is, minor influence
-    RW_VELOCITY: 0.5, # Increased to 0.5 to provide immediate feedback loop (120 * 0.5 = 60 vs step pen)
+    RW_VELOCITY: 0.05, # Reduced to 0.05 (Guidance only). Speed driven by Dynamic CP Reward.
     RW_COLLISION_RUNNER: 0.5,
     RW_COLLISION_BLOCKER: 1000.0, # Increased 10x to prioritize Blocking over Checkpoints for Blocker
-    RW_STEP_PENALTY: 25.0, # Reduced to 4.0 (Constant) to ensure urgency without excessive harshness
-    RW_ORIENTATION: 0.5, # SOTA: De-emphasized to prevent "Orientation Trap". Implicit in velocity.
+    RW_STEP_PENALTY: 0.0, # Disabled. Replaced by Dynamic Decay (Opportunity Cost).
+    RW_ORIENTATION: 5, # Augmented to 5 to reflect the loss of velocity reward being guidance
     RW_WRONG_WAY: 10.0,
     RW_COLLISION_MATE: 2.0, # Penalty for hitting teammate
     RW_PROXIMITY: 5.0 # Reward for getting close to enemy/teammate (Dense)
@@ -752,6 +752,9 @@ class PodRacerEnv:
                 # Let's say w["checkpoint"] is the BASE.
                 # And we add a scaling factor.
                 
+                # w.get("checkpoint", 2000.0) -> Base
+                # Progressive Reward: Base + (Streak * Scale) + DYNAMIC DECAY
+                
                 self.cps_passed[pass_idx, i] += 1
                 infos["checkpoints_passed"][pass_idx, i] = 1
                 streak = self.cps_passed[pass_idx, i].float() # 1, 2, 3...
@@ -761,22 +764,44 @@ class PodRacerEnv:
                 infos["cp_steps"][pass_idx, i] = taken_steps
                 self.steps_last_cp[pass_idx, i] = 0
                 
+                # --- Dynamic Reward (The Carrot) ---
+                # Reward based on time remaining to incentivize speed.
+                # Formula: R = MinBase + (Bonus * (Rem/Total))
+                # User Plan: Decay from 2000 (Fast) to 200 (Slow).
+                # So MinBase = 200. MaxBase = 2000. Bonus = 1800.
+                
+                MIN_BASE = 200.0
+                TOTAL_BONUS = 1800.0
+                
+                # Fraction remaining:
+                steps_rem = self.timeouts[pass_idx, i].float()
+                time_frac = torch.clamp(steps_rem / TIMEOUT_STEPS, 0.0, 1.0)
+                
+                dynamic_part = MIN_BASE + (TOTAL_BONUS * time_frac)
+                
+                # Use Weight to scale the whole thing if needed (e.g. RW_CHECKPOINT is multiplier?)
+                # Code uses w_checkpoint[pass_idx] directly as reward.
+                # We interpret RW_CHECKPOINT as the "MaxBase" in config (2000.0).
+                # But here we implement the logic explicitly.
+                
+                # Should we ignore w_checkpoint? 
+                # Better to use w_checkpoint as the "Max Possible Reward" scaler.
+                # If w_checkpoint is 2000.0:
+                # then dynamic_part is calculated relative to 2000.
+                
+                # Let's trust the Explicit Values derived from plan.
+                
+                # Streak Bonus
+                streak_bonus = (streak - 1.0) * w_chk_scale[pass_idx]
+                
+                # Total
+                total_reward = dynamic_part + streak_bonus
+                
                 # --- TIME EXTENSION ---
-                # Reset Timeout for this pod AND Teammate (Team Shared Timer)
+                # Reset Timeout AFTER reward calc (so we used 'steps remaining' accurately)
                 self.timeouts[pass_idx, i] = TIMEOUT_STEPS
                 mate_idx = i ^ 1
                 self.timeouts[pass_idx, mate_idx] = TIMEOUT_STEPS
-                
-                base_reward = w_checkpoint[pass_idx]
-                scale_reward = w_chk_scale[pass_idx]
-                
-                # Reward = Base + (Streak-1)*Scale ? Or just Base + Streak*Scale?
-                # "Giving more and more points"
-                # If Streak=1 (First CP): Base (500)
-                # If Streak=2: Base + Scale (1000)
-                # Logic: total = base + (streak - 1) * scale
-                
-                total_reward = base_reward + (streak - 1.0) * scale_reward
                 
                 # DIRECT REWARD (Individual)
                 # rewards[pass_idx, i] += total_reward
@@ -790,11 +815,9 @@ class PodRacerEnv:
                 # new_dists is [B, 4].
                 overshoot_dist = new_dists[pass_idx, i]
                 
-                # Overshoot correction should be immediate? 
-                # Yes, it's a correction for THIS step's dense calculation.
-                # correction for THIS step's dense calculation.
+                # Scaling for Dense Reward (Explicit S_VEL)
                 # Correction applies to POD i
-                rewards_indiv[pass_idx, i] += overshoot_dist * scale[pass_idx, 0] * dense_mult # scale is [B,1]
+                rewards_indiv[pass_idx, i] += overshoot_dist * scale[pass_idx, 0] * 0.001 * dense_mult # S_VEL=0.001
         
         # Increment Step Counter for Efficiency
         self.steps_last_cp += 1
@@ -813,7 +836,40 @@ class PodRacerEnv:
 
         self.dones = self.dones | env_timed_out
         
-        # 4. Win Condition
+        # --- Degressive Timeout Penalty ---
+        # Penalize agents for failing to finish, scaled by how much they failed.
+        # Concept: "Billing for Wasted Time"
+        
+        if env_timed_out.any():
+            # Identify indices
+            idx = torch.nonzero(env_timed_out).squeeze(-1)
+            
+            # Apply to all 4 pods (if they timed out logic applies)
+            # In Solo/Duel, 'env_timed_out' is OR of active pods.
+            # We strictly penalize the specific pod that caused timeout? 
+            # Or assume global timeout applies to all?
+            # 'timed_out' is [B, 4]. Let's use that for precision.
+            
+            for p_i in range(4):
+                pod_timeouts = timed_out[:, p_i]
+                if pod_timeouts.any():
+                     p_idx = torch.nonzero(pod_timeouts).squeeze(-1)
+                     
+                     # Calculate Progress
+                     passed = self.cps_passed[p_idx, p_i].float()
+                     
+                     # Total Goal (Checkpoints * Laps)
+                     # self.num_checkpoints is [B]
+                     total_goal = (self.num_checkpoints[p_idx] * MAX_LAPS).float()
+                     
+                     progress = torch.clamp(passed / total_goal, 0.0, 1.0)
+                     
+                     # Fixed Rate 25.0 * 100 Steps = 2500.0
+                     MAX_PENALTY = 2500.0
+                     
+                     penalty = MAX_PENALTY * (1.0 - progress)
+                     
+                     rewards_indiv[p_idx, p_i] -= penalty
         finished = (self.laps >= MAX_LAPS)
         
         if finished.any():
