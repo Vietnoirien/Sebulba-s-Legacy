@@ -184,36 +184,45 @@ async def wipe_checkpoints():
     """
     import shutil
     try:
-        # Delete Checkpoints
+        # 1. Delete Checkpoints (Deep Clean)
         folder = "data/checkpoints"
         if os.path.exists(folder):
-            for f in os.listdir(folder):
-                if f.endswith(".pt"):
-                    try:
-                        os.remove(os.path.join(folder, f))
-                    except Exception as e:
-                        print(f"Failed to delete {f}: {e}")
+            try:
+                # Remove entire folder and recreate to ensure no stale files
+                shutil.rmtree(folder)
+                os.makedirs(folder, exist_ok=True)
+            except Exception as e:
+                print(f"Failed to clear checkpoints: {e}")
 
-        # Delete Generations
+        # 2. Delete Generations (Deep Clean)
         gen_folder = "data/generations"
         if os.path.exists(gen_folder):
             try:
                 shutil.rmtree(gen_folder)
-                # Recreate empty to avoid errors
                 os.makedirs(gen_folder, exist_ok=True)
             except Exception as e:
                 print(f"Failed to delete generations: {e}")
         
-        # Clear Registry
+        # 3. Clear Registry & Payoff (In-Memory)
         if session.trainer and session.trainer.league:
             session.trainer.league.registry = []
+            session.trainer.league.payoff = {} # Reset Match History
             session.trainer.league._save_registry()
-        elif os.path.exists("data/league.json"):
-            # If no active trainer, manually clear the json
+            session.trainer.league._save_payoff()
+            
+        # 4. Clear Registry & Payoff (Filesystem)
+        # Even if trainer is active, force wipe files to be sure
+        if os.path.exists("data/league.json"):
             with open("data/league.json", "w") as f:
                 json.dump([], f)
+        
+        if os.path.exists("data/payoff.json"):
+            try:
+                os.remove("data/payoff.json")
+            except:
+                pass
                 
-        return {"status": "wiped", "message": "All checkpoints and generations deleted"}
+        return {"status": "wiped", "message": "All checkpoints, generations, and league history wiped."}
     except Exception as e:
         return {"error": str(e)}
 

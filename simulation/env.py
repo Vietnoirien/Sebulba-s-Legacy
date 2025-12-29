@@ -177,7 +177,13 @@ class PodRacerEnv:
         # Reset Game Logic
         self.next_cp_id[env_ids] = 1
         self.laps[env_ids] = 0
-        self.timeouts[env_ids] = TIMEOUT_STEPS
+        
+        # SOTA Tuning: Nursery gets full rollout length (256) to find rewards
+        if self.curriculum_stage == STAGE_NURSERY:
+             self.timeouts[env_ids] = 256
+        else:
+             self.timeouts[env_ids] = TIMEOUT_STEPS
+             
         self.dones[env_ids] = False
         self.winners[env_ids] = -1
         self.cps_passed[env_ids] = 0

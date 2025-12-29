@@ -807,12 +807,18 @@ class PPOTrainer:
         elite_ids = [p['id'] for p in elites]
         self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
         self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
-        if self.env.curriculum_stage == STAGE_SOLO:
-             # Stage 0: Show Consistency and Score (Cons - Eff)
+        if self.env.curriculum_stage == STAGE_NURSERY:
+             # Stage 0: Show Consistency and Novelty
+             cons = elites[0]['ema_consistency']
+             nov = elites[0]['novelty_score']
+             self.log(f"Elite (Crowded) Stats | Cons: {cons:.1f} | Nov: {nov:.2f}")
+
+        elif self.env.curriculum_stage == STAGE_SOLO:
+             # Stage 1: Show Consistency and Efficiency
              eff = elites[0]['ema_efficiency']
              cons = elites[0]['ema_consistency']
              score = cons - eff
-             self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Score: {score:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
+             self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Score: {score:.1f}")
         else:
              self.log(f"Elite (Crowded) Stats | Eff: {elites[0]['ema_efficiency']:.1f} | Wins: {elites[0]['ema_wins']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
 
@@ -985,6 +991,35 @@ class PPOTrainer:
             'ent': self.rms_ent.state_dict(),
             'cp': self.rms_cp.state_dict()
         }, rms_path)
+
+        # --- Auto-Flush Old Generations ---
+        try:
+            MAX_KEEP = 5
+            gen_root = "data/generations"
+            existing_gens = []
+            
+            # Scan
+            if os.path.exists(gen_root):
+                for d in os.listdir(gen_root):
+                    path = os.path.join(gen_root, d)
+                    if d.startswith("gen_") and os.path.isdir(path):
+                        try:
+                            g_num = int(d.split('_')[1])
+                            existing_gens.append((g_num, path))
+                        except:
+                            pass
+            
+            # Sort and Delete
+            existing_gens.sort(key=lambda x: x[0]) # Ascending
+            
+            if len(existing_gens) > MAX_KEEP:
+                to_delete = existing_gens[:-MAX_KEEP]
+                for g_num, path in to_delete:
+                    shutil.rmtree(path)
+                    self.log(f"Auto-Flush: Deleted old generation {g_num} to save space.")
+                    
+        except Exception as e:
+            self.log(f"Auto-Flush Warning: {e}")
     def log_iteration_summary(self, global_step, sps, current_tau, avg_loss):
         leader = self.population[self.leader_idx]
         
@@ -1126,23 +1161,28 @@ class PPOTrainer:
 
             # --- Dynamic Config Check ---
             current_stage = self.env.curriculum_stage
-            target_steps = 256
-            target_evolve = 8
             
-            if current_stage == STAGE_SOLO:
-                target_steps = 512
-                target_evolve = 4 # Increased from 2 to stabilize momentum
+            # SOTA Tuning (See stage_0_tuning_report.md)
+            # Nursery: Fast Evolution (1) to find movers. Steps 256.
+            # Solo+: Stable Evolution (2). Steps 256.
+            
+            if current_stage == STAGE_NURSERY:
+                target_steps = 256
+                target_evolve = 1 # Fast Search
+            elif current_stage == STAGE_SOLO:
+                target_steps = 256
+                target_evolve = 2 # Standard Stability
             elif current_stage == STAGE_DUEL:
-                target_steps = 512
-                target_evolve = 4
+                target_steps = 256
+                target_evolve = 2
             elif current_stage == STAGE_TEAM:
                 target_steps = 256
-                # Dynamic Interval: Diff 0.0 -> 16, Diff 1.0 -> 4
-                target_evolve = int(16 - 12 * self.env.bot_difficulty)
-                target_evolve = max(4, target_evolve) # Safety clamp
+                # Dynamic Interval for Team matches
+                target_evolve = int(8 - 4 * self.env.bot_difficulty)
+                target_evolve = max(2, target_evolve)
             elif current_stage == STAGE_LEAGUE:
-                target_steps = 512
-                target_evolve = 8 # Stable league training
+                target_steps = 256
+                target_evolve = 2
             
             # Apply Evolve Interval
             self.current_evolve_interval = target_evolve         

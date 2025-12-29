@@ -4,6 +4,7 @@ import torch
 import random
 import glob
 from pathlib import Path
+import shutil
 
 LEAGUE_DIR = "data/checkpoints"
 LEAGUE_FILE = "data/league.json"
@@ -65,14 +66,28 @@ class LeagueManager:
     def register_agent(self, name, path, step, metrics=None):
         """
         Register an existing checkpoint file to the league.
+        COPIES the file to LEAGUE_DIR to ensure persistence.
         """
         if not os.path.exists(path):
             print(f"Warning: Trying to register non-existent path {path}")
             return
 
+        # Target persistent path
+        # If path is already in LEAGUE_DIR, we don't need to copy, but usually it comes from gen_x
+        filename = f"{name}.pt"
+        target_path = os.path.join(LEAGUE_DIR, filename)
+
+        try:
+            # Only copy if source and target are different
+            if os.path.abspath(path) != os.path.abspath(target_path):
+                shutil.copy2(path, target_path)
+        except Exception as e:
+            print(f"Error copying agent to league storage: {e}")
+            return
+
         entry = {
             "id": name,
-            "path": path,
+            "path": target_path, # Point to the Safe Copy
             "step": step,
             "elo": 1000,
             "matches": 0,
