@@ -301,7 +301,24 @@ class PPOTrainer:
         metrics = self.env.stage_metrics
         stage = self.env.curriculum_stage
         
-        if stage == STAGE_SOLO:
+        if stage == STAGE_NURSERY:
+            # Stage 0: Nursery
+            # Goal: Learn to navigate (Consistency). No speed requirement.
+            
+            sorted_by_consistency = sorted(self.population, key=lambda x: x.get('ema_consistency') or 0.0, reverse=True)
+            elites = sorted_by_consistency[:5]
+            avg_cons = np.mean([p.get('ema_consistency') or 0.0 for p in elites])
+            
+            if self.iteration % 10 == 0:
+                 self.log(f"Stage 0 (Nursery) Status: Top 5 Avg Cons {avg_cons:.1f} (Goal > {STAGE_NURSERY_CONSISTENCY_THRESHOLD})")
+            
+            if avg_cons > STAGE_NURSERY_CONSISTENCY_THRESHOLD:
+                self.log(f">>> GRADUATION FROM NURSERY: Top Agents Cons {avg_cons:.1f} <<<")
+                if self.curriculum_mode == "auto":
+                    self.env.curriculum_stage = STAGE_SOLO
+                    self.log(">>> Welcome to Stage 1: Time Trial (Speed Matters!) <<<")
+
+        elif stage == STAGE_SOLO:
             # Strategy A: Proficiency & Consistency
             # Thresholds: Eff < 30.0, Consistency > 2000.0 (Sum of CPs)
             
@@ -587,7 +604,8 @@ class PPOTrainer:
 
     def get_active_pods(self):
         stage = self.env.curriculum_stage
-        if stage == STAGE_SOLO: return [0]
+        if stage == STAGE_NURSERY: return [0]
+        elif stage == STAGE_SOLO: return [0]
         elif stage == STAGE_DUEL: return [0]
         elif stage == STAGE_TEAM: return [0, 1]
         else: return [0, 1]
@@ -686,7 +704,18 @@ class PPOTrainer:
         
         objectives_list = []
         
-        if stage == STAGE_SOLO:
+        if stage == STAGE_NURSERY:
+            # Objectives:
+            # 1. Consistency (EMA Checkpoints) -> Max
+            # 2. Novelty -> Max (Bootstrap exploration when Consistency is 0)
+            for p in self.population:
+                obj = [
+                    p['ema_consistency'],
+                    p['novelty_score'] * 100.0
+                ]
+                objectives_list.append(obj)
+
+        elif stage == STAGE_SOLO:
             # Objectives: 
             # 1. Consistency (EMA Checkpoints) -> Max
             # 2. Efficiency (EMA Proficiency) -> Minimize (So Maximize -EMA)
@@ -1457,7 +1486,7 @@ class PPOTrainer:
                 # Map Intrinsic to Pods
                 r_int = intrinsic_rewards.view(len(active_pods), NUM_ENVS)
                 
-                if self.env.curriculum_stage == STAGE_SOLO:
+                if self.env.curriculum_stage == STAGE_NURSERY or self.env.curriculum_stage == STAGE_SOLO:
                      # Only add to Pod 0 (active_pods[0])
                      norm_rewards[:, 0] += r_int[0] * self.rnd_coef
 

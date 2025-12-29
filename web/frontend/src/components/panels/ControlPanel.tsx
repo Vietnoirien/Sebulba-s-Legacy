@@ -171,10 +171,11 @@ export const ControlPanel: React.FC = () => {
                         onChange={(e) => setCurriculumStage(Number(e.target.value))}
                         disabled={curriculumMode === 'auto'}
                     >
-                        <option value={0}>Stage 0: Solo Time Trial</option>
-                        <option value={1}>Stage 1: 1v1 Duel</option>
-                        <option value={2}>Stage 2: 2v2 Team</option>
-                        <option value={3}>Stage 3: League</option>
+                        <option value={0}>Stage 0: Nursery (Safe Mode)</option>
+                        <option value={1}>Stage 1: Solo Time Trial</option>
+                        <option value={2}>Stage 2: 1v1 Duel</option>
+                        <option value={3}>Stage 3: 2v2 Team</option>
+                        <option value={4}>Stage 4: League</option>
                     </select>
                 </div>
             </div>

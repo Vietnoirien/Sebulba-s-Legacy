@@ -57,7 +57,7 @@ export const Header: React.FC = () => {
                     </span>
                 </div>
 
-                {currentStage > 0 && (
+                {currentStage >= 2 && (
                     <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-md">
                         <span className="text-gray-400 uppercase text-[10px]">Wr</span>
                         <span className="text-pink-400 font-bold min-w-[30px] text-right">

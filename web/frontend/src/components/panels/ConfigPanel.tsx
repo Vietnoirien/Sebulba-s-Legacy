@@ -226,10 +226,11 @@ export const ConfigPanel: React.FC = () => {
                                     value={curriculum.stage}
                                     onChange={(e) => setCurriculum(prev => ({ ...prev, stage: parseInt(e.target.value) }))}
                                 >
-                                    <option value={0}>0: SOLO (Time Trial)</option>
-                                    <option value={1}>1: DUEL (1v1 Bot)</option>
-                                    <option value={2}>2: TEAM (2v2 Bot)</option>
-                                    <option value={3}>3: LEAGUE (Self Play)</option>
+                                    <option value={0}>0: NURSERY (Safe Mode)</option>
+                                    <option value={1}>1: SOLO (Time Trial)</option>
+                                    <option value={2}>2: DUEL (1v1 Bot)</option>
+                                    <option value={3}>3: TEAM (2v2 Bot)</option>
+                                    <option value={4}>4: LEAGUE (Self Play)</option>
                                 </select>
                             </div>
                             <Slider label="BOT DIFFICULTY" min={0} max={1} step={0.05} value={curriculum.difficulty} valueDisplay={curriculum.difficulty.toFixed(2)}
@@ -310,7 +311,7 @@ export const ConfigPanel: React.FC = () => {
                 {activeTab === 'transitions' && (
                     <div className="space-y-6">
                         <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 0 (Solo) -{'>'} 1</h3>
+                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 1 (Solo) -{'>'} 2</h3>
                             <Slider label="EFFICIENCY THRESHOLD" min={10} max={100} step={1} value={transitions.solo_efficiency_threshold}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_efficiency_threshold: parseFloat(e.target.value) }))} />
                             <Slider label="CONSISTENCY THRESHOLD" min={1000} max={3000} step={50} value={transitions.solo_consistency_threshold}
@@ -318,7 +319,7 @@ export const ConfigPanel: React.FC = () => {
                         </div>
 
                         <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 1 (Duel) -{'>'} 2</h3>
+                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 2 (Duel) -{'>'} 3</h3>
                             <Slider label="CONSISTENCY WR" min={0.5} max={1.0} step={0.01} value={transitions.duel_consistency_wr} valueDisplay={transitions.duel_consistency_wr.toFixed(2)}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, duel_consistency_wr: parseFloat(e.target.value) }))} />
                             <Slider label="ABSOLUTE WR" min={0.5} max={1.0} step={0.01} value={transitions.duel_absolute_wr} valueDisplay={transitions.duel_absolute_wr.toFixed(2)}
@@ -328,7 +329,7 @@ export const ConfigPanel: React.FC = () => {
                         </div>
 
                         <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 2 (Team) -{'>'} 3</h3>
+                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 3 (Team) -{'>'} 4</h3>
                             <Slider label="CONSISTENCY WR" min={0.5} max={1.0} step={0.01} value={transitions.team_consistency_wr} valueDisplay={transitions.team_consistency_wr.toFixed(2)}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, team_consistency_wr: parseFloat(e.target.value) }))} />
                             <Slider label="ABSOLUTE WR" min={0.5} max={1.0} step={0.01} value={transitions.team_absolute_wr} valueDisplay={transitions.team_absolute_wr.toFixed(2)}
