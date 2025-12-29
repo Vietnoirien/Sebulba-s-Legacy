@@ -205,6 +205,8 @@ export const RaceCanvas: React.FC = () => {
         const gen = telemetry.stats?.generation ?? "0"
         const iter = telemetry.stats?.iteration ?? "0"
         const agent = telemetry.stats?.agent_id ?? "-"
+        // @ts-ignore
+        const isPareto = telemetry.stats?.is_pareto ?? false
 
         ctx.save()
         ctx.setTransform(1, 0, 0, 1, 0, 0) // Reset transform to screen space
@@ -246,6 +248,15 @@ export const RaceCanvas: React.FC = () => {
         ctx.shadowColor = '#00ffff'
         ctx.shadowBlur = fontSize * 0.4
         ctx.fillText(labelText, cx, cy)
+
+        if (isPareto) {
+            // Draw Badge Style Crown on top-right corner of the box
+            const crownSize = fontSize * 1.5
+            const badgeX = cx + w / 2
+            const badgeY = cy - h / 2
+
+            drawCrown(ctx, badgeX, badgeY, crownSize, '#ffd700')
+        }
 
         ctx.restore()
 
@@ -590,6 +601,40 @@ function drawDebugOverlay(
 
         y += 10 // Spacing
     })
+
+    ctx.restore()
+}
+
+function drawCrown(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string) {
+    ctx.save()
+    ctx.translate(x, y)
+
+    ctx.fillStyle = color
+    ctx.strokeStyle = '#daa520' // GoldenRod
+    ctx.lineWidth = 2
+
+    ctx.beginPath()
+    // Simple Crown Shape
+    // Bottom line
+    ctx.moveTo(-size / 2, size / 2)
+    ctx.lineTo(size / 2, size / 2)
+    // Right side up
+    ctx.lineTo(size / 2, 0)
+    // Spikes
+    ctx.lineTo(size / 4, size / 4) // Dip
+    ctx.lineTo(0, -size / 2) // Center Peak
+    ctx.lineTo(-size / 4, size / 4) // Dip
+    ctx.lineTo(-size / 2, 0) // Left side top
+
+    ctx.closePath()
+    ctx.fill()
+    ctx.stroke()
+
+    // Gems?
+    ctx.fillStyle = 'red'
+    ctx.beginPath()
+    ctx.arc(0, size / 4, size / 8, 0, Math.PI * 2)
+    ctx.fill()
 
     ctx.restore()
 }

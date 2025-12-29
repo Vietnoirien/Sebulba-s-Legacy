@@ -17,14 +17,18 @@ MAX_LAPS = 3
 MAX_CHECKPOINTS = 6
 MIN_CHECKPOINTS = 3
 # Curriculum Stages
-STAGE_SOLO = 0
-STAGE_DUEL = 1
-STAGE_TEAM = 2
-STAGE_LEAGUE = 3
+STAGE_NURSERY = 0 # Learn to drive (No penalties)
+STAGE_SOLO = 1    # Time Trial (Speed focus)
+STAGE_DUEL = 2    # 1v1
+STAGE_TEAM = 3    # 2v2
+STAGE_LEAGUE = 4  # Competitive
 
-# Graduation Thresholds (Stage 0 -> 1)
-# Efficiency: Avg Steps per Checkpoint (Lower is better). 30 = ~Decent driving.
+# Graduation Thresholds
+# Stage 0 (Nursery) -> 1 (Solo)
+# Goal: Just hit checkpoints consistently.
+STAGE_NURSERY_CONSISTENCY_THRESHOLD = 2000.0
+
+# Stage 1 (Solo) -> 2 (Duel)
+# Goal: Efficiency (Speed) + Consistency
 STAGE_SOLO_EFFICIENCY_THRESHOLD = 30.0
-# Consistency: Sum of CPs passed by all 128 envs in a generation (512 steps).
-# Max theoretical ~3072 (128 * 24). Goal 3000 = ~80% success rate.
 STAGE_SOLO_CONSISTENCY_THRESHOLD = 2000.0

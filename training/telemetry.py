@@ -118,6 +118,7 @@ class TelemetryWorker(mp.Process):
             "env_idx": env_idx,
             "race_id": buffer_obj["race_id"], # Unique Race ID
             "agent_id": data_ref.get("agent_id", 0),
+            "is_pareto": data_ref.get("is_pareto", False),
             "generation": data_ref.get("generation", 0),
             "iteration": data_ref.get("iteration", 0),
             "is_partial": True,

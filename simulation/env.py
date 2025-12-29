@@ -23,7 +23,7 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_LOSS: 5000.0,
     RW_CHECKPOINT: 2000.0, # Increased to 5000.0 for Stage 0 Urgency
     RW_CHECKPOINT_SCALE: 50.0, # Kept as is, minor influence
-    RW_VELOCITY: 0.05, # Reduced to 0.05 (Guidance only). Speed driven by Dynamic CP Reward.
+    RW_VELOCITY: 5, # Reduced to 0.05 (Guidance only). Speed driven by Dynamic CP Reward.
     RW_COLLISION_RUNNER: 0.5,
     RW_COLLISION_BLOCKER: 1000.0, # Increased 10x to prioritize Blocking over Checkpoints for Blocker
     RW_STEP_PENALTY: 0.0, # Disabled. Replaced by Dynamic Decay (Opportunity Cost).
@@ -162,7 +162,7 @@ class PodRacerEnv:
             # Stage 2 (League): Active=[0, 1, 2, 3].
             
             active = True
-            if self.curriculum_stage == STAGE_SOLO:
+            if self.curriculum_stage == STAGE_NURSERY or self.curriculum_stage == STAGE_SOLO:
                 if i != 0: active = False
             elif self.curriculum_stage == STAGE_DUEL:
                 if i != 0 and i != 2: active = False
@@ -550,7 +550,7 @@ class PodRacerEnv:
             # SOLO: Pod 0 active.
             # DUEL: Pod 0, 2 active.
             # LEAGUE: All active.
-            if self.curriculum_stage == STAGE_SOLO:
+            if self.curriculum_stage == STAGE_NURSERY or self.curriculum_stage == STAGE_SOLO:
                 orientation_rewards[:, 1:] = 0.0
             elif self.curriculum_stage == STAGE_DUEL:
                 orientation_rewards[:, 1] = 0.0
@@ -631,7 +631,10 @@ class PodRacerEnv:
             # League: All.
             
             active_mask = torch.zeros_like(steps_remaining, dtype=torch.bool)
-            if self.curriculum_stage == STAGE_SOLO:
+            if self.curriculum_stage == STAGE_NURSERY:
+                # No Step Penalty in Nursery
+                pass
+            elif self.curriculum_stage == STAGE_SOLO:
                 active_mask[:, 0] = True
             elif self.curriculum_stage == STAGE_DUEL:
                 active_mask[:, 0] = True
@@ -726,7 +729,7 @@ class PodRacerEnv:
                     infos["laps_completed"][z_idx, i] = 1
                     
                     # --- Curriculum Metric: Solo Complete ---
-                    if self.curriculum_stage == STAGE_SOLO:
+                    if self.curriculum_stage == STAGE_NURSERY or self.curriculum_stage == STAGE_SOLO:
                         # If Pod 0 finished a lap
                         if i == 0:
                              self.stage_metrics["solo_completes"] += len(z_idx)
@@ -737,7 +740,7 @@ class PodRacerEnv:
                 # Only count for active pod (Pod 0 in Solo)?
                 # Let's count all active pods to be fair metric of "system activity".
                 # But user wants "progress".
-                if self.curriculum_stage == STAGE_SOLO:
+                if self.curriculum_stage == STAGE_NURSERY or self.curriculum_stage == STAGE_SOLO:
                     if i == 0:
                          self.stage_metrics["checkpoint_hits"] += len(pass_idx)
                 else:
@@ -770,14 +773,18 @@ class PodRacerEnv:
                 # User Plan: Decay from 2000 (Fast) to 200 (Slow).
                 # So MinBase = 200. MaxBase = 2000. Bonus = 1800.
                 
-                MIN_BASE = 200.0
-                TOTAL_BONUS = 1800.0
-                
-                # Fraction remaining:
-                steps_rem = self.timeouts[pass_idx, i].float()
-                time_frac = torch.clamp(steps_rem / TIMEOUT_STEPS, 0.0, 1.0)
-                
-                dynamic_part = MIN_BASE + (TOTAL_BONUS * time_frac)
+                if self.curriculum_stage == STAGE_NURSERY:
+                    # Nursery: Fixed High Reward to encourage ANY finish. No Time Pressure.
+                    dynamic_part = 2000.0
+                else:
+                    MIN_BASE = 200.0
+                    TOTAL_BONUS = 1800.0
+                    
+                    # Fraction remaining:
+                    steps_rem = self.timeouts[pass_idx, i].float()
+                    time_frac = torch.clamp(steps_rem / TIMEOUT_STEPS, 0.0, 1.0)
+                    
+                    dynamic_part = MIN_BASE + (TOTAL_BONUS * time_frac)
                 
                 # Use Weight to scale the whole thing if needed (e.g. RW_CHECKPOINT is multiplier?)
                 # Code uses w_checkpoint[pass_idx] directly as reward.
@@ -840,7 +847,7 @@ class PodRacerEnv:
         # Penalize agents for failing to finish, scaled by how much they failed.
         # Concept: "Billing for Wasted Time"
         
-        if env_timed_out.any():
+        if env_timed_out.any() and self.curriculum_stage != STAGE_NURSERY:
             # Identify indices
             idx = torch.nonzero(env_timed_out).squeeze(-1)
             

@@ -71,7 +71,18 @@ export const useTelemetry = () => {
 
             if (msg.type === "race_replay" && msg.format === "binary_base64") {
                 // New Binary Format
-                const frames = parseBinaryReplay(msg.payload, msg.checkpoints, msg.race_id)
+                const frames = parseBinaryReplay(
+                    msg.payload,
+                    msg.checkpoints,
+                    msg.race_id,
+                    {
+                        generation: msg.generation,
+                        iteration: msg.iteration,
+                        agent_id: msg.agent_id,
+                        env_idx: msg.env_idx,
+                        is_pareto: msg.is_pareto
+                    }
+                )
 
                 // PUSH to Pending Stack instead of immediate playback queue
                 pendingRaces.current.push(frames)
@@ -209,7 +220,15 @@ export const useTelemetry = () => {
                                 step: renderFrame.step,
                                 match_id: renderFrame.match_id,
                                 race_state: renderFrame.race_state,
-                                logs: []
+                                logs: [],
+                                stats: {
+                                    ...current.stats,
+                                    generation: renderFrame.generation,
+                                    iteration: renderFrame.iteration,
+                                    agent_id: renderFrame.agent_id,
+                                    env_idx: renderFrame.env_idx,
+                                    is_pareto: renderFrame.is_pareto
+                                }
                             }
                         })
                     }
@@ -271,13 +290,26 @@ interface ParsedFrame {
     step: number
     match_id: string
     race_id: string // Start fresh for each race
+    generation: number
+    iteration: number
+    agent_id: number
+    env_idx: number
+    is_pareto: boolean
     race_state: {
         pods: any[]
         checkpoints: any[]
     }
 }
 
-function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "unknown"): ParsedFrame[] {
+interface ReplayMetadata {
+    generation: number
+    iteration: number
+    agent_id: number
+    env_idx: number
+    is_pareto: boolean
+}
+
+function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "unknown", metadata: ReplayMetadata = { generation: 0, iteration: 0, agent_id: 0, env_idx: 0, is_pareto: false }): ParsedFrame[] {
     // Decode Base64
     const binaryString = window.atob(b64)
     const len = binaryString.length
@@ -338,6 +370,11 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
             step,
             match_id: "replay",
             race_id: race_id,
+            generation: metadata.generation,
+            iteration: metadata.iteration,
+            agent_id: metadata.agent_id,
+            env_idx: metadata.env_idx,
+            is_pareto: metadata.is_pareto,
             race_state: {
                 pods,
                 checkpoints // Static reuse
@@ -391,6 +428,11 @@ function interpolateFrame(f1: ParsedFrame, f2: ParsedFrame, t: number): ParsedFr
         step,
         match_id: f1.match_id,
         race_id: f1.race_id,
+        generation: f1.generation,
+        iteration: f1.iteration,
+        agent_id: f1.agent_id,
+        env_idx: f1.env_idx,
+        is_pareto: f1.is_pareto,
         race_state: {
             pods,
             checkpoints: f1.race_state.checkpoints

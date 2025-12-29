@@ -420,12 +420,19 @@ class TrainingSession:
             # Actually, let's just get it from trainer if possible or hardcode for now/import.
             from training.ppo import ENVS_PER_AGENT
             agent_id = idx // ENVS_PER_AGENT
+            
+            # Check Pareto Status
+            is_pareto = False
+            if hasattr(self.trainer, 'pareto_indices'):
+                if agent_id in self.trainer.pareto_indices:
+                    is_pareto = True
 
             payload = {
                 "type": "step",
                 "step": step,
                 "env_idx": idx,
                 "agent_id": agent_id,
+                "is_pareto": is_pareto,
                 "generation": self.trainer.generation,
                 "iteration": self.trainer.iteration,
                 "dones": bool(is_done),

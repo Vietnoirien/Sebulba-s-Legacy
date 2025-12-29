@@ -2,18 +2,31 @@ import React, { useRef, useLayoutEffect, useState } from 'react'
 import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber'
 import { OrbitControls, Grid, useTexture } from '@react-three/drei'
 import { SkeletonUtils, OBJLoader } from 'three-stdlib'
-import { useGameState } from '../../context/GameStateContext'
+import { useGameState, useGameActions } from '../../context/GameStateContext'
 import * as THREE from 'three'
 import bgImage from '../../assets/background.jpg'
 // @ts-ignore
-import podObjUrl from '../../assets/models/Pods/pod_1_test/pod.obj'
+// Pod 1 Assets
 // @ts-ignore
-import flamesObjUrl from '../../assets/models/Pods/pod_1_test/flames.obj'
+import pod1ObjUrl from '../../assets/models/Pods/pod_1/pod.obj'
 // @ts-ignore
-import arcsObjUrl from '../../assets/models/Pods/pod_1_test/arcs.obj'
+import flames1ObjUrl from '../../assets/models/Pods/pod_1/flames.obj'
 // @ts-ignore
-import thrustersObjUrl from '../../assets/models/Pods/pod_1_test/thrusters.obj'
-import podSkinUrl from '../../assets/models/Pods/pod_1_test/pod-1-skin.png'
+import arcs1ObjUrl from '../../assets/models/Pods/pod_1/arcs.obj'
+// @ts-ignore
+import thrusters1ObjUrl from '../../assets/models/Pods/pod_1/thrusters.obj'
+import pod1SkinUrl from '../../assets/models/Pods/pod_1/skin.png'
+
+// Pod 2 Assets
+// @ts-ignore
+import pod2ObjUrl from '../../assets/models/Pods/pod_2/pod.obj'
+// @ts-ignore
+import flames2ObjUrl from '../../assets/models/Pods/pod_2/flames.obj'
+// @ts-ignore
+import arcs2ObjUrl from '../../assets/models/Pods/pod_2/arcs.obj'
+// @ts-ignore
+import thrusters2ObjUrl from '../../assets/models/Pods/pod_2/thrusters.obj'
+import pod2SkinUrl from '../../assets/models/Pods/pod_2/skin.png'
 
 // Constants matching backend (Physics world is roughly 16000x9000)
 const SCALE_FACTOR = 0.01
@@ -76,19 +89,16 @@ const CheckpointsRenderer: React.FC = () => {
     )
 }
 
-const PodModel: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) => {
-    // Load Models
-    const [podMesh, flamesMesh, arcsMesh, thrustersMesh] = useLoader(OBJLoader, [
-        podObjUrl,
-        flamesObjUrl,
-        arcsObjUrl,
-        thrustersObjUrl
-    ]) as THREE.Group[]
+interface PodAssets {
+    podMesh: THREE.Group
+    flamesMesh: THREE.Group
+    arcsMesh: THREE.Group
+    thrustersMesh: THREE.Group
+    podTexture: THREE.Texture
+}
 
-    const podTexture = useTexture(podSkinUrl)
-    // Flip Y correction for OBJ textures if needed, usually OBJ UVs expect bottom-left 0,0 which is standard for images?
-    // Actually ThreeJS TextureLoader defaults flipY=true, which is usually correct for OBJ.
-    // However, if the texture looks inverted, we might need to toggle this. Default is usually safe for OBJ.
+const GenericPodRender: React.FC<{ pod: any, assets: PodAssets, visible: boolean }> = ({ pod, assets, visible }) => {
+    const { podMesh, flamesMesh, arcsMesh, thrustersMesh, podTexture } = assets
 
     // Clone Scene per instance
     const podClone = React.useMemo(() => SkeletonUtils.clone(podMesh), [podMesh])
@@ -172,7 +182,7 @@ const PodModel: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) =>
             }
         })
 
-    }, [podClone, flamesClone, arcsClone, thrustersClone])
+    }, [podClone, flamesClone, arcsClone, thrustersClone, podTexture])
 
     // Scale/Pos/Rot
     const groupRef = useRef<THREE.Group>(null)
@@ -231,15 +241,40 @@ const PodModel: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) =>
     )
 }
 
-const PodsRenderer: React.FC = () => {
+const Pod1Model: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) => {
+    const [podMesh, flamesMesh, arcsMesh, thrustersMesh] = useLoader(OBJLoader, [
+        pod1ObjUrl, flames1ObjUrl, arcs1ObjUrl, thrusters1ObjUrl
+    ]) as THREE.Group[]
+    const podTexture = useTexture(pod1SkinUrl)
+
+    return <GenericPodRender pod={pod} visible={visible} assets={{ podMesh, flamesMesh, arcsMesh, thrustersMesh, podTexture }} />
+}
+
+const Pod2Model: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) => {
+    const [podMesh, flamesMesh, arcsMesh, thrustersMesh] = useLoader(OBJLoader, [
+        pod2ObjUrl, flames2ObjUrl, arcs2ObjUrl, thrusters2ObjUrl
+    ]) as THREE.Group[]
+    const podTexture = useTexture(pod2SkinUrl)
+
+    return <GenericPodRender pod={pod} visible={visible} assets={{ podMesh, flamesMesh, arcsMesh, thrustersMesh, podTexture }} />
+}
+
+const PodsRenderer: React.FC<{ swapSkins: boolean }> = ({ swapSkins }) => {
     const { telemetry } = useGameState()
     const pods = telemetry?.race_state?.pods || []
 
     return (
         <group>
-            {pods.map((pod, i) => (
-                <PodModel key={i} pod={pod} visible={true} />
-            ))}
+            {pods.map((pod, i) => {
+                // Standard: Team 0 -> Pod 1, Team 1 -> Pod 2
+                // Swap: Team 0 -> Pod 2, Team 1 -> Pod 1
+                const isTeam1 = pod.team === 1
+                const usePod2 = swapSkins ? !isTeam1 : isTeam1
+
+                return usePod2
+                    ? <Pod2Model key={i} pod={pod} visible={true} />
+                    : <Pod1Model key={i} pod={pod} visible={true} />
+            })}
         </group>
     )
 }
@@ -374,8 +409,9 @@ const CameraController: React.FC<{
 
 const SceneContent: React.FC<{
     mode: 'orbit' | 'pod',
-    focusedPodIndex: number
-}> = ({ mode, focusedPodIndex }) => {
+    focusedPodIndex: number,
+    swapSkins: boolean
+}> = ({ mode, focusedPodIndex, swapSkins }) => {
     return (
         <>
             <ambientLight intensity={0.5} />
@@ -397,7 +433,7 @@ const SceneContent: React.FC<{
 
             <BackgroundRenderer />
             <CheckpointsRenderer />
-            <PodsRenderer />
+            <PodsRenderer swapSkins={swapSkins} />
             <ShieldsRenderer />
 
             <CameraController mode={mode} focusedPodIndex={focusedPodIndex} />
@@ -405,10 +441,17 @@ const SceneContent: React.FC<{
     )
 }
 
+
+
 export const RaceScene3D: React.FC = () => {
     const [cameraMode, setCameraMode] = useState<'orbit' | 'pod'>('orbit')
     const [focusedPodIndex, setFocusedPodIndex] = useState(0)
+    const [showMenu, setShowMenu] = useState(false)
+    const [swapSkins, setSwapSkins] = useState(false)
+
     const { telemetry } = useGameState()
+    const { playbackSpeed, setPlaybackSpeed } = useGameActions()
+    const containerRef = useRef<HTMLDivElement>(null)
 
     const podsCount = telemetry?.race_state?.pods?.length || 0
 
@@ -426,54 +469,120 @@ export const RaceScene3D: React.FC = () => {
         setFocusedPodIndex(prev => (prev - 1 + podsCount) % podsCount)
     }
 
+    const toggleFullscreen = () => {
+        if (!document.fullscreenElement) {
+            containerRef.current?.requestFullscreen()
+        } else {
+            document.exitFullscreen()
+        }
+    }
+
     return (
-        <div className="relative w-full aspect-[16/9] bg-black">
+        <div ref={containerRef} className="relative w-full aspect-[16/9] bg-black group">
             <Canvas
                 camera={{ position: [MAP_CENTER_X, 100, MAP_CENTER_Z + 80], fov: 60 }}
                 shadows
                 dpr={[1, 2]}
                 className="w-full h-full"
             >
-                <SceneContent mode={cameraMode} focusedPodIndex={focusedPodIndex} />
+                <SceneContent mode={cameraMode} focusedPodIndex={focusedPodIndex} swapSkins={swapSkins} />
             </Canvas>
 
-            {/* Overlay UI */}
-            <div className="absolute top-4 left-4 flex gap-2 z-10">
-                <div className="text-white/50 text-xs font-mono pointer-events-none select-none">
+            {/* --- UI OVERLAY --- */}
+
+            {/* Top Left: Mode Indicator */}
+            <div className="absolute top-4 left-4 flex gap-2 z-10 pointer-events-none">
+                <div className="text-white/50 text-xs font-mono select-none">
                     3D MODE {[cameraMode.toUpperCase()]}
                 </div>
             </div>
 
-            <div className="absolute top-4 right-4 flex gap-2 z-10">
+            {/* Top Right: Controls (Mode, Fullscreen, Config) */}
+            <div className="absolute top-4 right-4 flex gap-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
                     onClick={toggleMode}
-                    className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white text-xs rounded border border-white/20 backdrop-blur-sm transition-colors"
+                    className="px-3 py-1 bg-black/60 hover:bg-black/90 text-white/80 hover:text-white text-xs rounded border border-white/10 backdrop-blur-sm transition-colors"
                 >
-                    {cameraMode === 'orbit' ? 'Switch to Pod View' : 'Switch to Orbit View'}
+                    {cameraMode === 'orbit' ? 'Cam: Orbit' : 'Cam: Pod'}
+                </button>
+
+                <button
+                    onClick={toggleFullscreen}
+                    className="p-1 px-2 bg-black/60 hover:bg-black/90 text-white/80 hover:text-white rounded border border-white/10 backdrop-blur-sm transition-colors"
+                    title="Fullscreen"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /><rect x="7" y="7" width="10" height="10" rx="1" /></svg>
+                </button>
+
+                {/* Config Menu Trigger */}
+                <div className="relative">
+                    <button
+                        onClick={() => setShowMenu(!showMenu)}
+                        className="p-1 px-2 bg-black/60 hover:bg-black/90 text-white/80 hover:text-white rounded border border-white/10 backdrop-blur-sm transition-colors"
+                        title="Settings"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    </button>
+
+                    {/* Menu Popup */}
+                    {showMenu && (
+                        <div className="absolute top-full right-0 mt-2 w-48 bg-gray-900 border border-gray-700 rounded shadow-xl p-2 flex flex-col gap-2 z-50">
+                            <div className="px-3 py-2">
+                                <div className="flex justify-between text-gray-400 text-xs mb-1">
+                                    <span>Speed</span>
+                                    <span>{playbackSpeed.toFixed(1)}x</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min="0.1"
+                                    max="2.0"
+                                    step="0.1"
+                                    value={playbackSpeed}
+                                    onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                                    className="w-full accent-green-500 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                                />
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Bottom Left: Skin Swap */}
+            <div className="absolute bottom-4 left-4 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                    onClick={() => setSwapSkins(!swapSkins)}
+                    className={`px-3 py-1 text-xs rounded border backdrop-blur-sm transition-colors ${swapSkins
+                        ? 'bg-blue-600/60 border-blue-400 text-white'
+                        : 'bg-black/60 border-white/10 text-white/60 hover:text-white'
+                        }`}
+                >
+                    {swapSkins ? 'Swap Skins: ON' : 'Swap Skins: OFF'}
                 </button>
             </div>
 
+            {/* Bottom Center: Pod Selector (Refined) */}
             {cameraMode === 'pod' && (
-                <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-4 z-10 glass-panel px-4 py-2 rounded-full border border-white/10">
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 z-10 glass-panel px-3 py-1 rounded-full border border-white/5 bg-black/40 backdrop-blur-md opacity-30 hover:opacity-100 transition-opacity">
                     <button
                         onClick={prevPod}
-                        className="w-8 h-8 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-colors"
+                        className="w-6 h-6 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full text-white/50 hover:text-white transition-colors"
                     >
                         ←
                     </button>
-                    <div className="text-white/80 text-sm font-mono">
+                    <div className="text-white/60 text-xs font-mono w-16 text-center">
                         POD {focusedPodIndex}
                     </div>
                     <button
                         onClick={nextPod}
-                        className="w-8 h-8 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-colors"
+                        className="w-6 h-6 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full text-white/50 hover:text-white transition-colors"
                     >
                         →
                     </button>
                 </div>
             )}
 
-            <div className="absolute bottom-4 right-4 text-right text-white/30 text-[10px] font-mono pointer-events-none select-none z-10">
+            {/* Hint Text */}
+            <div className="absolute bottom-1 right-2 text-right text-white/20 text-[9px] font-mono pointer-events-none select-none z-0">
                 {cameraMode === 'orbit' ? 'LMB: Rotate | RMB: Pan | Wheel: Zoom' : 'Camera locked to Pod'}
             </div>
         </div>

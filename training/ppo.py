@@ -169,6 +169,7 @@ class PPOTrainer:
         self.current_evolve_interval = 2 # Start with Stage 0 default
         self.current_active_pods_count = 1 # Start with Stage 0 default
         self.agent_batches = [] 
+        self.pareto_indices = [] # Track Rank 0 agents
         
         # Difficulty Adjustment State
         self.failure_streak = 0
@@ -771,6 +772,8 @@ class PPOTrainer:
              remaining.sort(key=lambda x: (x['rank'], -x['crowding']))
              elites.extend(remaining[: 2 - len(elites)])
         
+        # Update Pareto Indices (Rank 0) for Telemetry
+        self.pareto_indices = [p['id'] for p in self.population if p.get('rank') == 0]
         # Logging
         elite_ids = [p['id'] for p in elites]
         self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
@@ -1617,8 +1620,27 @@ class PPOTrainer:
                                      done_indices = torch.nonzero(dones).flatten()
                                      if len(done_indices) > 0:
                                          candidates = done_indices.tolist()
-                                         new_idx = random.choice(candidates)
-                                         self.telemetry_env_indices[t_idx] = new_idx
+                                         
+                                         # Smart Selection
+                                         # If Slot < 16 (First half), prioritize Pareto (Rank 0)
+                                         # Else, random (representing Evolved Pop)
+                                         selected_idx = None
+                                         
+                                         if t_idx < 16 and len(self.pareto_indices) > 0:
+                                             # Try to find a Pareto candidate
+                                             pareto_candidates = []
+                                             for cand in candidates:
+                                                 agent_id = cand // ENVS_PER_AGENT
+                                                 if agent_id in self.pareto_indices:
+                                                     pareto_candidates.append(cand)
+                                             
+                                             if pareto_candidates:
+                                                 selected_idx = random.choice(pareto_candidates)
+                                         
+                                         if selected_idx is None:
+                                              selected_idx = random.choice(candidates)
+                                         
+                                         self.telemetry_env_indices[t_idx] = selected_idx
                 
                 # --- Behavior Characterization Tracking ---
                 # Track Avg Speed and Steering Variance per Agent
