@@ -53,3 +53,13 @@ class Stage(ABC):
     def update_step_penalty(self, base_penalty: float) -> float:
         """Returns the step penalty for this stage."""
         return base_penalty
+
+    @property
+    def target_steps(self) -> int:
+        """Number of steps per iteration for this stage."""
+        return 256 # Default
+
+    @property
+    def target_evolve_interval(self) -> int:
+        """Number of iterations between evolution steps."""
+        return 2 # Default

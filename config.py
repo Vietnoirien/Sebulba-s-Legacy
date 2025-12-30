@@ -37,6 +37,22 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 @dataclass
+class BotConfig:
+    difficulty_noise_scale: float = 30.0
+    thrust_base: float = 20.0
+    thrust_scale: float = 80.0
+
+@dataclass
+class SpawnConfig:
+    offsets: List[int] = field(default_factory=lambda: [500, -500, 1500, -1500])
+
+@dataclass
+class RewardScalingConfig:
+    velocity_scale_const: float = 1.0 / 1000.0
+    orientation_threshold: float = 0.5
+    dynamic_reward_bonus: float = 1800.0
+
+@dataclass
 class TrainingConfig:
     # Hyperparameters
     lr: float = 1e-4
@@ -47,6 +63,8 @@ class TrainingConfig:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     div_coef: float = 0.05 # Role Regularization Coefficient
+    proficiency_penalty_const: float = 50.0
+    ema_alpha: float = 0.3
     
     # Resources
     total_timesteps: int = 2_000_000_000
@@ -101,6 +119,25 @@ class CurriculumConfig:
     team_consistency_wr: float = 0.85
     team_absolute_wr: float = 0.88
     team_consistency_checks: int = 5
+
+    # League Thresholds (Implicit/Monitor)
+    
+    # Critical Thresholds (Difficulty Adjustment)
+    wr_critical: float = 0.30 # Trigger Difficulty Decrease
+    wr_warning: float = 0.40 # Trigger Warning/Streak
+    
+    # Progression Thresholds (Difficulty Increase)
+    wr_progression_standard: float = 0.70 # +0.05
+    wr_progression_turbo: float = 0.90 # +0.10
+    wr_progression_super_turbo: float = 0.98 # +0.20
+    wr_progression_insane_turbo: float = 0.99 # +0.50
+    
+    # Difficulty Steps
+    diff_step_decrease: float = 0.05
+    diff_step_standard: float = 0.05
+    diff_step_turbo: float = 0.10
+    diff_step_super_turbo: float = 0.20
+    diff_step_insane_turbo: float = 0.50
 
 # Reward Indices
 RW_WIN = 0

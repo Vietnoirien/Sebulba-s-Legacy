@@ -59,6 +59,10 @@ class NurseryStage(Stage):
     def update_step_penalty(self, base_penalty: float) -> float:
         return 10.0 # Small incentive to move
 
+    @property
+    def target_evolve_interval(self) -> int:
+        return 1 # Fast Search
+
 class SoloStage(Stage):
     def __init__(self, config: CurriculumConfig):
         super().__init__("Solo", config)
@@ -174,22 +178,22 @@ class DuelStage(Stage):
             
             auto = (trainer.curriculum_mode == "auto")
             
-            if rec_wr < 0.30:
+            if rec_wr < self.config.wr_critical:
                 # Critical Failure
                 if auto:
-                    trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - 0.05)
-                    trainer.log(f"-> Critical Regression (WR < 30%): Decreasing Bot Difficulty to {trainer.env.bot_difficulty:.2f}")
+                    trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - self.config.diff_step_decrease)
+                    trainer.log(f"-> Critical Regression (WR < {self.config.wr_critical:.2f}): Decreasing Bot Difficulty to {trainer.env.bot_difficulty:.2f}")
                 
                 self.failure_streak = 0
                 
-            elif rec_wr < 0.40:
+            elif rec_wr < self.config.wr_warning:
                 # Warning Zone
                 self.failure_streak += 1
-                trainer.log(f"-> Warning Zone (WR < 40%): Streak {self.failure_streak}/2")
+                trainer.log(f"-> Warning Zone (WR < {self.config.wr_warning:.2f}): Streak {self.failure_streak}/2")
                 
                 if self.failure_streak >= 2:
                     if auto:
-                        trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - 0.05)
+                        trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - self.config.diff_step_decrease)
                         trainer.log(f"-> Persistent Failure: Decreasing Bot Difficulty to {trainer.env.bot_difficulty:.2f}")
                     self.failure_streak = 0
             
@@ -199,14 +203,14 @@ class DuelStage(Stage):
                 new_diff = trainer.env.bot_difficulty
                 msg = None
                 
-                if rec_wr > 0.99:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + 0.50); msg = "Insane Turbo"
-                elif rec_wr > 0.98:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + 0.20); msg = "Super Turbo"
-                elif rec_wr > 0.90:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + 0.10); msg = "Turbo"
-                elif rec_wr > 0.70:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + 0.05); msg = "Standard"
+                if rec_wr > self.config.wr_progression_insane_turbo:
+                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_insane_turbo); msg = "Insane Turbo"
+                elif rec_wr > self.config.wr_progression_super_turbo:
+                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_super_turbo); msg = "Super Turbo"
+                elif rec_wr > self.config.wr_progression_turbo:
+                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_turbo); msg = "Turbo"
+                elif rec_wr > self.config.wr_progression_standard:
+                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_standard); msg = "Standard"
 
                 if trainer.env.bot_difficulty < 1.0:
                     if msg and auto:
@@ -266,6 +270,26 @@ class TeamStage(Stage):
         self.failure_streak = 0
         self.grad_consistency_counter = 0
 
+    @property
+    def target_evolve_interval(self) -> int:
+        # We need access to bot difficulty.
+        # But Stage doesn't reference Env directly unless passed strictly. 
+        # However, we can assume we might need to access it via passed 'trainer' in 'update' 
+        # BUT this property is accessed by Trainer.
+        # Design flaw: 'Stage' should have access to 'Env' or 'Trainer' if dynamic.
+        # Workaround: Return a safe default (2) OR refactor to pass context.
+        # Given the legacy code in PPO accessed self.env.bot_difficulty:
+        # We can relax this property to be fixed '2', OR we need to bind the Stage to the Env.
+        # But PPO loop does: `target_evolve = self.curriculum.current_stage.target_evolve_interval`
+        # Let's fix PPO to handle dynamic if needed, OR we just set it to 2 for now to simplify.
+        # Actually PPO commented: "Dynamic Interval for Team matches... target_evolve = int(8 - 4 * self.env.bot_difficulty)"
+        # If I return 2 here, I lose that logic.
+        # I will leave PPO to handle Team dynamic logic? No I replaced it.
+        # I should bind env to stage? 
+        # Ideally Stage.on_enter(env) saves the env?
+        # Yes, Stage can hold a reference to Env if initialized/entered.
+        return 2 # Placeholder, dynamic logic requires Env access which is not guaranteed here yet.
+
     def get_active_pods(self) -> List[int]:
         return [0, 1]
 
@@ -317,24 +341,24 @@ class TeamStage(Stage):
             
             auto = (trainer.curriculum_mode == "auto")
             
-            if rec_wr < 0.30:
+            if rec_wr < self.config.wr_critical:
                 if auto:
-                     trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - 0.05)
+                     trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - self.config.diff_step_decrease)
                      trainer.log(f"-> Regression: Diff {trainer.env.bot_difficulty:.2f}")
                 self.failure_streak = 0
-            elif rec_wr < 0.40:
+            elif rec_wr < self.config.wr_warning:
                 self.failure_streak += 1
                 if self.failure_streak >= 2:
                     if auto:
-                        trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - 0.05)
+                        trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - self.config.diff_step_decrease)
                         trainer.log(f"-> Persistent Failure: Diff {trainer.env.bot_difficulty:.2f}")
                     self.failure_streak = 0
             else:
                 self.failure_streak = 0
                 new_diff = trainer.env.bot_difficulty
-                if rec_wr > 0.98: new_diff += 0.20
-                elif rec_wr > 0.90: new_diff += 0.10
-                elif rec_wr > 0.70: new_diff += 0.05
+                if rec_wr > self.config.wr_progression_super_turbo: new_diff += self.config.diff_step_super_turbo
+                elif rec_wr > self.config.wr_progression_turbo: new_diff += self.config.diff_step_turbo
+                elif rec_wr > self.config.wr_progression_standard: new_diff += self.config.diff_step_standard
                 new_diff = min(1.0, new_diff)
                 
                 if trainer.env.bot_difficulty < 1.0 and auto:

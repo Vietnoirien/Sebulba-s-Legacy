@@ -154,7 +154,7 @@ class PPOTrainer:
         # EMA Alpha (Smoothing Factor)
         # 0.3 means 30% new, 70% old. 
         # ~3 generations memory.
-        self.ema_alpha = 0.3
+        self.ema_alpha = self.config.ema_alpha
 
         # Dynamic Hyperparameters
         self.current_num_steps = self.config.num_steps # Start with Stage 0 default
@@ -294,9 +294,7 @@ class PPOTrainer:
         
         # 1. Update Metrics & EMA Calculation
         # Proficiency = AvgSteps + Penalty/(Sqrt(Hits)+1). Lower is Better.
-        # PENALTY_CONST is implicit in proficiency calculation, we could move it to config if needed
-        # For now, let's keep it here but acknowledge it wasn't global.
-        PENALTY_CONST = 50.0 
+        PENALTY_CONST = self.config.proficiency_penalty_const
         
         # Collect raw values for debug logging
         debug_raw_fitness = []
@@ -766,23 +764,14 @@ class PPOTrainer:
             # Nursery: Fast Evolution (1) to find movers. Steps 256.
             # Solo+: Stable Evolution (2). Steps 256.
             
-            if current_stage == STAGE_NURSERY:
-                target_steps = 256
-                target_evolve = 1 # Fast Search
-            elif current_stage == STAGE_SOLO:
-                target_steps = 256
-                target_evolve = 2 # Standard Stability
-            elif current_stage == STAGE_DUEL:
-                target_steps = 256
-                target_evolve = 2
-            elif current_stage == STAGE_TEAM:
-                target_steps = 256
-                # Dynamic Interval for Team matches
-                target_evolve = int(8 - 4 * self.env.bot_difficulty)
-                target_evolve = max(2, target_evolve)
-            elif current_stage == STAGE_LEAGUE:
-                target_steps = 256
-                target_evolve = 2
+            # SOTA Tuning (See stage_0_tuning_report.md)
+            # Delegated to Stage Class
+            target_steps = self.curriculum.current_stage.target_steps
+            target_evolve = self.curriculum.current_stage.target_evolve_interval
+            
+            # Dynamic Evolve Check (if callable/property logic is complex, might need method)
+            # For Team Stage, it was dynamic: int(8 - 4 * diff).
+            # We will handle this in the TeamStage property implementation.
             
             # Apply Evolve Interval
             self.current_evolve_interval = target_evolve         

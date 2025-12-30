@@ -25,6 +25,11 @@ class PodRacerEnv:
              orientation_active_pods=[0]
         )
         
+        # New Configs
+        self.bot_config = BotConfig()
+        self.spawn_config = SpawnConfig()
+        self.reward_scaling_config = RewardScalingConfig()
+        
         # Game State
         self.next_cp_id = torch.ones((num_envs, 4), dtype=torch.long, device=self.device) # Start at 1 (0 is start)
         self.laps = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device)
@@ -141,7 +146,7 @@ class PodRacerEnv:
         # Usually arranged in a grid or line.
         
         # Simple Line Arrangement
-        offsets = torch.tensor([500, -500, 1500, -1500], device=self.device)
+        offsets = torch.tensor(self.spawn_config.offsets, device=self.device)
         
         for i in range(4):
             # Reset Physics State
@@ -372,7 +377,7 @@ class PodRacerEnv:
                 
                 # 1. Steering Noise
                 # Lower difficulty = More noise
-                noise_scale = (1.0 - self.bot_difficulty) * 30.0
+                noise_scale = (1.0 - self.bot_difficulty) * self.bot_config.difficulty_noise_scale
                 noise = (torch.rand(self.num_envs, device=self.device) * 2.0 - 1.0) * noise_scale
                 desired_deg += noise
                 
@@ -392,7 +397,7 @@ class PodRacerEnv:
                 
                 # 2. Thrust Scaling
                 # 20 + (80 * diff)
-                thrust_val = 20.0 + (80.0 * self.bot_difficulty)
+                thrust_val = self.bot_config.thrust_base + (self.bot_config.thrust_scale * self.bot_difficulty)
                 act_thrust[:, bot_id] = thrust_val 
                 
                 act_shield[:, bot_id] = False
@@ -480,7 +485,7 @@ class PodRacerEnv:
         scale = w_velocity.unsqueeze(1)
         
         # Scaling for Dense Reward (prevent positive feedback loop)
-        S_VEL = 1.0 / 1000.0 
+        S_VEL = self.reward_scaling_config.velocity_scale_const
         v_scaled = vel_proj * scale * S_VEL
         
         # Annealing
@@ -530,7 +535,7 @@ class PodRacerEnv:
                 # --- Refined Orientation Logic ---
                 # 1. Positive Reward: Narrow Cone (~60 deg)
                 # Map [0.5, 1.0] -> [0.0, 1.0]
-                THRESHOLD = 0.5
+                THRESHOLD = self.reward_scaling_config.orientation_threshold
                 pos_score = torch.clamp((alignment - THRESHOLD) / (1.0 - THRESHOLD), 0.0, 1.0)
 
                 # 2. Negative Penalty: Wrong Way
@@ -775,7 +780,7 @@ class PodRacerEnv:
                     dynamic_part = self.config.dynamic_reward_base
                 else:
                     MIN_BASE = self.config.dynamic_reward_base
-                    TOTAL_BONUS = 1800.0
+                    TOTAL_BONUS = self.reward_scaling_config.dynamic_reward_bonus
                     
                     # Fraction remaining:
                     steps_rem = self.timeouts[pass_idx, i].float()
