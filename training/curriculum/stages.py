@@ -68,6 +68,8 @@ class NurseryStage(Stage):
 class SoloStage(Stage):
     def __init__(self, config: CurriculumConfig):
         super().__init__("Solo", config)
+        self.low_efficiency_counter = 0
+        self.penalty_mode_active = False
 
     def get_active_pods(self) -> List[int]:
         return [0]
@@ -112,13 +114,31 @@ class SoloStage(Stage):
                 
                 return STAGE_DUEL, f"Eff {avg_eff:.1f} < {self.config.solo_efficiency_threshold}"
         
+        # --- Dynamic Penalty Logic (Anti-Stagnation) ---
+        # If Efficiency matches "Safe Walk" (< 50.0) but Consistency is high, 
+        # it means they are farming. Force them to run.
+        if avg_eff < 50.0 and avg_cons > 1000.0:
+            self.low_efficiency_counter += 1
+            if self.low_efficiency_counter >= 2:
+                if not self.penalty_mode_active:
+                     trainer.log(f">>> DYNAMIC PENALTY ACTIVATED: Efficiency {avg_eff:.1f} < 50 for 2 gens. Penalizing Step (40.0) <<<")
+                self.penalty_mode_active = True
+        else:
+            # Reversible: If they improve (Eff > 50) or crash (Cons < 1000), relax.
+            self.low_efficiency_counter = 0
+            if self.penalty_mode_active:
+                 trainer.log(f">>> DYNAMIC PENALTY DEACTIVATED: Efficiency {avg_eff:.1f} > 50 or Cons dropped. Resetting Step Penalty. <<<")
+            self.penalty_mode_active = False
+
         return None, ""
         
     def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
         return False, ""
 
     def update_step_penalty(self, base_penalty: float) -> float:
-        return base_penalty # Full Penalty
+        if self.penalty_mode_active:
+            return 40.0 # Force Speed
+        return base_penalty # Full Penalty (5.0)
 
 class DuelStage(Stage):
     def __init__(self, config: CurriculumConfig):

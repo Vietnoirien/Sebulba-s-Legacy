@@ -79,6 +79,16 @@ class TrainingSession:
         self.trainer.env.curriculum_stage = curriculum_stage
         self.trainer.log(f"Session started with Curriculum: {self.trainer.curriculum_mode} | Stage: {self.trainer.env.curriculum_stage}")
 
+        # [FIX] Sync Curriculum Manager and Env Config explicitly
+        # If we just set env.curriculum_stage int, env.config remains stuck on previous default (Nursery).
+        # We must force the manager to switch and apply config.
+        if self.trainer.curriculum.current_stage_id != curriculum_stage:
+             self.trainer.curriculum.set_stage(curriculum_stage)
+             # Apply the config immediately to env
+             stage_cfg = self.trainer.curriculum.current_stage.get_env_config()
+             self.trainer.env.set_stage(curriculum_stage, stage_cfg)
+             self.trainer.log(f"Explicitly synced Env Config for Stage {curriculum_stage} (Gen Type: {stage_cfg.track_gen_type})")
+
         # Apply Initial Config if provided (Fix for race condition)
         if config:
             self.trainer.log(f"Applying initial configuration...")

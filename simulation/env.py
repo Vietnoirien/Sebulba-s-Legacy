@@ -113,11 +113,15 @@ class PodRacerEnv:
                  
                  # Generate for MAX_CHECKPOINTS but only use first n_cps
                  cps = TrackGenerator.generate_nursery_tracks(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                 if num_reset > 0:
+                     print(f"DEBUG: Generated NURSERY tracks for {num_curr} envs.")
                  self.checkpoints[curr_env_ids] = cps
                  
             else:
                 # Standard
                 cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                if num_reset > 0:
+                     print(f"DEBUG: Generated MAX ENTROPY tracks for {num_curr} envs (CPs: {MIN_CHECKPOINTS}-{MAX_CHECKPOINTS}).")
                 self.checkpoints[curr_env_ids] = cps
 
             
