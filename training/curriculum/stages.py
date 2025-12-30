@@ -164,7 +164,6 @@ class DuelStage(Stage):
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
         return [
             p.get('ema_wins', 0.0),
-            -p.get('ema_efficiency', 999.0),
             p.get('novelty_score', 0.0) * 100.0
         ]
         

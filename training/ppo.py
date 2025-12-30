@@ -467,8 +467,15 @@ class PPOTrainer:
              self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Nov: {nov:.2f} | Score: {score:.1f}")
         elif self.env.curriculum_stage == STAGE_NURSERY:
              self.log(f"Elite (Crowded) Stats | Nursery Score: {elites[0]['nursery_score']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
+        elif self.env.curriculum_stage == STAGE_DUEL:
+             self.log(f"Elite (Crowded) Stats | Wins: {elites[0]['ema_wins']:.1%} | Nov: {elites[0]['novelty_score']:.2f} | (Cons: {elites[0]['ema_consistency']:.1f})")
+             # Also show Best Winner if different
+             best_winner = max(front0_indices, key=lambda i: self.population[i].get('ema_wins', 0.0))
+             bw = self.population[best_winner]
+             if bw['id'] != elites[0]['id']:
+                  self.log(f"Elite (Heuristic) Stats | Wins: {bw['ema_wins']:.1%} | Nov: {bw['novelty_score']:.2f}")
         else:
-             self.log(f"Elite (Crowded) Stats | Eff: {elites[0]['ema_efficiency']:.1f} | Wins: {elites[0]['ema_wins']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
+             self.log(f"Elite (Crowded) Stats | Eff: {elites[0]['ema_efficiency']:.1f} | Wins: {elites[0]['ema_wins']:.1%} | Nov: {elites[0]['novelty_score']:.2f}")
 
         # 6. Tournament Selection & Replacement
         # Identify Culls (Bottom 25% by Rank/Crowding)
@@ -763,7 +770,7 @@ class PPOTrainer:
         self.log("-" * 80)
         self.log(f" {'Efficiency':<15} | {l_eff:<10.1f} | {avg_eff:<10.1f} | {b_eff:<10.1f}")
         self.log(f" {'Consistency':<15} | {l_con:<10.1f} | {avg_con:<10.1f} | {b_con:<10.1f}")
-        self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1f} | {avg_win:<10.1f} | {b_win:<10.1f}")
+        self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1%} | {avg_win:<10.1%} | {b_win:<10.1%}")
         self.log(f" {'Novelty':<15} | {l_nov:<10.2f} | {avg_nov:<10.2f} | {b_nov:<10.2f}")
         
         if self.env.curriculum_stage == STAGE_NURSERY:
