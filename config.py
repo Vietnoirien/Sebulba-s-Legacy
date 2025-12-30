@@ -138,6 +138,9 @@ class CurriculumConfig:
     diff_step_turbo: float = 0.10
     diff_step_super_turbo: float = 0.20
     diff_step_insane_turbo: float = 0.50
+    
+    # Nursery Specifics
+    nursery_timeout_steps: int = 400
 
 # Reward Indices
 RW_WIN = 0
@@ -178,6 +181,7 @@ class EnvConfig:
     # Track Generation
     track_gen_type: str = "max_entropy" # 'max_entropy', 'nursery'
     num_checkpoints_fixed: Optional[int] = None # For Nursery
+    timeout_steps: int = 100 # Default global timeout
     
     # Active Pods (Simulated & Observed)
     active_pods: List[int] = field(default_factory=lambda: [0, 1, 2, 3])

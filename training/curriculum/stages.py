@@ -25,13 +25,15 @@ class NurseryStage(Stage):
             use_bots=False,
             dynamic_reward_base=2000.0,
             step_penalty_active_pods=[0],
-            orientation_active_pods=[0]
+            orientation_active_pods=[0],
+            timeout_steps=self.config.nursery_timeout_steps
         )
 
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
-        # Objectives: Consistency (Max), Novelty (Max)
+        # Objectives: Consistency (Primary), Nursery Score (Gradient), Novelty (Diversity)
         return [
             p.get('ema_consistency', 0.0),
+            p.get('nursery_score', 0.0), 
             p.get('novelty_score', 0.0) * 100.0
         ]
         
@@ -61,7 +63,7 @@ class NurseryStage(Stage):
 
     @property
     def target_evolve_interval(self) -> int:
-        return 1 # Fast Search
+        return 10 # Stable Search for Nursery
 
 class SoloStage(Stage):
     def __init__(self, config: CurriculumConfig):

@@ -179,7 +179,8 @@ class PodRacerEnv:
         self.next_cp_id[env_ids] = 1
         self.laps[env_ids] = 0
         
-        self.timeouts[env_ids] = TIMEOUT_STEPS
+        self.timeouts[env_ids] = self.config.timeout_steps
+
              
         self.dones[env_ids] = False
         self.winners[env_ids] = -1
@@ -587,7 +588,7 @@ class PodRacerEnv:
             # self.timeouts represents "steps remaining".
             
             steps_remaining = self.timeouts # [B, 4]
-            total_steps = TIMEOUT_STEPS
+            total_steps = self.config.timeout_steps
             
             # Linear Penalty from Step 0
             # Alpha goes from 0.0 (at Start) to 1.0 (at Timeout) ? 
@@ -703,7 +704,7 @@ class PodRacerEnv:
                 pass_idx = torch.nonzero(passed).squeeze(-1)
                 
                 # Reset timeout
-                self.timeouts[pass_idx, i] = TIMEOUT_STEPS 
+                self.timeouts[pass_idx, i] = self.config.timeout_steps 
                 
                 # Determine Next CP and Lap Logic
                 # Use cached 'next_ids' (OLD target)
@@ -807,10 +808,11 @@ class PodRacerEnv:
                 total_reward = dynamic_part + streak_bonus
                 
                 # --- TIME EXTENSION ---
+                # --- TIME EXTENSION ---
                 # Reset Timeout AFTER reward calc (so we used 'steps remaining' accurately)
-                self.timeouts[pass_idx, i] = TIMEOUT_STEPS
+                self.timeouts[pass_idx, i] = self.config.timeout_steps
                 mate_idx = i ^ 1
-                self.timeouts[pass_idx, mate_idx] = TIMEOUT_STEPS
+                self.timeouts[pass_idx, mate_idx] = self.config.timeout_steps
                 
                 # DIRECT REWARD (Individual)
                 # rewards[pass_idx, i] += total_reward
@@ -827,6 +829,11 @@ class PodRacerEnv:
                 # Scaling for Dense Reward (Explicit S_VEL)
                 # Correction applies to POD i
                 rewards_indiv[pass_idx, i] += overshoot_dist * scale[pass_idx, 0] * 0.001 * dense_mult # S_VEL=0.001
+
+        # Calculate dist_to_next for Nursery Metric [B, 4]
+        # We need distance to next checkpoint for ALL pods, regardless of passing.
+        # This is essentially 'new_dists' calculated earlier at line 447.
+        infos['dist_to_next'] = new_dists
         
         # Increment Step Counter for Efficiency
         self.steps_last_cp += 1

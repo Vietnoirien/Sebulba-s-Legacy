@@ -217,13 +217,15 @@ class TrainingSession:
             
         # Explicitly close queues to release underlying pipes
         try:
+             self.telemetry_in_queue.cancel_join_thread()
              self.telemetry_in_queue.close()
-             self.telemetry_in_queue.join_thread()
+             # self.telemetry_in_queue.join_thread() # Avoid joining, preventing hang if reader died
         except: pass
         
         try:
+             self.telemetry_out_queue.cancel_join_thread()
              self.telemetry_out_queue.close()
-             self.telemetry_out_queue.join_thread()
+             # self.telemetry_out_queue.join_thread()
         except: pass
 
         self.running = False

@@ -125,7 +125,12 @@ class PPOTrainer:
                 
                 # --- Behavior Characterization ---
                 # Buffer to accumulate [Speed, Steering, MateDist] per step: [SumSpeed, SumSteer, SumDist, Count]
-                'behavior_buffer': torch.zeros(4, device=self.device)
+                'behavior_buffer': torch.zeros(4, device=self.device),
+                
+                # Nursery Metrics (Inverse Distance)
+                'accum_dist_fraction': 0.0,
+                'accum_dist_count': 0.0,
+                'nursery_score': 0.0
             })
             
             # Fill Tensor
@@ -170,13 +175,15 @@ class PPOTrainer:
         self.current_win_rate = 0.0 # Persistent Win Rate for Telemetry
         
         # TRANSITION CONFIGURATION
-        # TRANSITION CONFIGURATION
         # Logic moved to CurriculumConfig, accessed via self.curriculum_config
-
+        
+        # Performance Buffer for Nursery Metrics (Avoid loop sync)
+        # [PopSize, 2] -> [SumFraction, Count]
+        self.nursery_metrics_buffer = torch.zeros((self.config.pop_size, 2), device=self.device)
         
         # Allocate Initial Buffers
         self.allocate_buffers()
-
+        
     def allocate_buffers(self):
         """Allocates or Re-allocates batch buffers based on current_num_steps"""
         active_pods = self.get_active_pods()
@@ -201,11 +208,15 @@ class PPOTrainer:
                  'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 13), device=self.device),
                  'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 6), device=self.device),
                  'actions': torch.zeros((self.current_num_steps, num_active_per_agent_step, 4), device=self.device),
-                 'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
                  'rewards': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
                  'dones': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
-                 'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device)
+                 'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                 'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
              })
+
+        # Resize Nursery Buffer if pop size changed (unlikely but safe)
+        if self.nursery_metrics_buffer.shape[0] != self.config.pop_size:
+             self.nursery_metrics_buffer = torch.zeros((self.config.pop_size, 2), device=self.device)
     
     def log(self, msg):
         print(msg)
@@ -299,8 +310,31 @@ class PPOTrainer:
         # Collect raw values for debug logging
         debug_raw_fitness = []
         
+        # Retrieve Nursery Metrics from Tensor
+        nursery_data = self.nursery_metrics_buffer.cpu().numpy() # [Pop, 2]
+        
+        for i, p in enumerate(self.population):
+            # Sync Nursery Data
+            # Note: We accumulate into p['accum_dist_fraction'] for persistence?
+            # Or just overwrite? 
+            # It's reset every generation.
+            p['accum_dist_fraction'] = nursery_data[i, 0]
+            p['accum_dist_count'] = nursery_data[i, 1]
+        
         for p in self.population:
+            # Nursery Score Calculation
+            if p['accum_dist_count'] > 0:
+                avg_dist_frac = p['accum_dist_fraction'] / p['accum_dist_count']
+            else:
+                avg_dist_frac = 0.0 # Worst case (max distance)
+            
+            # Formula: (Hits * 50000) + (AvgProgress * 20000)
+            # Hits must dominate. Max Progress = 1.0 * 20000.
+            # So 1 Hit (50000) > Max Progress (20000).
+            p['nursery_score'] = (p['total_cp_hits'] * 50000.0) + (avg_dist_frac * 20000.0)
+
             # Efficiency (Avg Steps per Checkpoint)
+
             if p['total_cp_hits'] > 0:
                 raw_avg = p['total_cp_steps'] / p['total_cp_hits']
             else:
@@ -430,6 +464,8 @@ class PPOTrainer:
              cons = elites[0]['ema_consistency']
              score = cons - eff
              self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Score: {score:.1f}")
+        elif self.env.curriculum_stage == STAGE_NURSERY:
+             self.log(f"Elite (Crowded) Stats | Nursery Score: {elites[0]['nursery_score']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
         else:
              self.log(f"Elite (Crowded) Stats | Eff: {elites[0]['ema_efficiency']:.1f} | Wins: {elites[0]['ema_wins']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
 
@@ -542,6 +578,15 @@ class PPOTrainer:
             p['avg_blocker_dmg'] = 0.0
             # Reset Behavior Buffer
             p['behavior_buffer'].zero_()
+            p['accum_dist_fraction'] = 0.0
+            p['accum_dist_count'] = 0.0
+        
+        # Reset Nursery Buffer
+        self.nursery_metrics_buffer.zero_()
+        
+        # Reset Nursery Buffer
+        self.nursery_metrics_buffer.zero_()
+
             
         self.generation += 1
         # --- LEADER SELECTION (Performance Based) ---
@@ -549,7 +594,22 @@ class PPOTrainer:
         candidates = fronts[0] 
         if not candidates: candidates = range(len(self.population))
         
-        if self.env.curriculum_stage == STAGE_SOLO:
+        # --- LEADER SELECTION (Performance Based) ---
+        # Select strictly best performer from Front 0 (or population if empty)
+        candidates = fronts[0] 
+        if not candidates: candidates = range(len(self.population))
+        
+        if self.env.curriculum_stage == STAGE_NURSERY:
+             # Stage 0: Priority Consistency, then Nursery Score, then Novelty
+             # This ensures we always pick the one with most hits, 
+             # and break ties with distance, then with diversity.
+             best_guy = max(candidates, key=lambda i: (
+                 self.population[i].get('ema_consistency', 0.0) or 0.0,
+                 self.population[i].get('nursery_score', 0.0),
+                 self.population[i].get('novelty_score', 0.0)
+             ))
+             
+        elif self.env.curriculum_stage == STAGE_SOLO:
              # Combined Metric: Consistency Only (SOTA: Prioritize Reliability first)
              # "Slow is smooth, smooth is fast".
              # Avoid selecting "Lucky Suicides" (High Efficiency, Low Consistency).
@@ -645,7 +705,15 @@ class PPOTrainer:
         avg_win = np.mean(wins) if wins else 0.0
         avg_nov = np.mean(novs) if novs else 0.0
         
+        # Nursery Specific Logging
+        if self.env.curriculum_stage == STAGE_NURSERY:
+             nurs = [p.get('nursery_score', 0.0) for p in self.population]
+             avg_nur = np.mean(nurs) if nurs else 0.0
+             l_nur = leader.get('nursery_score', 0.0)
+             b_nur = 0.0 # Will calc below
+        
         # Leader Stats
+
         l_eff = leader.get('ema_efficiency')
         if l_eff is None: l_eff = 999.0
         
@@ -696,7 +764,15 @@ class PPOTrainer:
         self.log(f" {'Consistency':<15} | {l_con:<10.1f} | {avg_con:<10.1f} | {b_con:<10.1f}")
         self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1f} | {avg_win:<10.1f} | {b_win:<10.1f}")
         self.log(f" {'Novelty':<15} | {l_nov:<10.2f} | {avg_nov:<10.2f} | {b_nov:<10.2f}")
+        
+        if self.env.curriculum_stage == STAGE_NURSERY:
+             # Best Nursery Score
+             best_nurs_agent = max(self.population, key=lambda p: p.get('nursery_score', 0.0))
+             b_nur = best_nurs_agent.get('nursery_score', 0.0)
+             self.log(f" {'Nursery Sc':<15} | {l_nur:<10.0f} | {avg_nur:<10.0f} | {b_nur:<10.0f} | (Novelty: {l_nov:.2f})")
+             
         self.log("-" * 80)
+
         self.log(f" Loss: {avg_loss:.4f}")
         self.log(border)
 
@@ -870,6 +946,7 @@ class PPOTrainer:
             all_self, all_tm, all_en, all_cp = obs_data
             
             for step in range(self.config.num_steps):
+                if stop_event and stop_event.is_set(): break
                 # --- Global Normalization ---
                 # Normalize ALL active observations at once for efficiency
                 # Source: [4, self.config.num_envs, ...]
@@ -1013,7 +1090,37 @@ class PPOTrainer:
                      # Split Indices
                      # Main: Agents 0 to SPLIT_INDEX -> Envs 0 to Split * EnvsPerAgent
                      # Exploiter: Agents Split to End -> Envs ...
-                     split_idx = self.config.split_index * self.config.envs_per_agent
+                     
+                     # DYNAMIC EXPLOITER LOGIC:
+                     # If Stage < DUEL, Disable Exploiters (All agents act as Main against Opponent/Self)
+                     # Actually, in Solo/Nursery, we calculate actions normally (Line 945) against Empty/Static.
+                     # This block (Line 980+) is for LEAGUE mode opponents (Pods 2/3).
+                     # But wait, if Stage < LEAGUE, valid?
+                     # Line 980 checks: if self.env.curriculum_stage >= STAGE_LEAGUE:
+                     # So this logic DOES NOT RUN in Nursery/Solo/Duel.
+                     # Conclusion: Exploiters are naturally implicitly disabled in early stages because we don't use the Opponent Logic block.
+                     # EXCEPT where?
+                     # Ah, 'exploiter' type is just a label. They train same as everyone else in PPO.
+                     # The difference is only WHO they play against in League.
+                     # So no change needed here?
+                     # Logic check: In Stage 0, we just run `agent.get_action_and_value` for all agents. 
+                     # They all see environment. 
+                     # So "Exploiter" agents just learn normally.
+                     # Correct. The User asked to disable "Exploiter Logic". 
+                     # If that means "Don't treat them differently", we are good as long as we don't enter this block.
+                     # BUT `split_index` is used elsewhere? 
+                     # No, only here.
+                     # So Stage 0/1 are safe.
+                     
+                     # However, to be explicit as requested:
+                     current_split_ratio = self.config.exploiter_ratio
+                     if self.env.curriculum_stage < STAGE_DUEL:
+                         current_split_ratio = 0.0
+                         
+                     num_exploiters_active = int(self.config.pop_size * current_split_ratio)
+                     split_idx_agent = self.config.pop_size - num_exploiters_active
+                     split_idx = split_idx_agent * self.config.envs_per_agent
+
                      
                      # --- MAIN GROUP INFERENCE ---
                      # Slice: Everything before split_idx
@@ -1198,6 +1305,45 @@ class PPOTrainer:
                     # Track New Metrics
                     start_streak = agent_start_streak # Reuse extracted
                     start_steps = infos['cp_steps'][start_env:end_env] # [128, 4]
+
+                # --- Vectorized Nursery Metric Tracking ---
+                # Done OUTSIDE the loop to avoid 128x overhead
+                agent_dists = infos.get('dist_to_next', None)
+                if agent_dists is not None:
+                     # agent_dists is [NumEnvs, 4] -> [Pop*EnvsPerAg, 4]
+                     # We need to process all at once.
+                     
+                     # Extract active pod distances
+                     # For Nursery/Solo, active_pods=[0].
+                     # dists_active: [NumEnvs, N_active]
+                     dists_active = agent_dists[:, active_pods]
+                     
+                     # Normalize: [NumEnvs, N_active]
+                     # INCREASED CONSTANT from 5000 to 20000 to cover full map diagonal (~18300)
+                     start_norm_dists = torch.clamp(1.0 - (dists_active / 20000.0), 0.0, 1.0)
+                     
+                     # Sum active pods per env -> [NumEnvs]
+                     # If multiple pods, we sum them? Yes.
+                     env_scores = start_norm_dists.sum(dim=1) 
+                     env_counts = torch.tensor(len(active_pods), device=self.device).repeat(self.config.num_envs)
+                     
+                     # Now reduce by Agent.
+                     # Reshape [Pop, EnvsPerAgent]
+                     # This assumes num_envs is exactly Pop * EnvsPerAgent (always true here)
+                     env_scores_reshaped = env_scores.view(self.config.pop_size, self.config.envs_per_agent)
+                     env_counts_reshaped = env_counts.view(self.config.pop_size, self.config.envs_per_agent)
+                     
+                     # Sum across EnvsPerAgent -> [Pop]
+                     agent_scores = env_scores_reshaped.sum(dim=1)
+                     agent_counts = env_counts_reshaped.sum(dim=1)
+                     
+                     # Update Buffer
+                     self.nursery_metrics_buffer[:, 0] += agent_scores
+                     self.nursery_metrics_buffer[:, 1] += agent_counts
+                    
+                for i in range(self.config.pop_size):
+                    start_env = i * self.config.envs_per_agent
+                    end_env = start_env + self.config.envs_per_agent
                     
                     # Max Streak
                     current_max = start_streak.max().item()
