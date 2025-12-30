@@ -4,41 +4,26 @@ from simulation.gpu_physics import GPUPhysics
 from simulation.tracks import TrackGenerator
 from config import *
 
-# Reward Indices
-RW_WIN = 0
-RW_LOSS = 1
-RW_CHECKPOINT = 2
-RW_CHECKPOINT_SCALE = 3
-RW_VELOCITY = 4
-RW_COLLISION_RUNNER = 5
-RW_COLLISION_BLOCKER = 6
-RW_STEP_PENALTY = 7
-RW_ORIENTATION = 8
-RW_WRONG_WAY = 9
-RW_COLLISION_MATE = 10
-RW_PROXIMITY = 11
+# Reward Indices and Weights imported from config
 
-DEFAULT_REWARD_WEIGHTS = {
-    RW_WIN: 10000.0,
-    RW_LOSS: 5000.0,
-    RW_CHECKPOINT: 2000.0, # Increased to 5000.0 for Stage 0 Urgency
-    RW_CHECKPOINT_SCALE: 50.0, # Kept as is, minor influence
-    RW_VELOCITY: 5, # Reduced to 0.05 (Guidance only). Speed driven by Dynamic CP Reward.
-    RW_COLLISION_RUNNER: 0.5,
-    RW_COLLISION_BLOCKER: 1000.0, # Increased 10x to prioritize Blocking over Checkpoints for Blocker
-    RW_STEP_PENALTY: 0.0, # Disabled. Replaced by Dynamic Decay (Opportunity Cost).
-    RW_ORIENTATION: 5, # Augmented to 5 to reflect the loss of velocity reward being guidance
-    RW_WRONG_WAY: 10.0,
-    RW_COLLISION_MATE: 2.0, # Penalty for hitting teammate
-    RW_PROXIMITY: 5.0 # Reward for getting close to enemy/teammate (Dense)
-}
 
 class PodRacerEnv:
     def __init__(self, num_envs, device='cuda', start_stage=STAGE_SOLO):
         self.num_envs = num_envs
         self.device = torch.device(device)
         self.physics = GPUPhysics(num_envs, device=device)
-        self.curriculum_stage = start_stage # 0=Solo, 1=Duel, 2=League
+        self.curriculum_stage = start_stage 
+        
+        # Default Config (Solo)
+        self.config = EnvConfig(
+             mode_name="solo",
+             track_gen_type="max_entropy",
+             active_pods=[0],
+             use_bots=False,
+             dynamic_reward_base=200.0,
+             step_penalty_active_pods=[0],
+             orientation_active_pods=[0]
+        )
         
         # Game State
         self.next_cp_id = torch.ones((num_envs, 4), dtype=torch.long, device=self.device) # Start at 1 (0 is start)
@@ -115,9 +100,20 @@ class PodRacerEnv:
             # 3. Select Generator Type
             # 0: MaxEntropy (Chaos) -> 100% (Pod Racing)
             
-            # Simple: All using MaxEntropy
-            cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-            self.checkpoints[curr_env_ids] = cps
+            if self.config.track_gen_type == "nursery":
+                 # Override for Nursery: 3 CPs (Fixed), Simple Tracks and strictly no overlap
+                 num_cps_nursery = self.config.num_checkpoints_fixed if self.config.num_checkpoints_fixed else 3
+                 n_cps = torch.full((num_curr,), num_cps_nursery, device=self.device)
+                 self.num_checkpoints[curr_env_ids] = n_cps
+                 
+                 # Generate for MAX_CHECKPOINTS but only use first n_cps
+                 cps = TrackGenerator.generate_nursery_tracks(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                 self.checkpoints[curr_env_ids] = cps
+                 
+            else:
+                # Standard
+                cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                self.checkpoints[curr_env_ids] = cps
 
             
         # 2. Reset Pods
@@ -162,10 +158,10 @@ class PodRacerEnv:
             # Stage 2 (League): Active=[0, 1, 2, 3].
             
             active = True
-            if self.curriculum_stage == STAGE_NURSERY or self.curriculum_stage == STAGE_SOLO:
-                if i != 0: active = False
-            elif self.curriculum_stage == STAGE_DUEL:
-                if i != 0 and i != 2: active = False
+            # --- Curriculum Logic (Spawn Control) ---
+            active = False
+            if i in self.config.active_pods:
+                active = True
             
             if not active:
                 # Move to infinity to avoid collision/observation noise
@@ -188,6 +184,10 @@ class PodRacerEnv:
         # Update Prev Dist for rewards
         self.update_progress_metric(env_ids)
         self._update_roles(env_ids)
+
+    def set_stage(self, stage_id: int, config: EnvConfig):
+        self.curriculum_stage = stage_id
+        self.config = config
 
     def _update_roles(self, env_ids):
         # Calculate Progress Score
@@ -347,13 +347,9 @@ class PodRacerEnv:
         act_boost = actions[..., 3] > 0.5
         
         # --- Bot Logic for Stage 1 (Duel) & Stage 2 (Team) ---
-        if self.curriculum_stage == STAGE_DUEL or self.curriculum_stage == STAGE_TEAM:
-            # Stage Duel: Bot = Pod 2
-            # Stage Team: Bots = Pod 2, Pod 3
-            
-            bot_pods = [2]
-            if self.curriculum_stage == STAGE_TEAM:
-                bot_pods = [2, 3]
+        # --- Bot Logic ---
+        if self.config.use_bots:
+            bot_pods = self.config.bot_pods
             
             for bot_id in bot_pods:
                 # Override Actions with Simple Bot
@@ -552,11 +548,15 @@ class PodRacerEnv:
             # SOLO: Pod 0 active.
             # DUEL: Pod 0, 2 active.
             # LEAGUE: All active.
-            if self.curriculum_stage == STAGE_NURSERY or self.curriculum_stage == STAGE_SOLO:
-                orientation_rewards[:, 1:] = 0.0
-            elif self.curriculum_stage == STAGE_DUEL:
-                orientation_rewards[:, 1] = 0.0
-                orientation_rewards[:, 3] = 0.0
+            # Mask inactive pods to prevent noise/bias
+            # Use configuration
+            # Invert Logic: Set everything to 0.0, then Enable active.
+            # actually masking is usually: if i in active: pass else 0.
+            
+            active_orient = self.config.orientation_active_pods
+            for i in range(4):
+                if i not in active_orient:
+                     orientation_rewards[:, i] = 0.0
 
             # Add to rewards
             rewards_indiv[:, 0] += orientation_rewards[:, 0] * dense_mult
@@ -633,16 +633,10 @@ class PodRacerEnv:
             # League: All.
             
             active_mask = torch.zeros_like(steps_remaining, dtype=torch.bool)
-            if self.curriculum_stage == STAGE_NURSERY:
-                # Enable for Pod 0 (Small Penalty defined in PPO)
-                active_mask[:, 0] = True
-            elif self.curriculum_stage == STAGE_SOLO:
-                active_mask[:, 0] = True
-            elif self.curriculum_stage == STAGE_DUEL:
-                active_mask[:, 0] = True
-                active_mask[:, 2] = True
-            else:
-                active_mask[:] = True
+            # Active Masks
+            active_mask = torch.zeros_like(steps_remaining, dtype=torch.bool)
+            for i in self.config.step_penalty_active_pods:
+                active_mask[:, i] = True
                 
             # Apply Step Penalty Individually (Broadcast alpha)
             # w_step_pen is [B]
@@ -775,11 +769,12 @@ class PodRacerEnv:
                 # User Plan: Decay from 2000 (Fast) to 200 (Slow).
                 # So MinBase = 200. MaxBase = 2000. Bonus = 1800.
                 
-                if self.curriculum_stage == STAGE_NURSERY:
-                    # Nursery: Fixed High Reward to encourage ANY finish. No Time Pressure.
-                    dynamic_part = 2000.0
+                if self.config.dynamic_reward_base > 500.0:
+                    # Nursery-like (High Base, Low decay influence relative to Base?)
+                    # Or just use the value.
+                    dynamic_part = self.config.dynamic_reward_base
                 else:
-                    MIN_BASE = 200.0
+                    MIN_BASE = self.config.dynamic_reward_base
                     TOTAL_BONUS = 1800.0
                     
                     # Fraction remaining:

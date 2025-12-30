@@ -9,7 +9,7 @@ import os
 # Adjust path to import training.ppo
 sys.path.append(os.getcwd())
 
-from training.ppo import PPOTrainer, POP_SIZE, ENVS_PER_AGENT, STAGE_SOLO, STAGE_DUEL, STAGE_LEAGUE
+from training.ppo import PPOTrainer, ENVS_PER_AGENT, STAGE_SOLO, STAGE_DUEL, STAGE_LEAGUE
 
 class MockAgent(nn.Module):
     def __init__(self):

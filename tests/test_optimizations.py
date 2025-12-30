@@ -1,7 +1,7 @@
 import torch
 import unittest
 from models.deepsets import PodAgent
-from training.ppo import PPOTrainer, POP_SIZE
+from training.ppo import PPOTrainer
 
 class TestOptimizations(unittest.TestCase):
     def test_divergence_computation(self):

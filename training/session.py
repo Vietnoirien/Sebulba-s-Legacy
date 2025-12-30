@@ -6,7 +6,7 @@ import random
 import os
 import queue
 import torch
-from training.ppo import PPOTrainer, NUM_ENVS
+from training.ppo import PPOTrainer
 from training.telemetry import TelemetryWorker
 
 class TrainingSession:
@@ -258,8 +258,8 @@ class TrainingSession:
                              k_int = int(k)
                              p['weights'][k_int] = float(v)
                              # Update tensor
-                             start_idx = i * (NUM_ENVS // len(self.trainer.population))
-                             end_idx = start_idx + (NUM_ENVS // len(self.trainer.population))
+                             start_idx = i * (self.trainer.config.num_envs // len(self.trainer.population))
+                             end_idx = start_idx + (self.trainer.config.num_envs // len(self.trainer.population))
                              self.trainer.reward_weights_tensor[start_idx:end_idx, k_int] = float(v)
 
                  if "tau" in new_rewards:
@@ -417,9 +417,8 @@ class TrainingSession:
             # We can't easily import ENVS_PER_AGENT here due to circular deps if we aren't careful, 
             # but we know it's NUM_ENVS // 32 usually.
             # Best to just pass env_idx and let frontend handle or pass helper.
-            # Actually, let's just get it from trainer if possible or hardcode for now/import.
-            from training.ppo import ENVS_PER_AGENT
-            agent_id = idx // ENVS_PER_AGENT
+            # Fix: Use trainer config
+            agent_id = idx // self.trainer.config.envs_per_agent
             
             # Check Pareto Status
             is_pareto = False

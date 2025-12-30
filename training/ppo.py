@@ -29,42 +29,27 @@ from training.normalization import RunningMeanStd
 from training.evolution import calculate_novelty, fast_non_dominated_sort, calculate_crowding_distance
 from training.rnd import RNDModel
 from config import *
+from training.curriculum.manager import CurriculumManager
 
-# Hyperparameters
-LR = 1e-4
-GAMMA = 0.994
-GAE_LAMBDA = 0.95
-CLIP_RANGE = 0.2
-ENT_COEF = 0.01
-VF_COEF = 0.5
-MAX_GRAD_NORM = 0.5
-DIV_COEF = 0.05 # Role Regularization Coefficient
-TOTAL_TIMESTEPS = 2_000_000_000
-NUM_ENVS = 16384
-NUM_STEPS = 256
-# PBT Settings
-POP_SIZE = 128
-ENVS_PER_AGENT = NUM_ENVS // POP_SIZE # 512
-assert NUM_ENVS % POP_SIZE == 0, "NUM_ENVS must be divisible by POP_SIZE"
-EVOLVE_INTERVAL = 2 # Updates between evolutions
+# Hyperparameters and Constants moved to config.py
 
-# Exploiter Config
-EXPLOITER_RATIO = 0.125 # 1/8th of population
-NUM_EXPLOITERS = int(POP_SIZE * EXPLOITER_RATIO)
-SPLIT_INDEX = POP_SIZE - NUM_EXPLOITERS # Index where Main ends and Exploiters start
-
-# Batch Size per Agent
-UPDATE_EPOCHS = 4
-NUM_MINIBATCHES = 16
-BATCH_SIZE = 2 * ENVS_PER_AGENT * NUM_STEPS 
-MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
-REPORT_INTERVAL = 1 
 
 class PPOTrainer:
 
     def __init__(self, device='cuda', logger_callback=None):
-        self.device = torch.device(device)
-        self.env = PodRacerEnv(NUM_ENVS, device=device)
+        self.config = TrainingConfig()
+        self.curriculum_config = CurriculumConfig()
+        self.curriculum = CurriculumManager(self.curriculum_config)
+        # Sync Initial Stage Config
+        # We must create env first, then sync
+        self.telemetry_session = None
+        
+        # Override device if provided
+        if device: self.config.device = device
+        
+        self.device = torch.device(self.config.device)
+        self.env = PodRacerEnv(self.config.num_envs, device=self.device)
+        self.env.set_stage(self.curriculum.current_stage_id, self.curriculum.current_stage.get_env_config())
         self.logger_callback = logger_callback
         
         # Population Initialization
@@ -73,7 +58,7 @@ class PPOTrainer:
         self.iteration = 0
         
         # Reward Tensors [4096, 11]
-        self.reward_weights_tensor = torch.zeros((NUM_ENVS, 12), device=self.device)
+        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 12), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((14,), device=self.device)
@@ -87,11 +72,16 @@ class PPOTrainer:
         
         # Reward Normalization
         self.rms_ret = RunningMeanStd((1,), device=self.device)
-        self.returns_buffer = torch.zeros((NUM_ENVS, 4), device=self.device)
+        self.rms_ret = RunningMeanStd((1,), device=self.device)
+        self.returns_buffer = torch.zeros((self.config.num_envs, 4), device=self.device)
         
-        for i in range(POP_SIZE):
+        # Calculated Configs
+        num_exploiters = int(self.config.pop_size * self.config.exploiter_ratio)
+        split_index = self.config.pop_size - num_exploiters
+        
+        for i in range(self.config.pop_size):
             agent = PodAgent().to(self.device)
-            optimizer = optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
+            optimizer = optim.Adam(agent.parameters(), lr=self.config.lr, eps=1e-5)
             
             # Initial Reward Config (Clone Default)
             # Add some noise for initial diversity?
@@ -104,13 +94,13 @@ class PPOTrainer:
             
             self.population.append({
                 'id': i,
-                'type': 'exploiter' if i >= SPLIT_INDEX else 'main', # Dynamic Exploiter Split
+                'type': 'exploiter' if i >= split_index else 'main', # Dynamic Exploiter Split
                 'agent': agent,
                 'optimizer': optimizer,
                 'weights': weights, # Python Dict for mutation logic
-                'lr': LR,
-                'ent_coef': ENT_COEF, # Individual Entropy Coefficient
-                'clip_range': CLIP_RANGE, # Individual Clip Range
+                'lr': self.config.lr,
+                'ent_coef': self.config.ent_coef, # Individual Entropy Coefficient
+                'clip_range': self.config.clip_range, # Individual Clip Range
                 'laps_score': 0,
                 'checkpoints_score': 0,
                 'reward_score': 0.0,
@@ -139,8 +129,8 @@ class PPOTrainer:
             })
             
             # Fill Tensor
-            start_idx = i * ENVS_PER_AGENT
-            end_idx = start_idx + ENVS_PER_AGENT
+            start_idx = i * self.config.envs_per_agent
+            end_idx = start_idx + self.config.envs_per_agent
             for k, v in weights.items():
                 self.reward_weights_tensor[start_idx:end_idx, k] = v
 
@@ -167,8 +157,8 @@ class PPOTrainer:
         self.ema_alpha = 0.3
 
         # Dynamic Hyperparameters
-        self.current_num_steps = 256 # Start with Stage 0 default
-        self.current_evolve_interval = 2 # Start with Stage 0 default
+        self.current_num_steps = self.config.num_steps # Start with Stage 0 default
+        self.current_evolve_interval = self.config.evolve_interval # Start with Stage 0 default
         self.current_active_pods_count = 1 # Start with Stage 0 default
         self.agent_batches = [] 
         self.pareto_indices = [] # Track Rank 0 agents
@@ -180,21 +170,9 @@ class PPOTrainer:
         self.current_win_rate = 0.0 # Persistent Win Rate for Telemetry
         
         # TRANSITION CONFIGURATION
-        self.curriculum_config = {
-             # Stage 0 -> 1
-             "solo_efficiency_threshold": STAGE_SOLO_EFFICIENCY_THRESHOLD,
-             "solo_consistency_threshold": STAGE_SOLO_CONSISTENCY_THRESHOLD,
-             
-             # Stage 1 -> 2
-             "duel_consistency_wr": 0.82,
-             "duel_absolute_wr": 0.84,
-             "duel_consistency_checks": 5,
-             
-             # Stage 2 -> 3
-             "team_consistency_wr": 0.85,
-             "team_absolute_wr": 0.88,
-             "team_consistency_checks": 5
-        }
+        # TRANSITION CONFIGURATION
+        # Logic moved to CurriculumConfig, accessed via self.curriculum_config
+
         
         # Allocate Initial Buffers
         self.allocate_buffers()
@@ -213,10 +191,10 @@ class PPOTrainer:
         num_active_pods = self.current_active_pods_count
             
         # Total batch dimension = Steps * EnvsPerAgent * NumActivePods
-        num_active_per_agent_step = num_active_pods * ENVS_PER_AGENT
+        num_active_per_agent_step = num_active_pods * self.config.envs_per_agent
         
         self.agent_batches = []
-        for _ in range(POP_SIZE):
+        for _ in range(self.config.pop_size):
              self.agent_batches.append({
                  'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 14), device=self.device),
                  'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 13), device=self.device),
@@ -255,7 +233,7 @@ class PPOTrainer:
 
     async def send_telemetry(self, step, fps_phys, fps_train, reward, win_rate, env_idx=0):
         # Identify Agent
-        agent_idx = env_idx // ENVS_PER_AGENT
+        agent_idx = env_idx // self.config.envs_per_agent
         pop_member = self.population[agent_idx]
         
         # Extract state
@@ -292,331 +270,32 @@ class PPOTrainer:
                 "race_state": {"pods": pods, "checkpoints": checkpoints}
             }
             
-            async with aiohttp.ClientSession() as session:
-                await session.post('http://localhost:8000/api/telemetry', json=payload)
+            if self.telemetry_session is None or self.telemetry_session.closed:
+                self.telemetry_session = aiohttp.ClientSession()
+            
+            await self.telemetry_session.post('http://localhost:8000/api/telemetry', json=payload)
         except Exception:
             pass
 
+    async def close(self):
+        if self.telemetry_session and not self.telemetry_session.closed:
+            await self.telemetry_session.close()
+            self.telemetry_session = None
+
     def check_curriculum(self):
-        # if self.curriculum_mode == "manual": return # Removed to allow logging
-
-        metrics = self.env.stage_metrics
-        stage = self.env.curriculum_stage
-        
-        if stage == STAGE_NURSERY:
-            # Stage 0: Nursery
-            # Goal: Learn to navigate (Consistency). No speed requirement.
-            
-            sorted_by_consistency = sorted(self.population, key=lambda x: x.get('ema_consistency') or 0.0, reverse=True)
-            elites = sorted_by_consistency[:5]
-            avg_cons = np.mean([p.get('ema_consistency') or 0.0 for p in elites])
-            
-            if self.iteration % 10 == 0:
-                 self.log(f"Stage 0 (Nursery) Status: Top 5 Avg Cons {avg_cons:.1f} (Goal > {STAGE_NURSERY_CONSISTENCY_THRESHOLD})")
-            
-            if avg_cons > STAGE_NURSERY_CONSISTENCY_THRESHOLD:
-                self.log(f">>> GRADUATION FROM NURSERY: Top Agents Cons {avg_cons:.1f} <<<")
-                if self.curriculum_mode == "auto":
-                    self.env.curriculum_stage = STAGE_SOLO
-                    self.log(">>> Welcome to Stage 1: Time Trial (Speed Matters!) <<<")
-
-        elif stage == STAGE_SOLO:
-            # Strategy A: Proficiency & Consistency
-            # Thresholds: Eff < 30.0, Consistency > 2000.0 (Sum of CPs)
-            
-            # Top 5 Agents by Consistency (Sum of CPs)
-            # Consistency is stored as 'ema_consistency'
-            sorted_by_consistency = sorted(self.population, key=lambda x: x.get('ema_consistency') or 0.0, reverse=True)
-            elites = sorted_by_consistency[:5]
-            
-            avg_eff = np.mean([p.get('efficiency_score') if p.get('efficiency_score') is not None else 999.0 for p in elites])
-            avg_cons = np.mean([p.get('ema_consistency') if p.get('ema_consistency') is not None else 0.0 for p in elites])
-            
-            # Log progress periodically
-            if self.iteration % 10 == 0:
-                 self.log(f"Stage 0 Status: Top 5 Avg Eff {avg_eff:.1f} (Goal < {STAGE_SOLO_EFFICIENCY_THRESHOLD}), Cons {avg_cons:.1f} (Goal > {STAGE_SOLO_CONSISTENCY_THRESHOLD})")
-            
-            if avg_eff < STAGE_SOLO_EFFICIENCY_THRESHOLD and avg_cons > STAGE_SOLO_CONSISTENCY_THRESHOLD:
-                self.log(f">>> GRADUATION: Top Agents Avg Eff {avg_eff:.1f}, Cons {avg_cons:.1f} <<<")
-                if self.curriculum_mode == "auto":
-                    self.env.curriculum_stage = STAGE_DUEL
-                    self.env.bot_difficulty = 0.0
-                    
-                    # Reset Checkpoint Reward to 2000.0 for Duel+ (Win Rate focus)
-                    self.reward_weights_tensor[:, RW_CHECKPOINT] = 2000.0
-                    self.log("Config Update: Resetting RW_CHECKPOINT to 2000.0 for Stage 1+")
-
-
-        elif stage == STAGE_DUEL:
-            # Dynamic Difficulty
-            # Check every 1k EPISODES (including timeouts)
-            rec_episodes = metrics.get("recent_episodes", 0)
-            if rec_episodes == 0:
-                 # Fallback for old env code or if not populated yet
-                 rec_episodes = metrics["recent_games"]
-
-            if rec_episodes > 1000: 
-                rec_wins = metrics["recent_wins"]
-                rec_games = metrics["recent_games"] # Valid finished games
-                
-                if rec_episodes > 0:
-                    rec_wr = rec_wins / rec_episodes
-                else:
-                    rec_wr = 0.0 # All Timeouts = 0% Win Rate
-                
-                self.current_win_rate = rec_wr # Update global tracker
-                
-                # Reset Recent
-                metrics["recent_games"] = 0
-                metrics["recent_wins"] = 0
-                metrics["recent_episodes"] = 0
-                
-                # Wins, Losses, Timeouts
-                rec_losses = rec_games - rec_wins
-                rec_timeouts = rec_episodes - rec_games
-                
-                self.log(f"Stage 1 Check: Recent WR {rec_wr*100:.1f}% | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
-                
-                if rec_wr < 0.30:
-                    # Critical Failure: Immediate Regression
-                    if self.curriculum_mode == "auto":
-                        self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
-                        self.log(f"-> Critical Regression (WR < 30%): Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                    else:
-                        self.log(f"-> Critical Regression (WR < 30%): [Manual] Suggested Diff: {max(0.0, self.env.bot_difficulty - 0.05):.2f}")
-                    
-                    self.failure_streak = 0 # Reset streak modification
-                    
-                elif rec_wr < 0.40:
-                    # Warning Zone: Regression only if persistent
-                    self.failure_streak += 1
-                    self.log(f"-> Warning Zone (WR < 40%): Streak {self.failure_streak}/2")
-                    
-                    if self.failure_streak >= 2:
-                        if self.curriculum_mode == "auto":
-                            self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
-                            self.log(f"-> Persistent Failure: Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                        else:
-                            self.log(f"-> Persistent Failure: [Manual] Suggested Diff: {max(0.0, self.env.bot_difficulty - 0.05):.2f}")
-                        self.failure_streak = 0
-                
-                else:
-                    # Winning enough to stabilize or progress
-                    self.failure_streak = 0
-                    
-
-                    new_diff = self.env.bot_difficulty
-                    if rec_wr > 0.99:
-                        new_diff = min(1.0, self.env.bot_difficulty + 0.50)
-                        msg = "Insane Turbo"
-                    elif rec_wr > 0.98:
-                        new_diff = min(1.0, self.env.bot_difficulty + 0.20)
-                        msg = "Super Turbo"
-                    elif rec_wr > 0.90:
-                        new_diff = min(1.0, self.env.bot_difficulty + 0.10)
-                        msg = "Turbo"
-                    elif rec_wr > 0.70:
-                        new_diff = min(1.0, self.env.bot_difficulty + 0.05)
-                        msg = "Standard"
-                    else:
-                        msg = None
-
-                    if self.env.bot_difficulty < 1.0:
-                        if msg:
-                             if self.curriculum_mode == "auto":
-                                 self.env.bot_difficulty = new_diff
-                                 self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                             else:
-                                 self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
-                    else:
-                         # Max difficulty reached. Show status.
-                         cons_wr = self.curriculum_config["duel_consistency_wr"]
-                         abs_wr = self.curriculum_config["duel_absolute_wr"]
-                         cons_checks = self.curriculum_config["duel_consistency_checks"]
-                         
-                         streak = self.grad_consistency_counter
-                         if rec_wr > cons_wr:
-                             streak += 1
-                         else:
-                             streak = 0
-                             
-                         self.log(f"-> Max Difficulty. Next Stage Req: WR >= {abs_wr:.2f} OR (WR > {cons_wr:.2f} Streak {streak}/{cons_checks})")
-                
-                # Graduation Check
-                # SOTA Update: Smoother transition.
-                # Threshold: > 0.84 ONCE or > 0.82 for 5 sequential checks at difficulty 1.0.
-                if self.env.bot_difficulty >= 1.0:
-                    should_graduate = False
-                    reason = ""
-                    
-                    cons_wr = self.curriculum_config["duel_consistency_wr"]
-                    abs_wr = self.curriculum_config["duel_absolute_wr"]
-                    cons_checks = self.curriculum_config["duel_consistency_checks"]
-
-                    if rec_wr > cons_wr:
-                        self.grad_consistency_counter += 1
-                    else:
-                        self.grad_consistency_counter = 0
-
-                    if rec_wr >= abs_wr and self.grad_consistency_counter >= 2:
-                        should_graduate = True
-                        reason = f"WR {rec_wr:.2f} >= {abs_wr}"
-                    elif self.grad_consistency_counter >= cons_checks:
-                        should_graduate = True
-                        reason = f"WR > {cons_wr} for {cons_checks} checks (Last: {rec_wr:.2f})"
-                        
-                    if should_graduate:
-                         self.log(f">>> UPGRADING TO STAGE 2: TEAM ({reason}) <<<")
-                         if self.curriculum_mode == "auto":
-                             self.env.curriculum_stage = STAGE_TEAM
-                             self.env.bot_difficulty = 0.0 # Reset difficulty for new stage
-                             
-                             # Reset Metrics for new stage
-                             self.env.stage_metrics["recent_games"] = 0
-                             self.env.stage_metrics["recent_wins"] = 0
-                             self.env.stage_metrics["recent_episodes"] = 0
-                         
-        elif stage == STAGE_TEAM:
-            # Dynamic Difficulty (Same Logic as Duel but for 2v2)
-            rec_episodes = metrics.get("recent_episodes", 0)
-            if rec_episodes == 0: rec_episodes = metrics["recent_games"]
-
-            if rec_episodes > 1000: 
-                rec_wins = metrics["recent_wins"]
-                rec_games = metrics["recent_games"]
-                
-                if rec_episodes > 0:
-                    rec_wr = rec_wins / rec_episodes
-                else:
-                    rec_wr = 0.0
-                
-                self.current_win_rate = rec_wr # Update global tracker
-                
-                # Reset Recent
-                metrics["recent_games"] = 0
-                metrics["recent_wins"] = 0
-                metrics["recent_episodes"] = 0
-                
-                # Wins, Losses, Timeouts
-                rec_losses = rec_games - rec_wins
-                rec_timeouts = rec_episodes - rec_games
-
-                self.log(f"Stage 2 (Team) Check: Recent WR {rec_wr*100:.1f}% | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {self.env.bot_difficulty:.2f}")
-                
-                if rec_wr < 0.30:
-                    if self.curriculum_mode == "auto":
-                        self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
-                        self.log(f"-> Critical Regression (WR < 30%): Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                    else:
-                        self.log(f"-> Critical Regression (WR < 30%): [Manual] Suggested Diff: {max(0.0, self.env.bot_difficulty - 0.05):.2f}")
-                    self.failure_streak = 0
-                    
-                elif rec_wr < 0.40:
-                    self.failure_streak += 1
-                    self.log(f"-> Warning Zone (WR < 40%): Streak {self.failure_streak}/2")
-                    
-                    if self.failure_streak >= 2:
-                        self.env.bot_difficulty = max(0.0, self.env.bot_difficulty - 0.05)
-                        self.failure_streak = 0
-                        self.log(f"-> Persistent Failure: Decreasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                
-                else:
-                    self.failure_streak = 0
-                    
-                    new_diff = self.env.bot_difficulty
-                    if rec_wr > 0.98:
-                        new_diff = min(1.0, self.env.bot_difficulty + 0.20)
-                        msg = "Super Turbo"
-                    elif rec_wr > 0.90:
-                        new_diff = min(1.0, self.env.bot_difficulty + 0.10)
-                        msg = "Turbo"
-                    elif rec_wr > 0.70:
-                        new_diff = min(1.0, self.env.bot_difficulty + 0.05)
-                        msg = "Standard"
-                    else:
-                        msg = None
-                    
-                    if self.env.bot_difficulty < 1.0:
-                        if msg:
-                            if self.curriculum_mode == "auto":
-                                self.env.bot_difficulty = new_diff
-                                self.log(f"-> {msg}: Increasing Bot Difficulty to {self.env.bot_difficulty:.2f}")
-                            else:
-                                self.log(f"-> {msg}: [Manual] Suggested Diff: {new_diff:.2f}")
-                    else:
-                         # Max difficulty reached. Show status.
-                         cons_wr = self.curriculum_config["team_consistency_wr"]
-                         abs_wr = self.curriculum_config["team_absolute_wr"]
-                         cons_checks = self.curriculum_config["team_consistency_checks"]
-                         
-                         streak = self.grad_consistency_counter
-                         if rec_wr > cons_wr:
-                             streak += 1
-                         else:
-                             streak = 0
-                             
-                         self.log(f"-> Max Difficulty. Next Stage Req: WR >= {abs_wr:.2f} OR (WR > {cons_wr:.2f} Streak {streak}/{cons_checks})")
-                
-                # Graduation Check (To League)
-                cons_wr = self.curriculum_config["team_consistency_wr"]
-                abs_wr = self.curriculum_config["team_absolute_wr"]
-                cons_checks = self.curriculum_config["team_consistency_checks"]
-                
-                if rec_wr > cons_wr: # Slightly higher bar for 2v2 mastery
-                    self.grad_consistency_counter += 1
-                else:
-                    self.grad_consistency_counter = 0
-                    
-                if self.env.bot_difficulty >= 1.0:
-                    should_graduate = False
-                    reason = ""
-                    
-                    if rec_wr >= abs_wr:
-                        should_graduate = True
-                        reason = f"WR {rec_wr:.2f} >= {abs_wr}"
-                    elif self.grad_consistency_counter >= cons_checks:
-                        should_graduate = True
-                        reason = f"WR > {cons_wr} for {cons_checks} checks (Last: {rec_wr:.2f})"
-                        
-                    if should_graduate:
-                         self.log(f">>> UPGRADING TO STAGE 3: LEAGUE ({reason}) <<<")
-                         if self.curriculum_mode == "auto":
-                             self.env.curriculum_stage = STAGE_LEAGUE
-                             
-                             # Reset Metrics for new stage
-                             self.env.stage_metrics["recent_games"] = 0
-                             self.env.stage_metrics["recent_wins"] = 0
-                             self.env.stage_metrics["recent_episodes"] = 0
-        
-        # --- Team Spirit Update ---
-        if stage < STAGE_TEAM:
-            self.team_spirit = 0.0
-        elif stage == STAGE_TEAM:
-            # Anneal based on Difficulty or WR?
-            # Let's link it to Difficulty (which proxies capability).
-            # Diff 0.0 -> Spirit 0.0
-            # Diff 1.0 -> Spirit 0.5
-            target_spirit = self.env.bot_difficulty * 0.5
-            self.team_spirit = target_spirit
-        else: # LEAGUE
-            self.team_spirit = 1.0
-            
-        # Update Step Penalty based on new difficulty/stage
+        self.curriculum.update(self)
         self.update_step_penalty_annealing()
 
     def get_active_pods(self):
-        stage = self.env.curriculum_stage
-        if stage == STAGE_NURSERY: return [0]
-        elif stage == STAGE_SOLO: return [0]
-        elif stage == STAGE_DUEL: return [0]
-        elif stage == STAGE_TEAM: return [0, 1]
-        else: return [0, 1]
+        return self.curriculum.get_active_pods()
 
     def evolve_population(self):
         self.log(f"--- Evolution Step (Gen {self.generation}) ---")
         
         # 1. Update Metrics & EMA Calculation
         # Proficiency = AvgSteps + Penalty/(Sqrt(Hits)+1). Lower is Better.
+        # PENALTY_CONST is implicit in proficiency calculation, we could move it to config if needed
+        # For now, let's keep it here but acknowledge it wasn't global.
         PENALTY_CONST = 50.0 
         
         # Collect raw values for debug logging
@@ -702,78 +381,10 @@ class PPOTrainer:
         # We assume HIGHER IS BETTER for all columns passed to sort.
         # So we invert Efficiency (Lower is better).
         
-        stage = self.env.curriculum_stage
-        
+        # 3. Define Objectives for NSGA-II
         objectives_list = []
-        
-        if stage == STAGE_NURSERY:
-            # Objectives:
-            # 1. Consistency (EMA Checkpoints) -> Max
-            # 2. Novelty -> Max (Bootstrap exploration when Consistency is 0)
-            for p in self.population:
-                obj = [
-                    p['ema_consistency'],
-                    p['novelty_score'] * 100.0
-                ]
-                objectives_list.append(obj)
-
-        elif stage == STAGE_SOLO:
-            # Objectives: 
-            # 1. Consistency (EMA Checkpoints) -> Max
-            # 2. Efficiency (EMA Proficiency) -> Minimize (So Maximize -EMA)
-            # REMOVED: Novelty (To avoid prioritizing incompetence in Stage 0)
-            
-            for p in self.population:
-                obj = [
-                    p['ema_consistency'],
-                    -p['ema_efficiency']
-                ]
-                objectives_list.append(obj)
-                
-        elif stage == STAGE_DUEL:
-            # Objectives:
-            # 1. Win Rate (EMA Win Rate) -> Max
-            # 2. Efficiency -> Minimize
-            # 3. Novelty -> Max
-            
-            for p in self.population:
-                obj = [
-                    p['ema_wins'],
-                    -p['ema_efficiency'],
-                    p['novelty_score'] * 100.0
-                ]
-                objectives_list.append(obj)
-
-        elif stage == STAGE_TEAM:
-            # Objectives (Role-Specific):
-            # 1. Win Rate (EMA Win Rate) -> Max (Primary)
-            # 2. Runner Velocity (EMA) -> Max
-            # 3. Blocker Damage (EMA) -> Max
-            
-            for p in self.population:
-                 # Safety check for Nones
-                rv = p['ema_runner_vel'] if p['ema_runner_vel'] is not None else 0.0
-                bd = p['ema_blocker_dmg'] if p['ema_blocker_dmg'] is not None else 0.0
-                
-                obj = [
-                    p['ema_wins'],
-                    rv,
-                    bd
-                ]
-                objectives_list.append(obj)
-                
-        else: # LEAGUE
-             # Objectives:
-             # 1. Win Rate (EMA Win Rate) -> Max
-             # 2. Laps (EMA Laps) -> Max
-             # 3. Efficiency (EMA Proficiency) -> Minimize (So Maximize -EMA)
-             for p in self.population:
-                obj = [
-                    p['ema_wins'], # Win Rate
-                    p['ema_laps'], # Raw Laps
-                    -p['ema_efficiency']
-                ]
-                objectives_list.append(obj)
+        for p in self.population:
+             objectives_list.append(self.curriculum.get_objectives(p))
 
         objectives_np = np.array(objectives_list)
         
@@ -798,7 +409,7 @@ class PPOTrainer:
         # Fallback if front 0 is small (unlikely)
         if len(elites) < 2:
             # Pick from Front 1
-             remaining = [self.population[i] for i in range(POP_SIZE) if i not in front0_indices]
+             remaining = [self.population[i] for i in range(self.config.pop_size) if i not in front0_indices]
              # Sort remaining by Rank ASC, Crowding DESC
              remaining.sort(key=lambda x: (x['rank'], -x['crowding']))
              elites.extend(remaining[: 2 - len(elites)])
@@ -830,10 +441,10 @@ class PPOTrainer:
         # Key: (Rank ASC, Crowding DESC)
         
         # We want to keep Lower Rank (0 is best), Higher Crowding.
-        sorted_pop_indices = list(range(POP_SIZE))
+        sorted_pop_indices = list(range(self.config.pop_size))
         sorted_pop_indices.sort(key=lambda i: (self.population[i]['rank'], -self.population[i]['crowding']))
         
-        num_culls = max(2, int(POP_SIZE * 0.25))
+        num_culls = max(2, int(self.config.pop_size * 0.25))
         cull_indices = sorted_pop_indices[-num_culls:]
         parent_candidates = sorted_pop_indices[:-num_culls]
         
@@ -851,7 +462,7 @@ class PPOTrainer:
             # Clone Logic
             loser['agent'].load_state_dict(parent['agent'].state_dict())
             loser['lr'] = parent['lr']
-            loser['ent_coef'] = parent.get('ent_coef', ENT_COEF)
+            loser['ent_coef'] = parent.get('ent_coef', self.config.ent_coef)
             
             # Clone EMAs! (Robustness Inheritance)
             loser['ema_efficiency'] = parent['ema_efficiency']
@@ -908,11 +519,11 @@ class PPOTrainer:
             if random.random() < 0.3:
                 loser['clip_range'] *= random.uniform(0.8, 1.2)
                 loser['clip_range'] = max(0.05, min(0.4, loser['clip_range']))
-                
+
             self.log(f"Agent {loser['id']} (Rank {loser['rank']}) replaced by clone of {parent['id']} (Rank {parent['rank']})")
              # Update Global Tensor
-            start_idx = loser['id'] * ENVS_PER_AGENT
-            end_idx = start_idx + ENVS_PER_AGENT
+            start_idx = loser['id'] * self.config.envs_per_agent
+            end_idx = start_idx + self.config.envs_per_agent
             for k, v in new_weights.items():
                 self.reward_weights_tensor[start_idx:end_idx, k] = v
                  
@@ -1097,30 +708,14 @@ class PPOTrainer:
         Stage 0 (Solo): Full Penalty (5.0)
         Stage > 0: Linear Decay based on Bot Difficulty.
         """
-        stage = self.env.curriculum_stage
         base_penalty = DEFAULT_REWARD_WEIGHTS[RW_STEP_PENALTY] # 5.0
-        
-        if stage == STAGE_LEAGUE:
-            # League Mode: No Step Penalty (Pure Win/Loss/Metrics)
-            new_val = 0.0
-        elif stage == STAGE_NURSERY:
-            # Nursery: Small Incentive to move (0.5)
-            new_val = 0.5
-        elif stage == STAGE_SOLO:
-            # Full Penalty (No annealing in Stage 0)
-            new_val = base_penalty
-        else:
-            # Anneal: Val = Base * (1.0 - Diff * 0.8)
-            # At Diff 0.0 -> 100% of Base
-            # At Diff 1.0 -> 20% of Base
-            anneal_factor = 1.0 - (self.env.bot_difficulty * 0.8)
-            new_val = base_penalty * anneal_factor
-            
+        new_val = self.curriculum.update_step_penalty(base_penalty)
+         
         # Update Tensor
         self.reward_weights_tensor[:, RW_STEP_PENALTY] = new_val
         
     def train_loop(self, stop_event=None, telemetry_callback=None):
-        self.log(f"Starting Evolutionary PPO (Pop: {POP_SIZE}, Envs/Agent: {ENVS_PER_AGENT})...")
+        self.log(f"Starting Evolutionary PPO (Pop: {self.config.pop_size}, Envs/Agent: {self.config.envs_per_agent})...")
         self.running = True
         
         # Save Initial Generation (Gen 0)
@@ -1137,7 +732,7 @@ class PPOTrainer:
         
         # Helper stacker REMOVED - using direct tensor slicing
 
-        while global_step < TOTAL_TIMESTEPS:
+        while global_step < self.config.total_timesteps:
             if stop_event and stop_event.is_set(): break
 
             # Check Curriculum & Update Config BEFORE starting the iteration
@@ -1275,27 +870,27 @@ class PPOTrainer:
                     # Fallback to Mirror Self-Play
                     pass
             active_pods = self.get_active_pods()
-            num_active_per_agent = len(active_pods) * ENVS_PER_AGENT
+            num_active_per_agent = len(active_pods) * self.config.envs_per_agent
             
             # --- Collection Phase (Parallel) ---
             # Batches for each agent
             # Using self.agent_batches (allocated dynamically)
                  
             # Unpack Obs
-            # obs_data is tuple (self, tm, en, cp) tensors [4, NUM_ENVS, ...]
+            # obs_data is tuple (self, tm, en, cp) tensors [4, self.config.num_envs, ...]
             all_self, all_tm, all_en, all_cp = obs_data
             
-            for step in range(NUM_STEPS):
+            for step in range(self.config.num_steps):
                 # --- Global Normalization ---
                 # Normalize ALL active observations at once for efficiency
-                # Source: [4, NUM_ENVS, ...]
+                # Source: [4, self.config.num_envs, ...]
                 
                 # Active Pods Slicing
                 # active_pods is list [0] or [0, 1] etc.
-                # all_self[active_pods] returns [N_Active, NUM_ENVS, 14]
-                # It copies and stacks them. Since all_self[i] is [NUM_ENVS, 14] contiguous, this is fast.
+                # all_self[active_pods] returns [N_Active, self.config.num_envs, 14]
+                # It copies and stacks them. Since all_self[i] is [self.config.num_envs, 14] contiguous, this is fast.
                 
-                raw_self = all_self[active_pods].view(-1, 14) # [N_Active * NUM_ENVS, 14]
+                raw_self = all_self[active_pods].view(-1, 14) # [N_Active * self.config.num_envs, 14]
                 raw_tm = all_tm[active_pods].view(-1, 13)
                 raw_en = all_en[active_pods].view(-1, 2, 13)
                 raw_cp = all_cp[active_pods].view(-1, 6)
@@ -1316,7 +911,7 @@ class PPOTrainer:
                 # 1. Inference per Agent
                 full_actions = []
                 
-                # The normalized tensors are flat [N_Active * NUM_ENVS, ...]
+                # The normalized tensors are flat [N_Active * self.config.num_envs, ...]
                 # Order: Pod 0 Envs... Pod 1 Envs...
                 # BUT wait.
                 # all_self[active_pods] behavior:
@@ -1330,20 +925,20 @@ class PPOTrainer:
                 # This is tricky if flattened this way.
                 
                 # Actually, simpler:
-                # Keep normalized as [N_Active, NUM_ENVS, D]
+                # Keep normalized as [N_Active, self.config.num_envs, D]
                 
-                norm_self = norm_self.view(len(active_pods), NUM_ENVS, 14)
-                norm_tm = norm_tm.view(len(active_pods), NUM_ENVS, 13)
-                norm_en = norm_en.view(len(active_pods), NUM_ENVS, 2, 13)
-                norm_cp = norm_cp.view(len(active_pods), NUM_ENVS, 6)
+                norm_self = norm_self.view(len(active_pods), self.config.num_envs, 14)
+                norm_tm = norm_tm.view(len(active_pods), self.config.num_envs, 13)
+                norm_en = norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
+                norm_cp = norm_cp.view(len(active_pods), self.config.num_envs, 6)
                 
                 # Now Agent i needs envs i*128 : (i+1)*128
                 # across ALL active pods.
                 # So we slice dim 1.
                 
-                for i in range(POP_SIZE):
-                    start_env = i * ENVS_PER_AGENT
-                    end_env = start_env + ENVS_PER_AGENT
+                for i in range(self.config.pop_size):
+                    start_env = i * self.config.envs_per_agent
+                    end_env = start_env + self.config.envs_per_agent
                     
                     # Slice Normalized Tensors [N_Active, Batch, D]
                     # We want [N_Active * Batch, D] for input to network
@@ -1362,8 +957,8 @@ class PPOTrainer:
                         
                     # Store
                     # Agent batch storage expectation:
-                    # 'self_obs': [NUM_STEPS, n_active_per_agent, 14]
-                    # n_active_per_agent = N_Active * ENVS_PER_AGENT
+                    # 'self_obs': [self.config.num_steps, n_active_per_agent, 14]
+                    # n_active_per_agent = N_Active * self.config.envs_per_agent
                     # t0_self matches this size.
                     
                     
@@ -1429,7 +1024,7 @@ class PPOTrainer:
                      # Split Indices
                      # Main: Agents 0 to SPLIT_INDEX -> Envs 0 to Split * EnvsPerAgent
                      # Exploiter: Agents Split to End -> Envs ...
-                     split_idx = SPLIT_INDEX * ENVS_PER_AGENT
+                     split_idx = self.config.split_index * self.config.envs_per_agent
                      
                      # --- MAIN GROUP INFERENCE ---
                      # Slice: Everything before split_idx
@@ -1469,7 +1064,7 @@ class PPOTrainer:
 
                      # Reshape back to [2, E_Envs, 4]
                      # Note: E_Envs = Total - split_idx
-                     act_e = act_e.view(2, NUM_ENVS - split_idx, 4)
+                     act_e = act_e.view(2, self.config.num_envs - split_idx, 4)
                      
                      # --- COMBINE ---
                      # Concatenate along Env dim (dim 1)
@@ -1480,7 +1075,7 @@ class PPOTrainer:
                      act_map[3] = combined_opp_act[1] # Pod 3
                 
                 # Construct Global Action Tensor
-                env_actions = torch.zeros((NUM_ENVS, 4, 4), device=self.device)
+                env_actions = torch.zeros((self.config.num_envs, 4, 4), device=self.device)
                 
                 for pid, act in act_map.items():
                     env_actions[:, pid] = act
@@ -1502,8 +1097,8 @@ class PPOTrainer:
                 # STEP
                 # Pass Global Reward Tensor
                 # info is dictionary now
-                # rewards is [NUM_ENVS, 2] (Team 0, Team 1)
-                # dones is [NUM_ENVS]
+                # rewards is [self.config.num_envs, 2] (Team 0, Team 1)
+                # dones is [self.config.num_envs]
                 rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau, team_spirit=self.team_spirit)
                 
                 # --- Reward Processing ---
@@ -1513,7 +1108,7 @@ class PPOTrainer:
                 # --- Reward Normalization ---
                 # 1. Update Returns Buffer (All 4 channels)
                 dones_exp = dones.unsqueeze(1).expand(-1, 4)
-                self.returns_buffer = blended_rewards + GAMMA * self.returns_buffer * (~dones_exp).float()
+                self.returns_buffer = blended_rewards + self.config.gamma * self.returns_buffer * (~dones_exp).float()
                 
                 # 2. Update RMS (Flattened)
                 self.rms_ret.update(self.returns_buffer.view(-1))
@@ -1525,20 +1120,20 @@ class PPOTrainer:
                 
                 # --- Intrinsic Curiosity Update ---
                 # RND Logic
-                rnd_input = norm_self.reshape(-1, 14).detach() # [N_Active * NUM_ENVS, 14]
-                intrinsic_rewards = self.rnd.compute_intrinsic_reward(rnd_input) # [N_Active * NUM_ENVS]
+                rnd_input = norm_self.reshape(-1, 14).detach() # [N_Active * self.config.num_envs, 14]
+                intrinsic_rewards = self.rnd.compute_intrinsic_reward(rnd_input) # [N_Active * self.config.num_envs]
                 
                 # Map Intrinsic to Pods
-                r_int = intrinsic_rewards.view(len(active_pods), NUM_ENVS)
+                r_int = intrinsic_rewards.view(len(active_pods), self.config.num_envs)
                 
                 if self.env.curriculum_stage == STAGE_NURSERY or self.env.curriculum_stage == STAGE_SOLO:
                      # Only add to Pod 0 (active_pods[0])
                      norm_rewards[:, 0] += r_int[0] * self.rnd_coef
 
                 # Split rewards back to agents
-                for i in range(POP_SIZE):
-                    start_env = i * ENVS_PER_AGENT
-                    end_env = start_env + ENVS_PER_AGENT
+                for i in range(self.config.pop_size):
+                    start_env = i * self.config.envs_per_agent
+                    end_env = start_env + self.config.envs_per_agent
                     
                     r_chunks = []
                     d_chunks = []
@@ -1707,7 +1302,7 @@ class PPOTrainer:
                                              # Try to find a Pareto candidate
                                              pareto_candidates = []
                                              for cand in candidates:
-                                                 agent_id = cand // ENVS_PER_AGENT
+                                                 agent_id = cand // self.config.envs_per_agent
                                                  if agent_id in self.pareto_indices:
                                                      pareto_candidates.append(cand)
                                              
@@ -1755,9 +1350,9 @@ class PPOTrainer:
                 else:
                     sum_dist = torch.zeros_like(sum_speed)
                 
-                for i in range(POP_SIZE):
-                    start_env = i * ENVS_PER_AGENT
-                    end_env = start_env + ENVS_PER_AGENT
+                for i in range(self.config.pop_size):
+                    start_env = i * self.config.envs_per_agent
+                    end_env = start_env + self.config.envs_per_agent
                     
                     # Sum for this agent across its envs
                     agent_speed = sum_speed[start_env:end_env].sum()
@@ -1773,7 +1368,7 @@ class PPOTrainer:
                     # Or just divide by same count and accept factor of 1/N.
                     # As long as it's consistent across agents, it's fine for Novelty.
                     
-                    count = ENVS_PER_AGENT * len(active_pods)
+                    count = self.config.envs_per_agent * len(active_pods)
                     
                     self.population[i]['behavior_buffer'][0] += agent_speed
                     self.population[i]['behavior_buffer'][1] += agent_steer
@@ -1794,10 +1389,10 @@ class PPOTrainer:
             total_loss = 0
             
             # Global Normalize Next Obs (Fixed=True)
-            # Source: [4, NUM_ENVS, ...]
+            # Source: [4, self.config.num_envs, ...]
             
             # Global Normalize Next Obs (Fixed=True)
-            # Source: [4, NUM_ENVS, ...]
+            # Source: [4, self.config.num_envs, ...]
             
             next_raw_self = all_self[active_pods].view(-1, 14)
             next_raw_tm = all_tm[active_pods].view(-1, 13)
@@ -1812,20 +1407,20 @@ class PPOTrainer:
             
             next_norm_cp = self.rms_cp(next_raw_cp, fixed=True)
             
-            # View as [N_Act, NUM_ENVS, ...]
-            next_norm_self = next_norm_self.view(len(active_pods), NUM_ENVS, 14)
-            next_norm_tm = next_norm_tm.view(len(active_pods), NUM_ENVS, 13)
-            next_norm_en = next_norm_en.view(len(active_pods), NUM_ENVS, 2, 13)
-            next_norm_cp = next_norm_cp.view(len(active_pods), NUM_ENVS, 6)
+            # View as [N_Act, self.config.num_envs, ...]
+            next_norm_self = next_norm_self.view(len(active_pods), self.config.num_envs, 14)
+            next_norm_tm = next_norm_tm.view(len(active_pods), self.config.num_envs, 13)
+            next_norm_en = next_norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
+            next_norm_cp = next_norm_cp.view(len(active_pods), self.config.num_envs, 6)
             
-            for i in range(POP_SIZE):
+            for i in range(self.config.pop_size):
                 batch = self.agent_batches[i]
                 agent = self.population[i]['agent']
                 optimizer = self.population[i]['optimizer']
                 
                 # Slice Next Val
-                start_env = i * ENVS_PER_AGENT
-                end_env = start_env + ENVS_PER_AGENT
+                start_env = i * self.config.envs_per_agent
+                end_env = start_env + self.config.envs_per_agent
                 
                 t0_self = next_norm_self[:, start_env:end_env, :].reshape(-1, 14)
                 t0_tm = next_norm_tm[:, start_env:end_env, :].reshape(-1, 13)
@@ -1849,13 +1444,13 @@ class PPOTrainer:
                     else:
                         nextnonterminal = 1.0 - b_dones[t+1]
                         nextvalues = b_values[t+1]
-                    delta = b_rewards[t] + GAMMA * nextvalues * nextnonterminal - b_values[t]
-                    adv[t] = lastgaelam = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                    delta = b_rewards[t] + self.config.gamma * nextvalues * nextnonterminal - b_values[t]
+                    adv[t] = lastgaelam = delta + self.config.gamma * self.config.gae_lambda * nextnonterminal * lastgaelam
                 
                 returns = adv + b_values
                 
                 # Flatten
-                # stored batches were [NUM_STEPS, rows_per_agent, ...]
+                # stored batches were [self.config.num_steps, rows_per_agent, ...]
                 b_obs_s = batch['self_obs'].reshape(-1, 14)
                 b_obs_tm = batch['teammate_obs'].reshape(-1, 13)
                 b_obs_en = batch['enemy_obs'].reshape(-1, 2, 13)
@@ -1869,10 +1464,11 @@ class PPOTrainer:
                 agent_samples = b_obs_s.size(0)
                 inds = np.arange(agent_samples)
                 
-                for _ in range(UPDATE_EPOCHS):
+                for _ in range(self.config.update_epochs):
                     np.random.shuffle(inds)
-                    for st in range(0, agent_samples, MINIBATCH_SIZE):
-                        ed = st + MINIBATCH_SIZE
+                    minibatch_size = self.config.batch_size // self.config.num_minibatches
+                    for st in range(0, agent_samples, minibatch_size):
+                        ed = st + minibatch_size
                         mb = inds[st:ed]
                         
                         
@@ -1909,7 +1505,7 @@ class PPOTrainer:
                         mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
                         
                         pg1 = -mb_adv * ratio
-                        current_clip = self.population[i].get('clip_range', CLIP_RANGE)
+                        current_clip = self.population[i].get('clip_range', self.config.clip_range)
                         pg2 = -mb_adv * torch.clamp(ratio, 1-current_clip, 1+current_clip)
                         pg_loss = torch.max(pg1, pg2).mean()
                         
@@ -1917,13 +1513,13 @@ class PPOTrainer:
 
                         
                         # Use Agent's Specific Entropy Coefficient
-                        current_ent_coef = self.population[i].get('ent_coef', ENT_COEF)
+                        current_ent_coef = self.population[i].get('ent_coef', self.config.ent_coef)
                         div_loss = divergence.mean()
-                        loss = pg_loss - current_ent_coef * ent.mean() + VF_COEF * v_loss - DIV_COEF * div_loss
+                        loss = pg_loss - current_ent_coef * ent.mean() + self.config.vf_coef * v_loss - self.config.div_coef * div_loss
                         
                         optimizer.zero_grad()
                         loss.backward()
-                        nn.utils.clip_grad_norm_(agent.parameters(), MAX_GRAD_NORM)
+                        nn.utils.clip_grad_norm_(agent.parameters(), self.config.max_grad_norm)
                         optimizer.step()
                         
                         # Update RND (Intrinsic Curiosity)
@@ -1934,16 +1530,16 @@ class PPOTrainer:
                 total_loss += loss.item()
 
             # Stats & Evolution
-            global_step += NUM_ENVS * self.current_num_steps
+            global_step += self.config.num_envs * self.current_num_steps
             elapsed = time.time() - start_time
-            sps = int((NUM_ENVS * self.current_num_steps) / (elapsed + 1e-6))
+            sps = int((self.config.num_envs * self.current_num_steps) / (elapsed + 1e-6))
             
             # Record Laps
-            for i in range(POP_SIZE):
+            for i in range(self.config.pop_size):
                 # Count laps for this agent's chunk
                 # laps tensor is [4096, 4]
-                start = i * ENVS_PER_AGENT
-                end = start + ENVS_PER_AGENT
+                start = i * self.config.envs_per_agent
+                end = start + self.config.envs_per_agent
                 # Sum laps of Pod 0 in this chunk
                 laps = self.env.laps[start:end, 0].sum().item()
                 # BUT this is cumulative laps.
@@ -1967,9 +1563,9 @@ class PPOTrainer:
                  # We tracked 'wins' in population.
                  # 'wins' were attributed if winner == 0 (Pod 0).
                  # We need total matches.
-                 # Since we ran NUM_STEPS * NUM_ENVS, we can estimate matches or track them?
+                 # Since we ran self.config.num_steps * self.config.num_envs, we can estimate matches or track them?
                  # Actually 'wins' is integer count of wins.
-                 # Total matches per agent = ENVS_PER_AGENT (approx, assuming 1 match per env per iter? No.)
+                 # Total matches per agent = self.config.envs_per_agent (approx, assuming 1 match per env per iter? No.)
                  # A match ends on DONE.
                  # We need to know how many DONES happened for valid win rate calculation.
                  # Let's aggregate average score?
@@ -2031,7 +1627,7 @@ class PPOTrainer:
                 self.evolve_population()
             
             # Logging
-            self.log_iteration_summary(global_step, sps, current_tau, total_loss/POP_SIZE)
+            self.log_iteration_summary(global_step, sps, current_tau, total_loss/self.config.pop_size)
             
             # Construct simple line for telemetry log/frontend if needed (backward compat)
             leader = self.population[self.leader_idx]
@@ -2042,7 +1638,7 @@ class PPOTrainer:
             
             if telemetry_callback:
                 # Pass league_stats as a new argument
-                telemetry_callback(global_step, sps, 0, 0, self.current_win_rate, self.telemetry_env_indices[0], total_loss/POP_SIZE, log_line, False, league_stats=league_stats)
+                telemetry_callback(global_step, sps, 0, 0, self.current_win_rate, self.telemetry_env_indices[0], total_loss/self.config.pop_size, log_line, False, league_stats=league_stats)
 
             start_time = time.time()
             
