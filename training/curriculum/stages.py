@@ -137,8 +137,8 @@ class SoloStage(Stage):
 
     def update_step_penalty(self, base_penalty: float) -> float:
         if self.penalty_mode_active:
-            return 40.0 # Force Speed
-        return base_penalty # Full Penalty (5.0)
+            return 40.0 # Force Speed (Dynamic)
+        return 10.0 # Fixed Base Penalty (User Request: 10.0)
 
 class DuelStage(Stage):
     def __init__(self, config: CurriculumConfig):

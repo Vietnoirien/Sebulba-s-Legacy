@@ -29,6 +29,10 @@ class PodRacerEnv:
         self.bot_config = BotConfig()
         self.spawn_config = SpawnConfig()
         self.reward_scaling_config = RewardScalingConfig()
+
+        # Map Mode Cache
+        self.using_nursery_map = False
+        self._update_map_mode()
         
         # Game State
         self.next_cp_id = torch.ones((num_envs, 4), dtype=torch.long, device=self.device) # Start at 1 (0 is start)
@@ -103,9 +107,7 @@ class PodRacerEnv:
             self.num_checkpoints[curr_env_ids] = n_cps
             
             # 3. Select Generator Type
-            # 0: MaxEntropy (Chaos) -> 100% (Pod Racing)
-            
-            if self.config.track_gen_type == "nursery":
+            if self.using_nursery_map:
                  # Override for Nursery: 3 CPs (Fixed), Simple Tracks and strictly no overlap
                  num_cps_nursery = self.config.num_checkpoints_fixed if self.config.num_checkpoints_fixed else 3
                  n_cps = torch.full((num_curr,), num_cps_nursery, device=self.device)
@@ -113,15 +115,19 @@ class PodRacerEnv:
                  
                  # Generate for MAX_CHECKPOINTS but only use first n_cps
                  cps = TrackGenerator.generate_nursery_tracks(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-                 if num_reset > 0:
-                     print(f"DEBUG: Generated NURSERY tracks for {num_curr} envs.")
+                 # if num_reset > 0:
+                 #     print(f"DEBUG: Generated NURSERY tracks for {num_curr} envs.")
                  self.checkpoints[curr_env_ids] = cps
-                 
             else:
                 # Standard
                 cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-                if num_reset > 0:
-                     print(f"DEBUG: Generated MAX ENTROPY tracks for {num_curr} envs (CPs: {MIN_CHECKPOINTS}-{MAX_CHECKPOINTS}).")
+                # if num_reset > 0:
+                #      print(f"DEBUG: Generated MAX ENTROPY tracks for {num_curr} envs (CPs: {MIN_CHECKPOINTS}-{MAX_CHECKPOINTS}).")
+                self.checkpoints[curr_env_ids] = cps
+                # Standard
+                cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                # if num_reset > 0:
+                #      print(f"DEBUG: Generated MAX ENTROPY tracks for {num_curr} envs (CPs: {MIN_CHECKPOINTS}-{MAX_CHECKPOINTS}).")
                 self.checkpoints[curr_env_ids] = cps
 
             
@@ -198,6 +204,15 @@ class PodRacerEnv:
     def set_stage(self, stage_id: int, config: EnvConfig):
         self.curriculum_stage = stage_id
         self.config = config
+        self._update_map_mode()
+
+    def _update_map_mode(self):
+        self.using_nursery_map = False
+        if self.config.track_gen_type == "nursery":
+            if self.config.mode_name == "nursery":
+                self.using_nursery_map = True
+            else:
+                print(f"WARNING: Nursery Map requested but Mode is '{self.config.mode_name}'. Enforcing policy: FALLBACK TO MAX ENTROPY.")
 
     def _update_roles(self, env_ids):
         # Calculate Progress Score
@@ -617,12 +632,11 @@ class PodRacerEnv:
             # Let's use alpha = 0.2 + 0.8 * (Progress)
             # Starts at 0.2, ends at 1.0.
             
-            progress = (total_steps - steps_remaining) / total_steps
-            alpha = 0.2 + (0.8 * progress)
-            alpha = torch.clamp(alpha, 0.0, 1.0)
-            
-            # Apply to team rewards
-            # Team 0: Pods 0, 1
+            # [REFACTOR] Fixed Step Penalty (User Request)
+            # Annealing causes "bad orientation" (waiting behavior).
+            # Force constant penalty.
+            alpha = 1.0 
+            # (Old logic: alpha = 0.2 + 0.8 * progress)
             # Team 1: Pods 2, 3
             
             # We average the penalty for the team? Or sum?

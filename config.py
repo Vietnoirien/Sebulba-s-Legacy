@@ -30,8 +30,8 @@ STAGE_NURSERY_CONSISTENCY_THRESHOLD = 500.0
 
 # Stage 1 (Solo) -> 2 (Duel)
 # Goal: Efficiency (Speed) + Consistency
-STAGE_SOLO_EFFICIENCY_THRESHOLD = 30.0
-STAGE_SOLO_CONSISTENCY_THRESHOLD = 2000.0
+STAGE_SOLO_EFFICIENCY_THRESHOLD = 42.0
+STAGE_SOLO_CONSISTENCY_THRESHOLD = 1400.0
 
 from dataclasses import dataclass, field
 from typing import List, Optional
