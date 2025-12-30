@@ -178,11 +178,7 @@ class PodRacerEnv:
         self.next_cp_id[env_ids] = 1
         self.laps[env_ids] = 0
         
-        # SOTA Tuning: Nursery gets full rollout length (256) to find rewards
-        if self.curriculum_stage == STAGE_NURSERY:
-             self.timeouts[env_ids] = 256
-        else:
-             self.timeouts[env_ids] = TIMEOUT_STEPS
+        self.timeouts[env_ids] = TIMEOUT_STEPS
              
         self.dones[env_ids] = False
         self.winners[env_ids] = -1
@@ -638,8 +634,8 @@ class PodRacerEnv:
             
             active_mask = torch.zeros_like(steps_remaining, dtype=torch.bool)
             if self.curriculum_stage == STAGE_NURSERY:
-                # No Step Penalty in Nursery
-                pass
+                # Enable for Pod 0 (Small Penalty defined in PPO)
+                active_mask[:, 0] = True
             elif self.curriculum_stage == STAGE_SOLO:
                 active_mask[:, 0] = True
             elif self.curriculum_stage == STAGE_DUEL:

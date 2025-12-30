@@ -13,6 +13,7 @@ import aiohttp
 import uuid
 from typing import List, Tuple, Dict, Optional
 import copy
+import shutil
 
 # Import Env and Constants
 from simulation.env import (
@@ -53,9 +54,10 @@ NUM_EXPLOITERS = int(POP_SIZE * EXPLOITER_RATIO)
 SPLIT_INDEX = POP_SIZE - NUM_EXPLOITERS # Index where Main ends and Exploiters start
 
 # Batch Size per Agent
-UPDATE_EPOCHS = 1
+UPDATE_EPOCHS = 4
+NUM_MINIBATCHES = 16
 BATCH_SIZE = 2 * ENVS_PER_AGENT * NUM_STEPS 
-MINIBATCH_SIZE = BATCH_SIZE // UPDATE_EPOCHS # Maximize for speed (careful with OOM on low-end GPUs)
+MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
 REPORT_INTERVAL = 1 
 
 class PPOTrainer:
@@ -1101,6 +1103,9 @@ class PPOTrainer:
         if stage == STAGE_LEAGUE:
             # League Mode: No Step Penalty (Pure Win/Loss/Metrics)
             new_val = 0.0
+        elif stage == STAGE_NURSERY:
+            # Nursery: Small Incentive to move (0.5)
+            new_val = 0.5
         elif stage == STAGE_SOLO:
             # Full Penalty (No annealing in Stage 0)
             new_val = base_penalty
@@ -1570,27 +1575,29 @@ class PPOTrainer:
                     # Since evolution is based on "Agent Performance", we sum ALL events by pods controlled by this agent.
                     
                     # Checkpoints
-                    # active_pods are [0], [0,2] or [0,1,2,3]
                     # Filter infos first
                     agent_infos_laps = infos['laps_completed'][start_env:end_env] # [128, 4]
                     agent_infos_cps = infos['checkpoints_passed'][start_env:end_env] # [128, 4]
+                    agent_start_streak = infos['current_streak'][start_env:end_env] # [128, 4]
                     
                     # Mask by active pods
                     active_laps = 0
                     active_cps = 0
                     for pid in active_pods:
                          active_laps += agent_infos_laps[:, pid].sum().item()
-                         active_cps += agent_infos_cps[:, pid].sum().item()
+                         # FILTER CP1 FARMERS: Only count if Streak > 0 (i.e. Heading to CP2+)
+                         # Must multiply by Event (cps) to avoid counting every frame!
+                         # agent_start_streak is PRE-UPDATE.
+                         # CP1 Hit: Streak 0 -> Filtered.
+                         # CP2 Hit: Streak 1 -> Counted.
+                         passed_mask = (agent_infos_cps[:, pid] > 0)
+                         streak_mask = (agent_start_streak[:, pid] > 0)
+                         active_cps += (passed_mask & streak_mask).sum().item()
                          
                     self.population[i]['laps_score'] += active_laps
                     self.population[i]['checkpoints_score'] += active_cps
                     
                     # Accumulate Role Metrics
-                    # Velocity is "Speed per Step", so we sum it and later divide by total_steps? 
-                    # Actually logic: We likely want "Avg Velocity". 
-                    # But for now, just Sum it. We can normalize later.
-                    # Or better: Accumulate Sum and Count? Count = Steps * ActivePods (Already known)
-                    
                     agent_infos_vel = infos['runner_velocity'][start_env:end_env] # [128, 4]
                     agent_infos_dmg = infos['blocker_damage'][start_env:end_env] # [128, 4]
                     
@@ -1605,7 +1612,7 @@ class PPOTrainer:
                     self.population[i]['avg_blocker_dmg'] += active_dmg_sum
                     
                     # Track New Metrics
-                    start_streak = infos['current_streak'][start_env:end_env] # [128, 4]
+                    start_streak = agent_start_streak # Reuse extracted
                     start_steps = infos['cp_steps'][start_env:end_env] # [128, 4]
                     
                     # Max Streak
@@ -1614,6 +1621,7 @@ class PPOTrainer:
                         self.population[i]['max_streak'] = current_max
                         
                     # Efficiency
+                    # FILTER CP1 FARMERS: Only record efficiency for streak > 0
                     mask = (start_steps > 0) & (start_streak > 0)
                     if mask.any():
                         self.population[i]['total_cp_steps'] += start_steps[mask].sum().item()
