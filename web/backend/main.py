@@ -355,8 +355,8 @@ async def export_submission():
 DEFAULT_CONFIG = {
     "rewards": {
          "weights": {
-             "0": 10000.0, "1": 5000.0, "2": 2000.0, "3": 50.0, "4": 0.1,
-             "5": 0.5, "6": 1000.0, "7": 10.0, "8": 0.005, "9": 10.0, "10": 2.0
+             "0": 10000.0, "1": 5000.0, "2": 2000.0, "3": 50.0, "4": 8.0,
+             "5": 0.5, "6": 1000.0, "7": 0.0, "8": 3.0, "9": 10.0, "10": 2.0
          },
          "tau": 0.0,
          "team_spirit": 0.0
@@ -364,8 +364,8 @@ DEFAULT_CONFIG = {
     "curriculum": {"stage": 0, "difficulty": 0.0},
     "hyperparameters": {"lr": 1e-4, "ent_coef": 0.01},
     "transitions": {
-         "solo_efficiency_threshold": 28.0,
-         "solo_consistency_threshold": 2400.0,
+         "solo_efficiency_threshold": 30.0,
+         "solo_consistency_threshold": 2000.0,
          "duel_consistency_wr": 0.82,
          "duel_absolute_wr": 0.84,
          "duel_consistency_checks": 5,

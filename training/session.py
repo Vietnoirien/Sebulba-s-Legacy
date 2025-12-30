@@ -288,7 +288,7 @@ class TrainingSession:
                           "duel_consistency_wr", "duel_absolute_wr", "duel_consistency_checks",
                           "team_consistency_wr", "team_absolute_wr", "team_consistency_checks"]:
                      if k in trans:
-                         self.trainer.curriculum_config[k] = float(trans[k])
+                         setattr(self.trainer.curriculum_config, k, float(trans[k]))
                 
             print(f"Trainer Config Updated: {self.trainer.reward_config}")
 

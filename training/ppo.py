@@ -462,8 +462,9 @@ class PPOTrainer:
              # Stage 1: Show Consistency and Efficiency
              eff = elites[0]['ema_efficiency']
              cons = elites[0]['ema_consistency']
+             nov = elites[0]['novelty_score']
              score = cons - eff
-             self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Score: {score:.1f}")
+             self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Nov: {nov:.2f} | Score: {score:.1f}")
         elif self.env.curriculum_stage == STAGE_NURSERY:
              self.log(f"Elite (Crowded) Stats | Nursery Score: {elites[0]['nursery_score']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
         else:

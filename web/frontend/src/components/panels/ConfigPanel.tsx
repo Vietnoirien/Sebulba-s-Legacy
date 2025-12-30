@@ -29,19 +29,19 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'general' | 'objectives' | 'physics' | 'combat' | 'transitions' | 'presets'>('spt2_config_activeTab', 'general')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v2', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 5000.0,
             [RW.CHECKPOINT]: 2000.0,
             [RW.CHECKPOINT_SCALE]: 50.0,
-            [RW.VELOCITY]: 0.1,
-            [RW.ORIENTATION]: 0.005,
+            [RW.VELOCITY]: 8.0,
+            [RW.ORIENTATION]: 3.0,
             [RW.WRONG_WAY]: 10.0,
             [RW.COLLISION_BLOCKER]: 1000.0,
             [RW.COLLISION_RUNNER]: 0.5,
             [RW.COLLISION_MATE]: 2.0,
-            [RW.STEP_PENALTY]: 10.0
+            [RW.STEP_PENALTY]: 0.0
         },
         tau: 0.0,
         team_spirit: 0.0
@@ -57,9 +57,9 @@ export const ConfigPanel: React.FC = () => {
         ent_coef: 0.01
     })
 
-    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions', {
-        solo_efficiency_threshold: 28.0,
-        solo_consistency_threshold: 2400.0,
+    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v2', {
+        solo_efficiency_threshold: 30.0,
+        solo_consistency_threshold: 2000.0,
         duel_consistency_wr: 0.82,
         duel_absolute_wr: 0.84,
         duel_consistency_checks: 5,

@@ -84,10 +84,11 @@ class SoloStage(Stage):
         )
 
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
-        # Objectives: Consistency (Max), Efficiency (Min -> Maximize -Eff)
+        # Objectives: Consistency (Max), Efficiency (Min -> Maximize -Eff), Novelty (Max)
         return [
             p.get('ema_consistency', 0.0),
-            -p.get('ema_efficiency', 999.0)
+            -p.get('ema_efficiency', 999.0),
+            p.get('novelty_score', 0.0) * 100.0
         ]
         
     def update(self, trainer) -> Tuple[Optional[int], str]:
