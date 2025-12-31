@@ -147,6 +147,9 @@ graph TD
 *   **GPU**: NVIDIA GPU with CUDA support (Required for simulation)
     > [!WARNING]
     > **Strict GPU Requirement**: This project relies on a custom GPU-based physics engine (`gpu_physics.py`) for massive parallelism. There is **NO CPU fallback**. Attempting to run this on a CPU-only machine will fail.
+    
+    > [!NOTE]
+    > **AMD Users**: While not officially supported, you may be able to run this project using [ZLUDA](https://github.com/vosen/ZLUDA) as a drop-in CUDA replacement. **We have not tested this** and cannot guarantee stability.
 
 ### Setup
 
