@@ -40,47 +40,53 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
 ### 🧬 Evolutionary Strategy (GA + RL)
 *   **Population-Based Training (PBT)**: Evolves a population of **128 distinct agents**. Agents don't just learn a policy; they evolve their hyperparameters (**Learning Rate**, **Entropy Coefficient**, **Clip Range**) and reward weights over time. This allows the population to dynamically adjust its "conservativeness" and exploration vs exploitation balance.
 *   **NSGA-II Selection**: Uses **Non-Dominated Sorting Genetic Algorithm II** to select elite agents based on multiple conflicting objectives that change per stage:
-    *   **Stage 0 (Solo)**: Minimize Steps (Efficiency) + Maximize Checkpoint Streak (Consistency).
-    *   **Stage 1 (Duel)**: Maximize Win Streak + Minimize Steps.
-    *   **Stage 2 (Team)**: Maximize Win Rate + Minimize Steps (2v2 Cooperative).
-    *   **Stage 3 (League)**: Maximize Win Rate + Maximize Laps Completed + Minimize Steps.
+    *   **Stage 0 (Nursery)**: Minimize Distance to Checkpoint + Maximize Consistency.
+    *   **Stage 1 (Solo)**: Maximize Efficiency (Minimize Steps) + Maximize Consistency.
+    *   **Stage 2 (Duel)**: Maximize Win Streak + Maximize Novelty (Quality Gated).
+    *   **Stage 3 (Team)**: Maximize Win Rate + Maximize Runner Velocity + Maximize Blocker Damage.
+    *   **Stage 4 (League)**: Maximize Win Rate + Maximize Laps Completed + Minimize Steps.
     *   **All Stages**: Maximize **Behavioral Novelty** (using EMA of speed/steering vectors) to maintain diversity.
 *   **Dynamic Reward Shaping**: The system "discovers" the optimal reward function by mutating the weights of various signals (Velocity, Orientation, Winning) during evolution.
 
 ### 📈 Curriculum Learning
 The training process is automated through distinct stages of difficulty:
-1.  **Stage 0: Solo Time Trial**: Agents maximize speed and control to navigate checkpoints (Goal: >50k Laps).
-2.  **Stage 1: Duel (1v1)**: Agents face a scripted bot with **Dynamic Difficulty Scaling**.
+1.  **Stage 0: Nursery (Basic Control)**: A simplified environment with 3 fixed checkpoints and no opponents.
+    *   **Goal**: Learn to navigate consistently.
+    *   **Graduation**: Consistency Score > **500.0**.
+2.  **Stage 1: Solo Time Trial (Optimization)**: Agents race against the clock on full procedural maps.
+    *   **Goal**: Maximize Speed and Efficiency.
+    *   **Anti-Farming Mechanism**: A **Dynamic Step Penalty** activates if agents are "farming" high consistency with low speed. It forces a constant high penalty (~15.0 per step) to urgentize movement and avoid directional noise.
+    *   **Graduation**: Efficiency < **45.0** (Steps/CP) AND Consistency > **1500.0**.
+3.  **Stage 2: Duel (1v1)**: Agents face a scripted bot with **Dynamic Difficulty Scaling**.
     *   **Progression Mechanism**:
-        *   **Standard**: Difficulty increases (+0.05) if Win Rate > **70%**.
-        *   **Turbo**: Difficulty increases (+0.10) if Win Rate > **90%**.
-        *   **Super Turbo**: Difficulty jumps (+0.20) if Win Rate > **98%**.
-        *   **Insane Turbo**: Difficulty jumps (+0.50) if Win Rate > **99%**.
-    *   **Regression Mechanism**:
-        *   **Immediate**: Difficulty drops (-0.05) if Win Rate falls below **30%**.
-        *   **Persistent**: Difficulty drops if Win Rate stays below **40%** for 2 consecutive checks (2000 games).
-3.  **Stage 2: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. 
+        *   **Standard**: Difficulty increases (+0.05) if Win Rate > **60%**.
+        *   **Turbo**: Difficulty increases (+0.10) if Win Rate > **70%**.
+        *   **Super Turbo**: Difficulty jumps (+0.20) if Win Rate > **85%**.
+        *   **Insane Turbo**: Difficulty jumps (+0.50) if Win Rate > **95%**.
+    *   **Graduation**: Absolute WR > **0.88** OR WR > **0.85** for 5 sequential consistency checks.
+4.  **Stage 3: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. 
     *   **Mitosis Transition**: Upon entering Stage 2, the **Runner's weights are cloned to the Blocker**. This ensures the team starts with two competent drivers, preventing the "Dead Weight Blocker" problem. The Blocker then evolves independently towards aggression.
-    *   **Graduation Thresholds**: Transition to Stage 3 requires **WR >= 0.88** OR (**WR > 0.85** for 5 sequential consistency checks).
-    *   **Reward Decoupling**: Rewards are initially calculated per-pod (Individual) to help agents learn basic control in the new environment.
     *   **Team Spirit**: A blending factor (`0.0` to `0.5`) linearly blends the reward signal from "Selfish" (My Velocity/Checkpoints) to "Cooperative" (Team Average) as difficulty increases.
-    *   **Adaptive Evolution**: The evolution interval scales dynamically with difficulty (every 16 iterations at Diff 0.0 → every 4 iterations at Diff 1.0) to ensure robust selection during the initial high-variance phase.
-4.  **Stage 3: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
+5.  **Stage 4: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
 
 ### 📊 Real-Time Visualization
 *   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.
 *   **3D Mode (Experimental)**: A new immersive view built with **React Three Fiber**.
     *   **Visuals**: 
-        *   **Pods**: Rendered as cones with team colors (Red for Self, White for Opponent).
+        *   **Pods**: Rendered as cones/models with team colors (Red for Self, White for Opponent).
         *   **Shields**: Visualized as a translucent blue force field extending 250ms after collision.
-        *   **Checkpoints**: Represented as flat rings on the map.
-    *   **Controls**: Full OrbitControls (LMB to Rotate, RMB to Pan, Wheel to Zoom).
+        *   **Checkpoints**: Represented as flat rings with ID numbers.
+    *   **Controls**: 
+        *   **Camera Modes**: Toggle between **Orbit** (Free Cam) and **Pod** (Chase Cam, follows velocity vector).
+        *   **Interactive**: **Swap Skins** to change pod models, **Fullscreen** mode.
+        *   **Time**: **Playback Speed** slider (0.1x - 2.0x).
 
 ### 🧬 Evolutionary Strategy (NSGA-II)
 We use a **Multi-Objective Genetic Algorithm** to select the best agents for the next generation.
-*   **Stage 0 (Solo)**: `[Consistency, -Efficiency, Novelty]`
-*   **Stage 1 (Duel)**: `[Win Rate, -Efficiency, Novelty]`
-*   **Stage 2 (Team)**: **Role-Specific Selection**
+*   **Stage 0 (Nursery)**: `[Consistency, Nursery Score, Novelty]` (Lexicographic)
+*   **Stage 1 (Solo)**: `[Wins, Consistency, -Efficiency]` (Lexicographic)
+*   **Stage 2 (Duel)**: `[Win Rate, Novelty]` (NSGA-II)
+*   **Stage 3 (Team)**: `[Win Rate, Runner Vel, Blocker Dmg]` (NSGA-II)
     *   **Win Rate**: Primary objective.
     *   **Runner Velocity**: Maximize average velocity of the Runner pod.
     *   **Blocker Damage**: Maximize impact damage dealt by the Blocker pod.

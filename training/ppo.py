@@ -508,7 +508,11 @@ class PPOTrainer:
         cull_ratio = 0.50 if self.env.curriculum_stage == STAGE_NURSERY else 0.25
         num_culls = max(2, int(self.config.pop_size * cull_ratio))
         cull_indices = sorted_pop_indices[-num_culls:]
-        parent_candidates = sorted_pop_indices[:-num_culls]
+        
+        # FIX: Restrict Parent Pool to Top 25% Elites ONLY
+        # Previously, anyone not culled (Top 75%) could be a parent, allowing mediocre agents to reproduce.
+        num_parents = max(2, int(self.config.pop_size * 0.25))
+        parent_candidates = sorted_pop_indices[:num_parents]
         
         # Replacement Logic
         for idx in cull_indices:
