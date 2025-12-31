@@ -620,14 +620,13 @@ class PPOTrainer:
              ))
              
         elif self.env.curriculum_stage == STAGE_SOLO:
-             # Combined Metric: Consistency Only (SOTA: Prioritize Reliability first)
-             # "Slow is smooth, smooth is fast".
-             # Avoid selecting "Lucky Suicides" (High Efficiency, Low Consistency).
-             
+             # Combined Metric: Wins, then Consistency, then Efficiency (Lower is better)
              def combined_score(idx):
                  p = self.population[idx]
+                 wins = p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0
                  cons = p.get('ema_consistency', 0.0) if p.get('ema_consistency') is not None else 0.0
-                 return cons
+                 eff = p.get('ema_efficiency', 999.0) if p.get('ema_efficiency') is not None else 999.0
+                 return (wins, cons, -eff)
                  
              best_guy = max(candidates, key=combined_score)
         else:
@@ -743,9 +742,13 @@ class PPOTrainer:
         stage = self.env.curriculum_stage
         
         if stage == STAGE_SOLO:
-            # Best is highest (Consistency - Efficiency)
-            # Actually just showing the one with Max Consistency is clearer for user "Best".
-            best_agent = max(self.population, key=lambda p: p.get('ema_consistency', 0.0) if p.get('ema_consistency') is not None else 0.0)
+            # Best is Wins -> Consistency -> Efficiency
+            def best_sorter(p):
+                 wins = p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0
+                 cons = p.get('ema_consistency', 0.0) if p.get('ema_consistency') is not None else 0.0
+                 eff = p.get('ema_efficiency', 999.0) if p.get('ema_efficiency') is not None else 999.0
+                 return (wins, cons, -eff)
+            best_agent = max(self.population, key=best_sorter)
         else:
             # Best is Max Win Rate
             best_agent = max(self.population, key=lambda p: p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0)
