@@ -35,7 +35,7 @@ STAGE_SOLO_CONSISTENCY_THRESHOLD = 1500.0
 STAGE_SOLO_PENALTY_CONSISTENCY_THRESHOLD = 1000.0
 STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD = 55.0
 STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD = 65.0
-STAGE_SOLO_DYNAMIC_STEP_PENALTY = 40.0
+STAGE_SOLO_DYNAMIC_STEP_PENALTY = 20.0
 
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -43,7 +43,7 @@ from typing import List, Optional
 @dataclass
 class BotConfig:
     difficulty_noise_scale: float = 30.0
-    thrust_base: float = 40.0
+    thrust_base: float = 20.0
     thrust_scale: float = 80.0
 
 @dataclass
@@ -117,6 +117,7 @@ class CurriculumConfig:
     solo_penalty_efficiency_threshold: float = STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD
     solo_penalty_exit_efficiency_threshold: float = STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD
     solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
+    solo_min_win_rate: float = 0.90
     
     # Stage 1 -> 2 (Duel Graduation)
     duel_consistency_wr: float = 0.82

@@ -201,10 +201,13 @@ class PodRacerEnv:
         self.update_progress_metric(env_ids)
         self._update_roles(env_ids)
 
-    def set_stage(self, stage_id: int, config: EnvConfig):
+    def set_stage(self, stage_id: int, config: EnvConfig, reset_env: bool = False):
         self.curriculum_stage = stage_id
         self.config = config
         self._update_map_mode()
+        
+        if reset_env:
+            self.reset()
 
     def _update_map_mode(self):
         self.using_nursery_map = False

@@ -56,7 +56,7 @@ class CurriculumManager:
          self.current_stage_id = next_stage_id
          
          # Propagate to Env with Config
-         trainer.env.set_stage(next_stage_id, self.current_stage.get_env_config())
+         trainer.env.set_stage(next_stage_id, self.current_stage.get_env_config(), reset_env=True)
          
          trainer.log(f"*** Curriculum Transition: {self.stages[prev_stage].name} -> {self.stages[next_stage_id].name} ***")
          trainer.log(f"*** Reason: {reason} ***")

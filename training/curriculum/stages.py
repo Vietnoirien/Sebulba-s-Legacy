@@ -88,6 +88,7 @@ class SoloStage(Stage):
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
         # Objectives: Consistency (Max), Efficiency (Min -> Maximize -Eff), Novelty (Max)
         return [
+            p.get('ema_wins', 0.0),
             p.get('ema_consistency', 0.0),
             -p.get('ema_efficiency', 999.0),
             p.get('novelty_score', 0.0) * 100.0
@@ -100,12 +101,13 @@ class SoloStage(Stage):
         
         avg_eff = np.mean([p.get('efficiency_score') if p.get('efficiency_score') is not None else 999.0 for p in elites])
         avg_cons = np.mean([p.get('ema_consistency') if p.get('ema_consistency') is not None else 0.0 for p in elites])
+        avg_wins = np.mean([p.get('ema_wins') if p.get('ema_wins') is not None else 0.0 for p in elites])
         
         if trainer.iteration % 10 == 0:
-             trainer.log(f"Stage 1 Status: Top 5 Avg Eff {avg_eff:.1f} (Goal < {self.config.solo_efficiency_threshold}), Cons {avg_cons:.1f} (Goal > {self.config.solo_consistency_threshold})")
+             trainer.log(f"Stage 1 Status: Top 5 Avg Eff {avg_eff:.1f} (Goal < {self.config.solo_efficiency_threshold}), Cons {avg_cons:.1f} (Goal > {self.config.solo_consistency_threshold}), Wins {avg_wins:.2f} (Goal > {self.config.solo_min_win_rate})")
         
-        if avg_eff < self.config.solo_efficiency_threshold and avg_cons > self.config.solo_consistency_threshold:
-            trainer.log(f">>> GRADUATION FROM SOLO: Top Agents Avg Eff {avg_eff:.1f}, Cons {avg_cons:.1f} <<<")
+        if avg_eff < self.config.solo_efficiency_threshold and avg_cons > self.config.solo_consistency_threshold and avg_wins > self.config.solo_min_win_rate:
+            trainer.log(f">>> GRADUATION FROM SOLO: Top Agents Avg Eff {avg_eff:.1f}, Cons {avg_cons:.1f}, Wins {avg_wins:.2f} <<<")
             if trainer.curriculum_mode == "auto":
                 # Special Config Update for Duel
                 trainer.env.bot_difficulty = 0.0
