@@ -63,8 +63,8 @@ export const ConfigPanel: React.FC = () => {
 
     const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v2', {
         nursery_consistency_threshold: 500.0,
-        solo_efficiency_threshold: 30.0,
-        solo_consistency_threshold: 2000.0,
+        solo_efficiency_threshold: 45.0,
+        solo_consistency_threshold: 1500.0,
         duel_consistency_wr: 0.82,
         duel_absolute_wr: 0.84,
         duel_consistency_checks: 5,
