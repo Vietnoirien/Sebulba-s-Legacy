@@ -7,7 +7,7 @@
 
 **Sebulba's Legacy** is an advanced Reinforcement Learning (RL) system designed to train super-human autonomous racers for the *Mad Pod Racing* environment. This project replaces the original Sebulba pod trainer, introducing a fully **vectorized environment**, enhanced **model infrastructure**, and refined **Genetic Algorithm** techniques. 
 
-Unlike traditional RL implementations that run a handful of environments, this project leverages a custom **GPU-Accelerated Physics Engine** to simulate **32,768 environments in parallel** on a single consumer GPU (achieving **>40,000 Steps Per Second** on an RTX 5070). This massive throughput allows for the training of robust agents using **Population-Based Training (PBT)** within hours rather than days.
+Unlike traditional RL implementations that run a handful of environments, this project leverages a custom **GPU-Accelerated Physics Engine** to simulate up to **32,768 environments in parallel** on a single consumer GPU (achieving **~16,000 Steps Per Second** on an RTX 5070). This massive throughput allows for the training of robust agents using **Population-Based Training (PBT)** within hours rather than days.
 
 > [!WARNING]
 > **Hardware Limits**: The configuration of **32,768 environments** (where **Minibatch Size ≈ Batch Size / 2**) is the confirmed stability limit for **12GB VRAM** GPUs (e.g., RTX 4070/5070). Exceeding these values may cause system freezes or OOM errors. For stability, we recommend **16,384 environments** (where **Minibatch Size ≈ Batch Size**).
