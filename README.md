@@ -73,13 +73,19 @@ The training process is automated through distinct stages of difficulty:
 *   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.
 *   **3D Mode (Experimental)**: A new immersive view built with **React Three Fiber**.
     *   **Visuals**: 
-        *   **Pods**: Rendered as cones/models with team colors (Red for Self, White for Opponent).
+        *   **Pods**: High-fidelity GLB models with animated components (Flames, Arcs, Thrusters).
+            *   **Pod-1**: Standard sleek racer.
+            *   **Pod-2**: Heavy industrial design.
+        *   **Environment**: Custom-modeled **Ground**, **Checkpoints** (Start/Regular), and **Crossing Indicators**.
         *   **Shields**: Visualized as a translucent blue force field extending 250ms after collision.
-        *   **Checkpoints**: Represented as flat rings with ID numbers.
     *   **Controls**: 
         *   **Camera Modes**: Toggle between **Orbit** (Free Cam) and **Pod** (Chase Cam, follows velocity vector).
         *   **Interactive**: **Swap Skins** to change pod models, **Fullscreen** mode.
         *   **Time**: **Playback Speed** slider (0.1x - 2.0x).
+    *   **Technical Highlights**:
+        *   **Two-Pass Glass Rendering**: Implements a custom dual-pass rendering technique (Back-face then Front-face) to handle complex transparency for checkpoints, eliminating sorting artifacts.
+        *   **Instanced Assets**: Efficiently clones high-fidelity GLTF models using `SkeletonUtils` to maintain 60 FPS performance even with complex geometries.
+        *   **Crossing Indicators**: Visual markers appear on checkpoints when traversed, synchronized with the simulation state.
 
 ### 🧬 Evolutionary Strategy (NSGA-II)
 We use a **Multi-Objective Genetic Algorithm** to select the best agents for the next generation.
@@ -260,6 +266,7 @@ Key configurations can be found in `config.py` and `simulation/env.py`.
 
 *   **Original Game**: Based on the [Mad Pod Racing](https://www.codingame.com/multiplayer/bot-programming/mad-pod-racing) challenge on Codingame.
 *   **Assets**: Original Pod Sprites courtesy of [Codingame](https://www.codingame.com/multiplayer/bot-programming/mad-pod-racing).
+*   **3D Models**: [Willson Weber](https://willsonweber.com/)
 *   **Inspiration**: DeepMind's AlphaStar (League Training) and OpenAI's PPO (Proximal Policy Optimization).
 
 ---
