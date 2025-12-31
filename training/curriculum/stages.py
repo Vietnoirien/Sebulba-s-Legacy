@@ -63,7 +63,7 @@ class NurseryStage(Stage):
 
     @property
     def target_evolve_interval(self) -> int:
-        return 10 # Stable Search for Nursery
+        return 1 # Fast Evolution for Nursery
 
 class SoloStage(Stage):
     def __init__(self, config: CurriculumConfig):
@@ -115,20 +115,28 @@ class SoloStage(Stage):
                 return STAGE_DUEL, f"Eff {avg_eff:.1f} < {self.config.solo_efficiency_threshold}"
         
         # --- Dynamic Penalty Logic (Anti-Stagnation) ---
-        # If Efficiency matches "Safe Walk" (< 50.0) but Consistency is high, 
+        # If Efficiency matches "Safe Walk" (< Entry) but Consistency is high, 
         # it means they are farming. Force them to run.
-        if avg_eff < 50.0 and avg_cons > 1000.0:
+        if avg_eff < self.config.solo_penalty_efficiency_threshold and avg_cons > self.config.solo_penalty_consistency_threshold:
             self.low_efficiency_counter += 1
             if self.low_efficiency_counter >= 2:
                 if not self.penalty_mode_active:
-                     trainer.log(f">>> DYNAMIC PENALTY ACTIVATED: Efficiency {avg_eff:.1f} < 50 for 2 gens. Penalizing Step (40.0) <<<")
+                     trainer.log(f">>> DYNAMIC PENALTY ACTIVATED: Efficiency {avg_eff:.1f} < {self.config.solo_penalty_efficiency_threshold} for 2 gens. Penalizing Step ({self.config.solo_dynamic_step_penalty}) <<<")
                 self.penalty_mode_active = True
+        
+        elif self.penalty_mode_active:
+             # HYSTERESIS: Only deactivate if they improve significantly (Eff > Exit) OR crash (Cons < Threshold)
+             if avg_eff > self.config.solo_penalty_exit_efficiency_threshold or avg_cons < self.config.solo_penalty_consistency_threshold:
+                 trainer.log(f">>> DYNAMIC PENALTY DEACTIVATED: Efficiency {avg_eff:.1f} > {self.config.solo_penalty_exit_efficiency_threshold} or Cons dropped. Resetting Step Penalty. <<<")
+                 self.penalty_mode_active = False
+                 self.low_efficiency_counter = 0
+             else:
+                 # In Hysteresis Zone: Stay Active
+                 pass
+        
         else:
-            # Reversible: If they improve (Eff > 50) or crash (Cons < 1000), relax.
+            # Not active and not meeting activation criteria -> Reset counter
             self.low_efficiency_counter = 0
-            if self.penalty_mode_active:
-                 trainer.log(f">>> DYNAMIC PENALTY DEACTIVATED: Efficiency {avg_eff:.1f} > 50 or Cons dropped. Resetting Step Penalty. <<<")
-            self.penalty_mode_active = False
 
         return None, ""
         
@@ -137,7 +145,7 @@ class SoloStage(Stage):
 
     def update_step_penalty(self, base_penalty: float) -> float:
         if self.penalty_mode_active:
-            return 40.0 # Force Speed (Dynamic)
+            return self.config.solo_dynamic_step_penalty # Force Speed (Dynamic)
         return 10.0 # Fixed Base Penalty (User Request: 10.0)
 
 class DuelStage(Stage):
@@ -162,9 +170,15 @@ class DuelStage(Stage):
         )
 
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
+        # Quality Gate: Novelty only counts if agent is competitive (> 5% Win Rate)
+        # This prevents "Safe Losers" (consistent but slow) from crowding the front.
+        nov = p.get('novelty_score', 0.0) * 100.0
+        if p.get('ema_wins', 0.0) < 0.05:
+            nov = 0.0
+
         return [
             p.get('ema_wins', 0.0),
-            p.get('novelty_score', 0.0) * 100.0
+            nov
         ]
         
     def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:

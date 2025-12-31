@@ -1,32 +1,50 @@
 import React, { useRef, useLayoutEffect, useState } from 'react'
-import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber'
-import { OrbitControls, Grid, useTexture } from '@react-three/drei'
-import { SkeletonUtils, OBJLoader } from 'three-stdlib'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { OrbitControls, Grid, useTexture, useGLTF } from '@react-three/drei'
+import { SkeletonUtils } from 'three-stdlib'
 import { useGameState, useGameActions } from '../../context/GameStateContext'
 import * as THREE from 'three'
 import bgImage from '../../assets/background.jpg'
+// Checkpoint Assets
+// @ts-ignore
+// @ts-ignore
+import groundGlbUrl from '../../assets/models/Chckpts/ground.glb'
+// @ts-ignore
+import cpk0GlbUrl from '../../assets/models/Chckpts/ckp-0.glb'
+// @ts-ignore
+import cpk1GlbUrl from '../../assets/models/Chckpts/ckp-1.glb'
+// @ts-ignore
+import pod1CheckGlbUrl from '../../assets/models/Chckpts/pod1-check.glb'
+// @ts-ignore
+import pod2CheckGlbUrl from '../../assets/models/Chckpts/pod2-check.glb'
+
+import checkpointTextureUrl from '../../assets/models/Chckpts/checkpoint.png'
+import groundNormalUrl from '../../assets/models/Chckpts/ckp-normal.png'
 // @ts-ignore
 // Pod 1 Assets
 // @ts-ignore
-import pod1ObjUrl from '../../assets/models/Pods/pod_1/pod.obj'
 // @ts-ignore
-import flames1ObjUrl from '../../assets/models/Pods/pod_1/flames.obj'
+// Pod 1 Assets
 // @ts-ignore
-import arcs1ObjUrl from '../../assets/models/Pods/pod_1/arcs.obj'
+import pod1GlbUrl from '../../assets/models/Pods/pod-1/pod.glb'
 // @ts-ignore
-import thrusters1ObjUrl from '../../assets/models/Pods/pod_1/thrusters.obj'
-import pod1SkinUrl from '../../assets/models/Pods/pod_1/skin.png'
+import flames1GlbUrl from '../../assets/models/Pods/pod-1/flames.glb'
+// @ts-ignore
+import arcs1GlbUrl from '../../assets/models/Pods/pod-1/arcs.glb'
+// @ts-ignore
+import thrusters1GlbUrl from '../../assets/models/Pods/pod-1/thrusters.glb'
+import pod1SkinUrl from '../../assets/models/Pods/pod-1/pod-1-skin.png'
 
 // Pod 2 Assets
 // @ts-ignore
-import pod2ObjUrl from '../../assets/models/Pods/pod_2/pod.obj'
+import pod2GlbUrl from '../../assets/models/Pods/pod-2/pod-2.glb'
 // @ts-ignore
-import flames2ObjUrl from '../../assets/models/Pods/pod_2/flames.obj'
+import flames2GlbUrl from '../../assets/models/Pods/pod-2/flames-2.glb'
 // @ts-ignore
-import arcs2ObjUrl from '../../assets/models/Pods/pod_2/arcs.obj'
+import arcs2GlbUrl from '../../assets/models/Pods/pod-2/arcs-2.glb'
 // @ts-ignore
-import thrusters2ObjUrl from '../../assets/models/Pods/pod_2/thrusters.obj'
-import pod2SkinUrl from '../../assets/models/Pods/pod_2/skin.png'
+import thrusters2GlbUrl from '../../assets/models/Pods/pod-2/thrusters-2.glb'
+import pod2SkinUrl from '../../assets/models/Pods/pod-2/pod-2-skin.png'
 
 // Constants matching backend (Physics world is roughly 16000x9000)
 const SCALE_FACTOR = 0.01
@@ -53,39 +71,211 @@ const BackgroundRenderer: React.FC = () => {
     )
 }
 
-const CheckpointsRenderer: React.FC = () => {
-    const { telemetry } = useGameState()
-    const meshRef = useRef<THREE.InstancedMesh>(null)
-    const checkpoints = telemetry?.race_state?.checkpoints || []
+const SingleCheckpoint: React.FC<{
+    cp: any,
+    assets: any,
+    crossings: Record<string, number>
+}> = ({ cp, assets, crossings }) => {
+    const groupRef = useRef<THREE.Group>(null)
 
-    useLayoutEffect(() => {
-        if (!meshRef.current || checkpoints.length === 0) return
-
-        const tempObject = new THREE.Object3D()
-
-        checkpoints.forEach((cp, i) => {
-            const x = cp.x * SCALE_FACTOR
-            const z = cp.y * SCALE_FACTOR
-            // Note: y in 2D is z in 3D (XZ plane)
-            // cp.radius is typically 600 -> 6.0 in 3D
-            const scale = (cp.radius * SCALE_FACTOR) * 2
-
-            tempObject.position.set(x, 0.05, z) // Very close to ground
-            tempObject.scale.set(scale, scale, 1) // Ring geometry is flat XY
-            tempObject.rotation.x = -Math.PI / 2 // Rotate to lie flat on XZ
-            tempObject.updateMatrix()
-
-            meshRef.current!.setMatrixAt(i, tempObject.matrix)
+    // Clone Assets for this instance
+    const disableCulling = (obj: THREE.Object3D) => {
+        obj.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+                (child as THREE.Mesh).frustumCulled = false
+            }
         })
-        meshRef.current.instanceMatrix.needsUpdate = true
-    }, [checkpoints])
+        return obj
+    }
+
+    // Clone Assets for this instance, ensure culling is disabled on the specific instances
+    const groundClone = React.useMemo(() => disableCulling(SkeletonUtils.clone(assets.ground)), [assets.ground])
+    const cpk0Clone = React.useMemo(() => disableCulling(SkeletonUtils.clone(assets.cpk0)), [assets.cpk0])
+    const cpk1Clone = React.useMemo(() => disableCulling(SkeletonUtils.clone(assets.cpk1)), [assets.cpk1])
+    const pod1CheckClone = React.useMemo(() => disableCulling(SkeletonUtils.clone(assets.pod1Check)), [assets.pod1Check])
+    const pod2CheckClone = React.useMemo(() => disableCulling(SkeletonUtils.clone(assets.pod2Check)), [assets.pod2Check])
+
+    // Rotation Logic
+    useFrame((_, delta) => {
+        if (!groupRef.current) return
+        const speed = 1.0
+        groupRef.current.rotation.y += delta * speed
+    })
+
+    const x = cp.x * SCALE_FACTOR
+    const z = cp.y * SCALE_FACTOR
+
+    const isStart = cp.id === 0
+    const Model = isStart ? cpk0Clone : cpk1Clone
+
+    // Crossing Visibility
+    const showPod1 = (Date.now() - (crossings[`${cp.id}-0`] || 0)) < 1000
+    const showPod2 = (Date.now() - (crossings[`${cp.id}-1`] || 0)) < 1000
 
     return (
-        <instancedMesh ref={meshRef} args={[undefined, undefined, checkpoints.length]}>
-            {/* Inner Radius 0.9, Outer 1.0 -> Thin Ring effect. 32 segments */}
-            <ringGeometry args={[0.85, 1.0, 32]} />
-            <meshBasicMaterial color="#555" transparent opacity={0.6} side={THREE.DoubleSide} />
-        </instancedMesh>
+        <group position={[x, 0, z]}>
+            <primitive object={groundClone} />
+
+            <group ref={groupRef}>
+                <primitive object={Model} />
+            </group>
+
+            {showPod1 && (
+                <primitive object={pod1CheckClone} position={[0, 1, 0]} />
+            )}
+            {showPod2 && (
+                <primitive object={pod2CheckClone} position={[0, 1, 0]} />
+            )}
+        </group>
+    )
+}
+
+const CheckpointsRenderer: React.FC = () => {
+    const { telemetry } = useGameState()
+    const checkpoints = telemetry?.race_state?.checkpoints || []
+    const pods = telemetry?.race_state?.pods || []
+
+    // Load Assets
+    const { scene: groundObj } = useGLTF(groundGlbUrl)
+    const { scene: cpk0Obj } = useGLTF(cpk0GlbUrl)
+    const { scene: cpk1Obj } = useGLTF(cpk1GlbUrl)
+    const { scene: pod1CheckObj } = useGLTF(pod1CheckGlbUrl)
+    const { scene: pod2CheckObj } = useGLTF(pod2CheckGlbUrl)
+
+    const checkpointTexture = useTexture(checkpointTextureUrl)
+    checkpointTexture.flipY = false
+    const groundNormal = useTexture(groundNormalUrl)
+    groundNormal.flipY = false
+
+    // Process Assets Once
+    const processedAssets = React.useMemo(() => {
+        // prepare function now handles both "Opaque" and "Two-Pass Glass" modes
+        const prepare = (obj: THREE.Group, normalMap?: THREE.Texture, rotateOnX: boolean = false, isGlass: boolean = false) => {
+
+            const setupMaterial = (mesh: THREE.Mesh, side: THREE.Side, renderOrder: number) => {
+                mesh.frustumCulled = false
+                const usedMaterial = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material
+
+                // Clone material to avoid shared state
+                const newMat = usedMaterial.clone() as THREE.MeshStandardMaterial
+
+                // Force texture as requested
+                newMat.map = checkpointTexture
+
+                if (normalMap) {
+                    newMat.normalMap = normalMap
+                } else {
+                    newMat.normalMap = null
+                }
+
+                newMat.side = side
+                newMat.transparent = true // Always enabled for these assets
+
+                if (isGlass) {
+                    // Glass Mode: Disable Depth Write to prevent self-occlusion artifacts
+                    newMat.depthWrite = false
+                    mesh.renderOrder = renderOrder
+                } else {
+                    // Standard Mode (Ground): Enable Depth Write
+                    newMat.depthWrite = true
+                    mesh.renderOrder = 0
+                }
+
+                mesh.material = newMat
+            }
+
+            if (!isGlass) {
+                // --- Simple Path (Ground) ---
+                const clone = SkeletonUtils.clone(obj)
+                if (rotateOnX) clone.rotation.x = -Math.PI / 2
+
+                clone.traverse((child) => {
+                    if ((child as THREE.Mesh).isMesh) {
+                        // Ground uses DoubleSide usually, or FrontSide. Keeping DoubleSide as per original
+                        setupMaterial(child as THREE.Mesh, THREE.DoubleSide, 0)
+                    }
+                })
+                return clone
+            } else {
+                // --- Two-Pass Path (Glass Checkpoints) ---
+                // We create a container and add two copies: BackSide first, then FrontSide.
+                // This guarantees the back is drawn before the front, solving the transparency sorting issue.
+                const root = new THREE.Group()
+
+                // Pass 1: Back Faces
+                const backPass = SkeletonUtils.clone(obj)
+                if (rotateOnX) backPass.rotation.x = -Math.PI / 2
+                backPass.traverse((child) => {
+                    if ((child as THREE.Mesh).isMesh) {
+                        setupMaterial(child as THREE.Mesh, THREE.BackSide, 1) // Render Order 1
+                    }
+                })
+                root.add(backPass)
+
+                // Pass 2: Front Faces
+                const frontPass = SkeletonUtils.clone(obj)
+                if (rotateOnX) frontPass.rotation.x = -Math.PI / 2
+                frontPass.traverse((child) => {
+                    if ((child as THREE.Mesh).isMesh) {
+                        setupMaterial(child as THREE.Mesh, THREE.FrontSide, 2) // Render Order 2
+                    }
+                })
+                root.add(frontPass)
+
+                return root
+            }
+        }
+
+        return {
+            ground: prepare(groundObj, groundNormal, true, false),      // Ground: Normal rendering
+            cpk0: prepare(cpk0Obj, undefined, true, true),              // Checkpoints: Two-Pass Glass
+            cpk1: prepare(cpk1Obj, undefined, true, true),              // Checkpoints: Two-Pass Glass
+            pod1Check: prepare(pod1CheckObj, undefined, false, true),   // Markers: Two-Pass Glass
+            pod2Check: prepare(pod2CheckObj, undefined, false, true),   // Markers: Two-Pass Glass
+        }
+    }, [groundObj, cpk0Obj, cpk1Obj, pod1CheckObj, pod2CheckObj, checkpointTexture, groundNormal])
+
+    // Crossing Logic
+    const lastPodNextCps = useRef<Record<number, number>>({})
+    const [crossings, setCrossings] = useState<Record<string, number>>({})
+
+    useFrame(() => {
+        if (!pods) return
+
+        const newCrossings: Record<string, number> = {}
+        let changed = false
+
+        pods.forEach((pod, index) => {
+            const currentNext = pod.next_checkpoint ?? 1
+            const prevNext = lastPodNextCps.current[index]
+
+            if (prevNext !== undefined && currentNext !== prevNext && prevNext !== 0) {
+                // Optimization: ignore undefined (start)
+                // Detected crossing of prevNext
+                const passedCpId = prevNext
+                const key = `${passedCpId}-${pod.team}`
+                newCrossings[key] = Date.now()
+                changed = true
+            }
+            lastPodNextCps.current[index] = currentNext
+        })
+
+        if (changed) {
+            setCrossings(prev => ({ ...prev, ...newCrossings }))
+        }
+    })
+
+    return (
+        <group>
+            {checkpoints.map((cp) => (
+                <SingleCheckpoint
+                    key={cp.id}
+                    cp={cp}
+                    assets={processedAssets}
+                    crossings={crossings}
+                />
+            ))}
+        </group>
     )
 }
 
@@ -110,6 +300,15 @@ const GenericPodRender: React.FC<{ pod: any, assets: PodAssets, visible: boolean
     const flamesMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
     const arcsMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
     const bodyMatRef = useRef<THREE.MeshStandardMaterial | null>(null)
+
+    // Store latest pod state in ref to avoid stale closures in useFrame
+    const podRef = useRef(pod)
+    useLayoutEffect(() => {
+        podRef.current = pod
+    }, [pod])
+
+    // Initial positioning flag
+    const isInitialized = useRef(false)
 
     // Setup Materials
     useLayoutEffect(() => {
@@ -187,34 +386,40 @@ const GenericPodRender: React.FC<{ pod: any, assets: PodAssets, visible: boolean
     // Scale/Pos/Rot
     const groupRef = useRef<THREE.Group>(null)
 
-    useFrame((_state, _delta) => {
+    useFrame((_state, delta) => {
         if (!groupRef.current) return
 
-        // 1. Position & Rotation
-        const x = pod.x * SCALE_FACTOR
-        const z = pod.y * SCALE_FACTOR
-        groupRef.current.position.set(x, 2, z)
+        const currentPod = podRef.current
 
-        // Rotation Logic
-        groupRef.current.rotation.set(0, 0, 0)
+        // 1. Position & Rotation Logic
+        const targetX = currentPod.x * SCALE_FACTOR
+        const targetZ = currentPod.y * SCALE_FACTOR
+        const targetPos = new THREE.Vector3(targetX, 3, targetZ)
 
-        let heading = pod.angle
-        const speed = Math.sqrt(pod.vx * pod.vx + pod.vy * pod.vy)
-        if (speed > 5.0) heading = Math.atan2(pod.vy, pod.vx)
+        let heading = currentPod.angle
+        const speed = Math.sqrt(currentPod.vx * currentPod.vx + currentPod.vy * currentPod.vy)
+        if (speed > 5.0) heading = Math.atan2(currentPod.vy, currentPod.vx)
 
+        const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading)
 
+        if (!isInitialized.current) {
+            // Hard Snap on first frame
+            groupRef.current.position.copy(targetPos)
+            groupRef.current.quaternion.copy(targetQuat)
+            isInitialized.current = true
+        } else {
+            // Smooth Interpolation
+            // Use a higher lerp factor for responsiveness, but enough to smooth discrete updates
+            // delta * 15 means it closes ~90% of the gap in 0.15s (assuming 60fps)
+            // Adjust this value if it feels too laggy or too jittery
+            const smoothFactor = Math.min(delta * 15.0, 1.0)
 
-        // Base Rotation: -90 degrees on X to align Z-up model to Y-up world
-        const qBase = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2)
-        // Heading Rotation: -heading around Y (Standard) + -90 degrees offset for "Left" facing fix
-        const qHeading = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -heading + Math.PI / 2)
-
-        // Combine
-        qHeading.multiply(qBase)
-        groupRef.current.quaternion.copy(qHeading)
+            groupRef.current.position.lerp(targetPos, smoothFactor)
+            groupRef.current.quaternion.slerp(targetQuat, smoothFactor)
+        }
 
         // 3. Logic Updates (Flames, Team Color, Arcs)
-        const thrust = (pod as any).thrust ?? 0
+        const thrust = (currentPod as any).thrust ?? 0
         if (flamesMatRef.current) {
             const opacity = Math.max(0, thrust) / 100.0
             flamesMatRef.current.opacity = opacity
@@ -223,16 +428,13 @@ const GenericPodRender: React.FC<{ pod: any, assets: PodAssets, visible: boolean
 
         // Color -> Team
         if (bodyMatRef.current) {
-            const color = TEAM_COLORS[pod.team % TEAM_COLORS.length]
+            const color = TEAM_COLORS[currentPod.team % TEAM_COLORS.length]
             bodyMatRef.current.color.set(color)
         }
-
-        // Arcs Animation -> Scroll X? (Maybe not needed if no texture, but let's keep ref)
-        // if (arcsMatRef.current && arcsMatRef.current.map) ...
     })
 
     return (
-        <group ref={groupRef} scale={[3, 3, 3]} visible={visible}>
+        <group ref={groupRef} visible={visible}>
             <primitive object={podClone} />
             <primitive object={flamesClone} />
             <primitive object={arcsClone} />
@@ -241,27 +443,37 @@ const GenericPodRender: React.FC<{ pod: any, assets: PodAssets, visible: boolean
     )
 }
 
-const Pod1Model: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) => {
-    const [podMesh, flamesMesh, arcsMesh, thrustersMesh] = useLoader(OBJLoader, [
-        pod1ObjUrl, flames1ObjUrl, arcs1ObjUrl, thrusters1ObjUrl
-    ]) as THREE.Group[]
-    const podTexture = useTexture(pod1SkinUrl)
-
-    return <GenericPodRender pod={pod} visible={visible} assets={{ podMesh, flamesMesh, arcsMesh, thrustersMesh, podTexture }} />
-}
-
-const Pod2Model: React.FC<{ pod: any, visible: boolean }> = ({ pod, visible }) => {
-    const [podMesh, flamesMesh, arcsMesh, thrustersMesh] = useLoader(OBJLoader, [
-        pod2ObjUrl, flames2ObjUrl, arcs2ObjUrl, thrusters2ObjUrl
-    ]) as THREE.Group[]
-    const podTexture = useTexture(pod2SkinUrl)
-
-    return <GenericPodRender pod={pod} visible={visible} assets={{ podMesh, flamesMesh, arcsMesh, thrustersMesh, podTexture }} />
-}
-
 const PodsRenderer: React.FC<{ swapSkins: boolean }> = ({ swapSkins }) => {
     const { telemetry } = useGameState()
     const pods = telemetry?.race_state?.pods || []
+
+    // ---- LOAD ASSETS ONCE ----
+    const pod1Texture = useTexture(pod1SkinUrl)
+    pod1Texture.flipY = false
+    const pod2Texture = useTexture(pod2SkinUrl)
+    pod2Texture.flipY = false
+
+    // POD 1
+    const { scene: pod1Mesh } = useGLTF(pod1GlbUrl)
+    const { scene: flames1Mesh } = useGLTF(flames1GlbUrl)
+    const { scene: arcs1Mesh } = useGLTF(arcs1GlbUrl)
+    const { scene: thrusters1Mesh } = useGLTF(thrusters1GlbUrl)
+
+    // POD 2
+    const { scene: pod2Mesh } = useGLTF(pod2GlbUrl)
+    const { scene: flames2Mesh } = useGLTF(flames2GlbUrl)
+    const { scene: arcs2Mesh } = useGLTF(arcs2GlbUrl)
+    const { scene: thrusters2Mesh } = useGLTF(thrusters2GlbUrl)
+
+    // Bundle Assets
+    const pod1Assets = React.useMemo(() => ({
+        podMesh: pod1Mesh, flamesMesh: flames1Mesh, arcsMesh: arcs1Mesh, thrustersMesh: thrusters1Mesh, podTexture: pod1Texture
+    }), [pod1Mesh, flames1Mesh, arcs1Mesh, thrusters1Mesh, pod1Texture])
+
+    const pod2Assets = React.useMemo(() => ({
+        podMesh: pod2Mesh, flamesMesh: flames2Mesh, arcsMesh: arcs2Mesh, thrustersMesh: thrusters2Mesh, podTexture: pod2Texture
+    }), [pod2Mesh, flames2Mesh, arcs2Mesh, thrusters2Mesh, pod2Texture])
+
 
     return (
         <group>
@@ -272,12 +484,13 @@ const PodsRenderer: React.FC<{ swapSkins: boolean }> = ({ swapSkins }) => {
                 const usePod2 = swapSkins ? !isTeam1 : isTeam1
 
                 return usePod2
-                    ? <Pod2Model key={i} pod={pod} visible={true} />
-                    : <Pod1Model key={i} pod={pod} visible={true} />
+                    ? <GenericPodRender key={i} pod={pod} visible={true} assets={pod2Assets} />
+                    : <GenericPodRender key={i} pod={pod} visible={true} assets={pod1Assets} />
             })}
         </group>
     )
 }
+
 // Preload
 // useLoader.preload(OBJLoader, podObjUrl) // Preload if needed
 
@@ -377,8 +590,8 @@ const CameraController: React.FC<{
                 }
 
                 // Racing Game Style: Closer and lower
-                const dist = 20
-                const height = 8
+                const dist = 5
+                const height = 5
 
                 const camX = x - Math.cos(heading) * dist
                 const camZ = z - Math.sin(heading) * dist
@@ -393,7 +606,7 @@ const CameraController: React.FC<{
                 // 4. Smooth Look At
                 // Instead of snapping lookAt to the pod center, we lerp the lookAt target
                 // This prevents jitter when the pod position updates discretely
-                targetPos.current.set(x, 2, z) // Target: slightly above pod center
+                targetPos.current.set(x, 3, z) // Target: slightly above pod center
                 lookAtPos.current.lerp(targetPos.current, delta * 10.0) // Fast lerp for responsiveness, but smooths snaps
                 camera.lookAt(lookAtPos.current)
             }
@@ -485,7 +698,9 @@ export const RaceScene3D: React.FC = () => {
                 dpr={[1, 2]}
                 className="w-full h-full"
             >
-                <SceneContent mode={cameraMode} focusedPodIndex={focusedPodIndex} swapSkins={swapSkins} />
+                <React.Suspense fallback={null}>
+                    <SceneContent mode={cameraMode} focusedPodIndex={focusedPodIndex} swapSkins={swapSkins} />
+                </React.Suspense>
             </Canvas>
 
             {/* --- UI OVERLAY --- */}
@@ -588,4 +803,3 @@ export const RaceScene3D: React.FC = () => {
         </div>
     )
 }
-

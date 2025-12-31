@@ -668,7 +668,7 @@ class PodRacerEnv:
             # Pod 0
             for i in range(4):
                 if active_mask[:, i].any():
-                     rewards_indiv[:, i] -= w_step_pen * alpha[:, i]
+                     rewards_indiv[:, i] -= w_step_pen * alpha
 
         
         # D. Checkpoints (Individual Progress)
@@ -864,8 +864,18 @@ class PodRacerEnv:
         if self.curriculum_stage == STAGE_SOLO:
             env_timed_out = timed_out[:, 0]
         elif self.curriculum_stage == STAGE_DUEL:
-            env_timed_out = timed_out[:, 0] | timed_out[:, 2]
+            # Only Agent (Pod 0) triggers timeout reset. 
+            # Bot (Pod 2) timeout is ignored (DNF).
+            env_timed_out = timed_out[:, 0]
+        elif self.curriculum_stage == STAGE_TEAM:
+            # Only Agents (Pod 0, 1) trigger timeout reset.
+            # Bots (Pod 2, 3) timeout is ignored.
+            env_timed_out = timed_out[:, 0] | timed_out[:, 1]
         else:
+            # League or others: Any timeout resets?
+            # Or should we be strict? 
+            # In purely competitive (League), if one dies, maybe we reset?
+            # Let's keep 'any' for League for now as use_bots=False.
             env_timed_out = timed_out.any(dim=1)
 
         self.dones = self.dones | env_timed_out
@@ -899,7 +909,12 @@ class PodRacerEnv:
                      progress = torch.clamp(passed / total_goal, 0.0, 1.0)
                      
                      # Fixed Rate 25.0 * 100 Steps = 2500.0
-                     MAX_PENALTY = 2500.0
+                     # [CRITICAL UPDATE] Timeout Penalty must exceed Loss Penalty (5000.0)
+                     # otherwise agents prefer to spin/stall than race and lose.
+                     if self.curriculum_stage == STAGE_DUEL:
+                         MAX_PENALTY = 15000.0 # Huge penalty to force finishing
+                     else:
+                         MAX_PENALTY = 2500.0
                      
                      penalty = MAX_PENALTY * (1.0 - progress)
                      

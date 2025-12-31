@@ -30,8 +30,12 @@ STAGE_NURSERY_CONSISTENCY_THRESHOLD = 500.0
 
 # Stage 1 (Solo) -> 2 (Duel)
 # Goal: Efficiency (Speed) + Consistency
-STAGE_SOLO_EFFICIENCY_THRESHOLD = 42.0
-STAGE_SOLO_CONSISTENCY_THRESHOLD = 1400.0
+STAGE_SOLO_EFFICIENCY_THRESHOLD = 45.0
+STAGE_SOLO_CONSISTENCY_THRESHOLD = 1500.0
+STAGE_SOLO_PENALTY_CONSISTENCY_THRESHOLD = 1000.0
+STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD = 55.0
+STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD = 65.0
+STAGE_SOLO_DYNAMIC_STEP_PENALTY = 40.0
 
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -39,7 +43,7 @@ from typing import List, Optional
 @dataclass
 class BotConfig:
     difficulty_noise_scale: float = 30.0
-    thrust_base: float = 20.0
+    thrust_base: float = 40.0
     thrust_scale: float = 80.0
 
 @dataclass
@@ -109,6 +113,10 @@ class CurriculumConfig:
     # Stage 1 -> 2
     solo_efficiency_threshold: float = STAGE_SOLO_EFFICIENCY_THRESHOLD
     solo_consistency_threshold: float = STAGE_SOLO_CONSISTENCY_THRESHOLD
+    solo_penalty_consistency_threshold: float = STAGE_SOLO_PENALTY_CONSISTENCY_THRESHOLD
+    solo_penalty_efficiency_threshold: float = STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD
+    solo_penalty_exit_efficiency_threshold: float = STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD
+    solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
     
     # Stage 1 -> 2 (Duel Graduation)
     duel_consistency_wr: float = 0.82
@@ -127,9 +135,9 @@ class CurriculumConfig:
     wr_warning: float = 0.40 # Trigger Warning/Streak
     
     # Progression Thresholds (Difficulty Increase)
-    wr_progression_standard: float = 0.70 # +0.05
-    wr_progression_turbo: float = 0.80 # +0.10
-    wr_progression_super_turbo: float = 0.90 # +0.20
+    wr_progression_standard: float = 0.60 # +0.05
+    wr_progression_turbo: float = 0.70 # +0.10
+    wr_progression_super_turbo: float = 0.85 # +0.20
     wr_progression_insane_turbo: float = 0.95 # +0.50
     
     # Difficulty Steps
@@ -140,7 +148,7 @@ class CurriculumConfig:
     diff_step_insane_turbo: float = 0.50
     
     # Nursery Specifics
-    nursery_timeout_steps: int = 400
+    nursery_timeout_steps: int = 200
 
 # Reward Indices
 RW_WIN = 0
