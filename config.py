@@ -11,6 +11,8 @@ SHIELD_MASS = 10.0
 BOOST_THRUST = 650.0
 MAX_TURN_DEGREES = 18.0
 TIMEOUT_STEPS = 100 # NEVER CHANGE THIS VALUE, THIS IS A GAME CONSTRAINT
+TIMEOUT_PENALTY_STANDARD = 3500.0
+TIMEOUT_PENALTY_DUEL = 15000.0
 
 # Training / Environment Constants
 MAX_LAPS = 3
@@ -152,11 +154,12 @@ class CurriculumConfig:
     nursery_timeout_steps: int = 200
 
 # Reward Indices
+# Reward Indices
 RW_WIN = 0
 RW_LOSS = 1
 RW_CHECKPOINT = 2
 RW_CHECKPOINT_SCALE = 3
-RW_VELOCITY = 4
+RW_PROGRESS = 4 # Replaces RW_VELOCITY (Index 4 recycled to keep tensor size consistent if loading old models, though meaning changes)
 RW_COLLISION_RUNNER = 5
 RW_COLLISION_BLOCKER = 6
 RW_STEP_PENALTY = 7
@@ -164,20 +167,22 @@ RW_ORIENTATION = 8
 RW_WRONG_WAY = 9
 RW_COLLISION_MATE = 10
 RW_PROXIMITY = 11
+RW_MAGNET = 12 # New Proximity Bonus
 
 DEFAULT_REWARD_WEIGHTS = {
     RW_WIN: 10000.0,
-    RW_LOSS: 5000.0,
+    RW_LOSS: 2000.0,
     RW_CHECKPOINT: 2000.0,
     RW_CHECKPOINT_SCALE: 50.0,
-    RW_VELOCITY: 8.0,
+    RW_PROGRESS: 1.0, # 1.0 Reward per unit of distance closed. 
     RW_COLLISION_RUNNER: 0.5,
     RW_COLLISION_BLOCKER: 1000.0,
-    RW_STEP_PENALTY: 0.0,
-    RW_ORIENTATION: 3.0,
+    RW_STEP_PENALTY: 1.0, # Fixed Constant (Negative in ENV)
+    RW_ORIENTATION: 1.0, # Reduced to soft guidance
     RW_WRONG_WAY: 10.0,
     RW_COLLISION_MATE: 2.0,
-    RW_PROXIMITY: 5.0
+    RW_PROXIMITY: 5.0,
+    RW_MAGNET: 10.0 # Proximity Pull
 }
 
 from typing import List, Optional
@@ -200,7 +205,7 @@ class EnvConfig:
     bot_pods: List[int] = field(default_factory=list)
     
     # Rewards
-    dynamic_reward_base: float = 200.0
+    # dynamic_reward_base Removed (Legacy)
     step_penalty_active_pods: List[int] = field(default_factory=list)
     orientation_active_pods: List[int] = field(default_factory=list)
 

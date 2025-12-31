@@ -2,21 +2,23 @@ import React, { useState, useEffect } from 'react'
 import { Slider } from '../common/Slider'
 import { useGameActions } from '../../context/GameStateContext'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
-import { Save, Upload, Trash2, Play, Target, Zap, ShieldAlert, Cpu, Database, Shuffle, Rocket } from 'lucide-react'
+import { Save, Upload, Trash2, Play, Target, Cpu, Database, Layers, Rocket } from 'lucide-react'
 
-// Reward Indices (Must match Backend)
+// Reward Indices (Must match Backend config.py)
 const RW = {
     WIN: 0,
     LOSS: 1,
     CHECKPOINT: 2,
     CHECKPOINT_SCALE: 3,
-    VELOCITY: 4,
+    PROGRESS: 4, // Was VELOCITY
     COLLISION_RUNNER: 5,
     COLLISION_BLOCKER: 6,
     STEP_PENALTY: 7,
     ORIENTATION: 8,
     WRONG_WAY: 9,
-    COLLISION_MATE: 10
+    COLLISION_MATE: 10,
+    PROXIMITY: 11,
+    MAGNET: 12
 }
 
 interface ConfigPreset {
@@ -26,28 +28,30 @@ interface ConfigPreset {
 
 export const ConfigPanel: React.FC = () => {
     const { sendMessage, selectedModel } = useGameActions()
-    const [activeTab, setActiveTab] = useLocalStorage<'general' | 'objectives' | 'physics' | 'combat' | 'transitions' | 'presets'>('spt2_config_activeTab', 'general')
+    const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v2', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v4', {
         weights: {
             [RW.WIN]: 10000.0,
-            [RW.LOSS]: 5000.0,
+            [RW.LOSS]: 2000.0,
             [RW.CHECKPOINT]: 2000.0,
             [RW.CHECKPOINT_SCALE]: 50.0,
-            [RW.VELOCITY]: 8.0,
-            [RW.ORIENTATION]: 3.0,
+            [RW.PROGRESS]: 1.0,
+            [RW.MAGNET]: 10.0,
+            [RW.ORIENTATION]: 1.0,
             [RW.WRONG_WAY]: 10.0,
             [RW.COLLISION_BLOCKER]: 1000.0,
             [RW.COLLISION_RUNNER]: 0.5,
             [RW.COLLISION_MATE]: 2.0,
-            [RW.STEP_PENALTY]: 0.0
+            [RW.STEP_PENALTY]: 1.0,
+            [RW.PROXIMITY]: 5.0
         },
         tau: 0.0,
         team_spirit: 0.0
     })
 
-    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum', {
+    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v2', {
         stage: 0,
         difficulty: 0.0
     })
@@ -58,6 +62,7 @@ export const ConfigPanel: React.FC = () => {
     })
 
     const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v2', {
+        nursery_consistency_threshold: 500.0,
         solo_efficiency_threshold: 30.0,
         solo_consistency_threshold: 2000.0,
         duel_consistency_wr: 0.82,
@@ -198,144 +203,165 @@ export const ConfigPanel: React.FC = () => {
         </button>
     )
 
+    // STAGE HELPERS
+    const renderStageConfig = () => {
+        const st = curriculum.stage;
+        return (
+            <div className="space-y-4">
+                {/* Stage Description for User Context */}
+                <div className="p-3 bg-cyan-900/20 border border-cyan-800 rounded">
+                    <h4 className="text-neon-cyan text-xs font-bold uppercase mb-1">
+                        {st === 0 && "Stage 0: Nursery"}
+                        {st === 1 && "Stage 1: Solo Time Trial"}
+                        {st === 2 && "Stage 2: Duel (1v1)"}
+                        {st === 3 && "Stage 3: Team (2v2)"}
+                        {st === 4 && "Stage 4: League"}
+                    </h4>
+                    <p className="text-gray-400 text-[10px]">
+                        {st === 0 && "Goal: Learn basic navigation. Simple tracks, no bots. Graduate by reaching Consistency threshold."}
+                        {st === 1 && "Goal: Speed & Efficiency. Complex tracks, no bots. Penalties for slow transitions."}
+                        {st === 2 && "Goal: Beating a Rival. 1v1 against a bot. Win Rate matters."}
+                        {st === 3 && "Goal: Team Coordination. 2v2. Work with teammate to win."}
+                        {st === 4 && "Goal: Self-Play Supremacy. No explicit graduation."}
+                    </p>
+                </div>
+
+                {st >= 2 && (
+                    <div className="bg-slate-800/30 p-3 rounded border border-slate-700">
+                        <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mb-2">Bot Settings</h3>
+                        <Slider label="BOT DIFFICULTY" min={0} max={1} step={0.05} value={curriculum.difficulty} valueDisplay={curriculum.difficulty.toFixed(2)}
+                            onChange={(e) => setCurriculum(prev => ({ ...prev, difficulty: parseFloat(e.target.value) }))} />
+                    </div>
+                )}
+
+                <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
+                    <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Graduation Criteria</h3>
+
+                    {st === 0 && (
+                        <Slider label="CONSISTENCY" min={100} max={1000} step={10} value={transitions.nursery_consistency_threshold}
+                            onChange={(e) => setTransitions(prev => ({ ...prev, nursery_consistency_threshold: parseFloat(e.target.value) }))} />
+                    )}
+
+                    {st === 1 && (
+                        <>
+                            <Slider label="EFFICIENCY SCORE (LOWER IS BETTER)" min={10} max={60} step={1} value={transitions.solo_efficiency_threshold}
+                                onChange={(e) => setTransitions(prev => ({ ...prev, solo_efficiency_threshold: parseFloat(e.target.value) }))} />
+                            <Slider label="CONSISTENCY" min={1000} max={3000} step={50} value={transitions.solo_consistency_threshold}
+                                onChange={(e) => setTransitions(prev => ({ ...prev, solo_consistency_threshold: parseFloat(e.target.value) }))} />
+                        </>
+                    )}
+
+                    {st === 2 && (
+                        <>
+                            <Slider label="REQ WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.duel_consistency_wr} valueDisplay={(transitions.duel_consistency_wr * 100).toFixed(0) + "%"}
+                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_consistency_wr: parseFloat(e.target.value) }))} />
+                            <Slider label="ABSOLUTE WR" min={0.5} max={1.0} step={0.01} value={transitions.duel_absolute_wr} valueDisplay={(transitions.duel_absolute_wr * 100).toFixed(0) + "%"}
+                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_absolute_wr: parseFloat(e.target.value) }))} />
+                            <Slider label="CHECKS COUNT" min={1} max={10} step={1} value={transitions.duel_consistency_checks}
+                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_consistency_checks: parseFloat(e.target.value) }))} />
+                        </>
+                    )}
+
+                    {st === 3 && (
+                        <>
+                            <Slider label="REQ WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.team_consistency_wr} valueDisplay={(transitions.team_consistency_wr * 100).toFixed(0) + "%"}
+                                onChange={(e) => setTransitions(prev => ({ ...prev, team_consistency_wr: parseFloat(e.target.value) }))} />
+                        </>
+                    )}
+                </div>
+            </div>
+        )
+    }
+
     return (
         <div className="flex flex-col h-full bg-[#1e1e1e]">
 
             {/* TABS */}
             <div className="flex border-b border-gray-700 shrink-0">
-                <TabButton id="general" icon={Cpu} label="General" />
-                <TabButton id="objectives" icon={Target} label="Obj" />
-                <TabButton id="physics" icon={Zap} label="Phys" />
-                <TabButton id="combat" icon={ShieldAlert} label="Fight" />
-                <TabButton id="transitions" icon={Shuffle} label="Trans" />
+                <TabButton id="stages" icon={Layers} label="Stages" />
+                <TabButton id="rewards" icon={Target} label="Rewards" />
+                <TabButton id="training" icon={Cpu} label="Train" />
                 <TabButton id="presets" icon={Database} label="Sets" />
             </div>
 
             {/* CONTENT AREA */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-gray-700">
 
-                {/* GENERAL TAB */}
-                {activeTab === 'general' && (
+                {/* STAGES TAB */}
+                {activeTab === 'stages' && (
                     <div className="space-y-6">
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Curriculum</h3>
-                            <div className="space-y-1">
-                                <label className="text-xs text-gray-400 font-mono">STAGE</label>
-                                <select
-                                    className="w-full bg-gray-900 border border-gray-700 text-white text-xs rounded p-2 font-mono focus:border-neon-cyan outline-none"
-                                    value={curriculum.stage}
-                                    onChange={(e) => setCurriculum(prev => ({ ...prev, stage: parseInt(e.target.value) }))}
-                                >
-                                    <option value={0}>0: NURSERY (Safe Mode)</option>
-                                    <option value={1}>1: SOLO (Time Trial)</option>
-                                    <option value={2}>2: DUEL (1v1 Bot)</option>
-                                    <option value={3}>3: TEAM (2v2 Bot)</option>
-                                    <option value={4}>4: LEAGUE (Self Play)</option>
-                                </select>
-                            </div>
-                            <Slider label="BOT DIFFICULTY" min={0} max={1} step={0.05} value={curriculum.difficulty} valueDisplay={curriculum.difficulty.toFixed(2)}
-                                onChange={(e) => setCurriculum(prev => ({ ...prev, difficulty: parseFloat(e.target.value) }))} />
+                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-1">
+                            <label className="text-xs text-gray-400 font-mono block mb-2">ACTIVE STAGE</label>
+                            <select
+                                className="w-full bg-gray-900 border border-gray-700 text-white text-sm rounded p-2 font-mono focus:border-neon-cyan outline-none"
+                                value={curriculum.stage}
+                                onChange={(e) => setCurriculum(prev => ({ ...prev, stage: parseInt(e.target.value) }))}
+                            >
+                                <option value={0}>0: NURSERY</option>
+                                <option value={1}>1: SOLO TRIAL</option>
+                                <option value={2}>2: DUEL (1v1)</option>
+                                <option value={3}>3: TEAM (2v2)</option>
+                                <option value={4}>4: LEAGUE</option>
+                            </select>
                         </div>
 
+                        {renderStageConfig()}
+                    </div>
+                )}
+
+                {/* REWARDS TAB */}
+                {activeTab === 'rewards' && (
+                    <div className="space-y-6">
+                        {/* Navigation / Progress */}
                         <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Training</h3>
+                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Navigation & Progress</h3>
+
+                            <Slider label="PROGRESS (DELTA)" min={0} max={10.0} step={0.1} value={rewards.weights[RW.PROGRESS]}
+                                onChange={(e) => setWeight(RW.PROGRESS, parseFloat(e.target.value))} />
+
+                            <Slider label="MAGNET (PROXIMITY)" min={0} max={20.0} step={0.5} value={rewards.weights[RW.MAGNET]}
+                                onChange={(e) => setWeight(RW.MAGNET, parseFloat(e.target.value))} />
+
+                            <Slider label="ORIENTATION (GUIDE)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.ORIENTATION]}
+                                onChange={(e) => setWeight(RW.ORIENTATION, parseFloat(e.target.value))} />
+
+                            <Slider label="CHECKPOINT (BONUS)" min={0} max={5000} step={100} value={rewards.weights[RW.CHECKPOINT]}
+                                onChange={(e) => setWeight(RW.CHECKPOINT, parseFloat(e.target.value))} />
+                        </div>
+
+                        {/* Penalties */}
+                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
+                            <h3 className="text-[10px] text-red-400/70 font-bold uppercase tracking-widest">Penalties</h3>
+                            <Slider label="STEP COST (TIME)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.STEP_PENALTY]}
+                                onChange={(e) => setWeight(RW.STEP_PENALTY, parseFloat(e.target.value))} />
+                            <Slider label="WRONG WAY" min={0} max={20.0} step={1} value={rewards.weights[RW.WRONG_WAY]}
+                                onChange={(e) => setWeight(RW.WRONG_WAY, parseFloat(e.target.value))} />
+                        </div>
+
+                        {/* Combat / Terminal */}
+                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
+                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Combat & Outcomes</h3>
+                            <Slider label="WIN" min={0} max={20000} step={500} value={rewards.weights[RW.WIN]}
+                                onChange={(e) => setWeight(RW.WIN, parseFloat(e.target.value))} />
+                            <Slider label="LOSS" min={0} max={10000} step={500} value={rewards.weights[RW.LOSS]}
+                                onChange={(e) => setWeight(RW.LOSS, parseFloat(e.target.value))} />
+                            <Slider label="HUMILIATION (BLOCKER)" min={0} max={2000} step={50} value={rewards.weights[RW.COLLISION_BLOCKER]}
+                                onChange={(e) => setWeight(RW.COLLISION_BLOCKER, parseFloat(e.target.value))} />
+                            <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit}
+                                onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />
+                        </div>
+                    </div>
+                )}
+
+                {/* TRAINING TAB */}
+                {activeTab === 'training' && (
+                    <div className="space-y-6">
+                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
+                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Hyperparameters</h3>
                             <Slider label="LEARNING RATE" min={1e-5} max={1e-3} step={1e-5} value={hyperparams.lr} valueDisplay={hyperparams.lr.toExponential(1)}
                                 onChange={(e) => setHyperparams(prev => ({ ...prev, lr: parseFloat(e.target.value) }))} />
                             <Slider label="ENTROPY COEF" min={0} max={0.1} step={0.001} value={hyperparams.ent_coef} valueDisplay={hyperparams.ent_coef.toFixed(3)}
                                 onChange={(e) => setHyperparams(prev => ({ ...prev, ent_coef: parseFloat(e.target.value) }))} />
-                        </div>
-                    </div>
-                )}
-
-                {/* OBJECTIVES TAB */}
-                {activeTab === 'objectives' && (
-                    <div className="space-y-6">
-                        {/* Global Factors */}
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Strategic Factors</h3>
-                            <Slider label="DENSE FACTOR (TAU)" min={0} max={1} step={0.05} value={rewards.tau} valueDisplay={rewards.tau.toFixed(2)}
-                                onChange={(e) => setRewards(prev => ({ ...prev, tau: parseFloat(e.target.value) }))} />
-                            <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit} valueDisplay={rewards.team_spirit.toFixed(2)}
-                                onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />
-                        </div>
-
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Outcome Rewards</h3>
-                            <Slider label="WIN" min={0} max={20000} step={500} value={rewards.weights[RW.WIN]}
-                                onChange={(e) => setWeight(RW.WIN, parseFloat(e.target.value))} />
-                            <Slider label="LOSS PENALTY" min={0} max={20000} step={500} value={rewards.weights[RW.LOSS]}
-                                onChange={(e) => setWeight(RW.LOSS, parseFloat(e.target.value))} />
-                            <Slider label="CHECKPOINT" min={0} max={5000} step={100} value={rewards.weights[RW.CHECKPOINT]}
-                                onChange={(e) => setWeight(RW.CHECKPOINT, parseFloat(e.target.value))} />
-                            <Slider label="CP STREAK SCALE" min={0} max={500} step={10} value={rewards.weights[RW.CHECKPOINT_SCALE]}
-                                onChange={(e) => setWeight(RW.CHECKPOINT_SCALE, parseFloat(e.target.value))} />
-                        </div>
-                    </div>
-                )}
-
-                {/* PHYSICS TAB */}
-                {activeTab === 'physics' && (
-                    <div className="space-y-6">
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Movement</h3>
-                            <Slider label="VELOCITY (DOT)" min={0} max={2.0} step={0.05} value={rewards.weights[RW.VELOCITY]} valueDisplay={rewards.weights[RW.VELOCITY].toFixed(2)}
-                                onChange={(e) => setWeight(RW.VELOCITY, parseFloat(e.target.value))} />
-                            <Slider label="STEP PENALTY" min={0} max={50} step={0.5} value={rewards.weights[RW.STEP_PENALTY]}
-                                onChange={(e) => setWeight(RW.STEP_PENALTY, parseFloat(e.target.value))} />
-                        </div>
-
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Alignment</h3>
-                            <Slider label="ORIENTATION" min={0} max={1.0} step={0.001} value={rewards.weights[RW.ORIENTATION]} valueDisplay={rewards.weights[RW.ORIENTATION].toFixed(3)}
-                                onChange={(e) => setWeight(RW.ORIENTATION, parseFloat(e.target.value))} />
-                            <Slider label="WRONG WAY PENALTY" min={0} max={50} step={1} value={rewards.weights[RW.WRONG_WAY]}
-                                onChange={(e) => setWeight(RW.WRONG_WAY, parseFloat(e.target.value))} />
-                        </div>
-                    </div>
-                )}
-
-                {/* COMBAT TAB */}
-                {activeTab === 'combat' && (
-                    <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                        <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Collisions</h3>
-                        <Slider label="BLOCKER HIT (REWARD)" min={0} max={5000} step={100} value={rewards.weights[RW.COLLISION_BLOCKER]}
-                            onChange={(e) => setWeight(RW.COLLISION_BLOCKER, parseFloat(e.target.value))} />
-                        <Slider label="RUNNER HIT (PENALTY)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.COLLISION_RUNNER]}
-                            onChange={(e) => setWeight(RW.COLLISION_RUNNER, parseFloat(e.target.value))} />
-                        <Slider label="TEAMMATE HIT (PENALTY)" min={0} max={10.0} step={0.5} value={rewards.weights[RW.COLLISION_MATE]}
-                            onChange={(e) => setWeight(RW.COLLISION_MATE, parseFloat(e.target.value))} />
-                    </div>
-                )}
-
-                {/* TRANSITIONS TAB */}
-                {activeTab === 'transitions' && (
-                    <div className="space-y-6">
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 1 (Solo) -{'>'} 2</h3>
-                            <Slider label="EFFICIENCY THRESHOLD" min={10} max={100} step={1} value={transitions.solo_efficiency_threshold}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, solo_efficiency_threshold: parseFloat(e.target.value) }))} />
-                            <Slider label="CONSISTENCY THRESHOLD" min={1000} max={3000} step={50} value={transitions.solo_consistency_threshold}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, solo_consistency_threshold: parseFloat(e.target.value) }))} />
-                        </div>
-
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 2 (Duel) -{'>'} 3</h3>
-                            <Slider label="CONSISTENCY WR" min={0.5} max={1.0} step={0.01} value={transitions.duel_consistency_wr} valueDisplay={transitions.duel_consistency_wr.toFixed(2)}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_consistency_wr: parseFloat(e.target.value) }))} />
-                            <Slider label="ABSOLUTE WR" min={0.5} max={1.0} step={0.01} value={transitions.duel_absolute_wr} valueDisplay={transitions.duel_absolute_wr.toFixed(2)}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_absolute_wr: parseFloat(e.target.value) }))} />
-                            <Slider label="CONSISTENCY CHECKS" min={1} max={20} step={1} value={transitions.duel_consistency_checks}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_consistency_checks: parseFloat(e.target.value) }))} />
-                        </div>
-
-                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
-                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Stage 3 (Team) -{'>'} 4</h3>
-                            <Slider label="CONSISTENCY WR" min={0.5} max={1.0} step={0.01} value={transitions.team_consistency_wr} valueDisplay={transitions.team_consistency_wr.toFixed(2)}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, team_consistency_wr: parseFloat(e.target.value) }))} />
-                            <Slider label="ABSOLUTE WR" min={0.5} max={1.0} step={0.01} value={transitions.team_absolute_wr} valueDisplay={transitions.team_absolute_wr.toFixed(2)}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, team_absolute_wr: parseFloat(e.target.value) }))} />
-                            <Slider label="CONSISTENCY CHECKS" min={1} max={20} step={1} value={transitions.team_consistency_checks}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, team_consistency_checks: parseFloat(e.target.value) }))} />
                         </div>
                     </div>
                 )}

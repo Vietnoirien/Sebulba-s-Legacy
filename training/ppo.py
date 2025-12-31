@@ -19,7 +19,7 @@ import shutil
 from simulation.env import (
     PodRacerEnv, 
     RW_WIN, RW_LOSS, RW_CHECKPOINT, RW_CHECKPOINT_SCALE, 
-    RW_VELOCITY, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
+    RW_PROGRESS, RW_MAGNET, RW_PROXIMITY, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
     RW_STEP_PENALTY, RW_ORIENTATION, RW_WRONG_WAY, RW_COLLISION_MATE,
     DEFAULT_REWARD_WEIGHTS
 )
@@ -57,8 +57,8 @@ class PPOTrainer:
         self.generation = 0
         self.iteration = 0
         
-        # Reward Tensors [4096, 11]
-        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 12), device=self.device)
+        # Reward Tensors [4096, 13]
+        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 13), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((14,), device=self.device)
@@ -90,7 +90,7 @@ class PPOTrainer:
             if i > 0:
                  # Mutate orientation and velocity slightly
                  weights[RW_ORIENTATION] *= random.uniform(0.8, 1.2)
-                 weights[RW_VELOCITY] *= random.uniform(0.8, 1.2)
+                 weights[RW_PROGRESS] *= random.uniform(0.8, 1.2)
             
             self.population.append({
                 'id': i,
@@ -235,10 +235,11 @@ class PPOTrainer:
              "tau": 0.0, "beta": 0.0, "weights": {
                  "win": w[RW_WIN], "loss": w[RW_LOSS], 
                  "checkpoint": w[RW_CHECKPOINT], "checkpoint_scale": w[RW_CHECKPOINT_SCALE],
-                 "velocity": w[RW_VELOCITY], "collision_runner": w[RW_COLLISION_RUNNER],
+                 "progress": w[RW_PROGRESS], "collision_runner": w[RW_COLLISION_RUNNER],
                  "collision_blocker": w[RW_COLLISION_BLOCKER], "step_penalty": w[RW_STEP_PENALTY],
                  "orientation": w[RW_ORIENTATION], "wrong_way_alpha": w[RW_WRONG_WAY],
-                 "collision_mate": w[RW_COLLISION_MATE]
+                 "collision_mate": w[RW_COLLISION_MATE], "proximity": w[RW_PROXIMITY],
+                 "magnet": w[RW_MAGNET]
              }
         }
 

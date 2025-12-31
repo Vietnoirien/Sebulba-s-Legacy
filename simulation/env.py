@@ -20,7 +20,6 @@ class PodRacerEnv:
              track_gen_type="max_entropy",
              active_pods=[0],
              use_bots=False,
-             dynamic_reward_base=200.0,
              step_penalty_active_pods=[0],
              orientation_active_pods=[0]
         )
@@ -315,24 +314,24 @@ class PodRacerEnv:
         """
         Stepping the Environment.
         actions: [B, 4, 4] (Thrust, Angle, Shift, Boost)
-        reward_weights: [B, 12] (Per-environment weights, taken from Agent)
+        reward_weights: [B, 13] (Per-environment weights, taken from Agent)
         tau: float, Dense Reward Annealing factor (0.0 = Full Dense, 1.0 = Full Sparse)
         team_spirit: float, 0.0=Selfish, 1.0=Cooperative. Blends rewards.
         """
         if reward_weights is None:
             # Construct default tensor
-            reward_weights = torch.zeros((self.num_envs, 12), device=self.device)
+            reward_weights = torch.zeros((self.num_envs, 13), device=self.device)
             # Use default dict to fill 
             # Note: We can pre-compute this but for robust fallback:
             for k, v in DEFAULT_REWARD_WEIGHTS.items():
                 reward_weights[:, k] = v
         
-        # Unpack weights [B, 11]
+        # Unpack weights [B, 13]
         w_win = reward_weights[:, RW_WIN] # Sparse
         w_loss = reward_weights[:, RW_LOSS] # Sparse
         w_checkpoint = reward_weights[:, RW_CHECKPOINT] # Individual (Motor)
         w_chk_scale = reward_weights[:, RW_CHECKPOINT_SCALE] # Individual
-        w_velocity = reward_weights[:, RW_VELOCITY] # Individual
+        w_progress = reward_weights[:, RW_PROGRESS] # Individual (Replaces VELOCITY)
         w_col_run = reward_weights[:, RW_COLLISION_RUNNER] # Individual
         w_col_block = reward_weights[:, RW_COLLISION_BLOCKER] # Individual
         w_step_pen = reward_weights[:, RW_STEP_PENALTY] # Individual
@@ -340,6 +339,7 @@ class PodRacerEnv:
         w_wrong_way = reward_weights[:, RW_WRONG_WAY] # Individual
         w_col_mate = reward_weights[:, RW_COLLISION_MATE] # Individual
         w_prox = reward_weights[:, RW_PROXIMITY] # Individual
+        w_magnet = reward_weights[:, RW_MAGNET] # Individual (New)
         
         # --- Team Spirit Blending ---
         # Modify weights based on spirit
@@ -357,7 +357,7 @@ class PodRacerEnv:
         
         w_checkpoint = w_checkpoint * indiv_mult
         w_chk_scale = w_chk_scale * indiv_mult
-        w_velocity = w_velocity * indiv_mult
+        w_progress = w_progress * indiv_mult
         
         # Blocker/Team Interaction:
         # Blocker Reward IS a team contribution, so maybe boost it?
@@ -374,8 +374,7 @@ class PodRacerEnv:
         # Boost: > 0.5
         act_boost = actions[..., 3] > 0.5
         
-        # --- Bot Logic for Stage 1 (Duel) & Stage 2 (Team) ---
-        # --- Bot Logic ---
+        # --- Bot Logic (Same as before) ---
         if self.config.use_bots:
             bot_pods = self.config.bot_pods
             
@@ -395,11 +394,7 @@ class PodRacerEnv:
                 desired_deg = torch.rad2deg(desired_rad)
                 
                 # --- Dynamic Difficulty Scaling ---
-                # Difficulty 0.0: Thrust 60%, Steering Error +/- 15 deg
-                # Difficulty 1.0: Thrust 100%, Steering Error 0 deg
-                
                 # 1. Steering Noise
-                # Lower difficulty = More noise
                 noise_scale = (1.0 - self.bot_difficulty) * self.bot_config.difficulty_noise_scale
                 noise = (torch.rand(self.num_envs, device=self.device) * 2.0 - 1.0) * noise_scale
                 desired_deg += noise
@@ -433,25 +428,8 @@ class PodRacerEnv:
         collisions = self.physics.step(act_thrust, act_angle, act_shield, act_boost)
         
         # Calculate Collision Flags for Telemetry [Batch, 4]
-        # Sum collisions per pod. If > 0, flag = 1.0
-        # collisions is [B, 4, 4] (magnitudes)
-        # Sum over last dim (4) -> [B, 4]
         col_sums = collisions.sum(dim=2)
         collision_flags = (col_sums > 0).float()
-        
-        # Update Roles based on new state (logic: "Assign it based on race state")
-        # Do we update before or after rewards? 
-        # Plan implies Role dictates Policy and Reward weights.
-        # Usually update based on 'current' state before taking action?
-        # But here valid state is post-physics.
-        # Let's update roles NOW so rewards align with the *resulting* state?
-        # Or roles from *previous* state used for observing are the ones that matter?
-        # "The AI knows 'I am the Runner'". That was decided at obs time step t.
-        # So we should use `self.is_runner` (computed at t) to calculate rewards for t->t+1?
-        # Yes. The action was taken knowing "I am Runner", so reward should judge it as Runner.
-        
-        # So we use `self.is_runner` AS IS for rewards, THEN update it for next obs.
-
         
         # 2. Reward Containers
         rewards_indiv = torch.zeros((self.num_envs, 4), device=self.device) # Pure Individual
@@ -469,209 +447,83 @@ class PodRacerEnv:
         # --- DENSE REWARDS (Individual) ---
         new_dists = torch.zeros_like(self.prev_dist)
         
+        # Annealing
+        dense_mult = (1.0 - tau)
+        if isinstance(dense_mult, torch.Tensor):
+             dense_mult = dense_mult.squeeze()
+        
         for i in range(4):
             next_ids = self.next_cp_id[:, i]
             batch_indices = torch.arange(self.num_envs, device=self.device)
             target_pos = self.checkpoints[batch_indices, next_ids]
             curr_pos = self.physics.pos[:, i]
+            
+            # --- A. Progress Reward (Prev Dist - Curr Dist) ---
             new_dists[:, i] = torch.norm(target_pos - curr_pos, dim=1)
             
-        if self.curriculum_stage == STAGE_DUEL:
-             # Just ensure bot logic doesn't crash
-             pass
-
-        # A. Velocity Reward (Dot Product)
-        # Reward = Velocity dot TargetDirection
-        # This encourages moving TOWARDS the target explicitly.
+            # Positive = Approach, Negative = Retreat
+            progress = self.prev_dist[:, i] - new_dists[:, i]
+            
+            # Apply Progress Reward
+            # Note: 1 unit distance = 1 point if weight=1.0. 
+            rewards_indiv[:, i] += progress * w_progress * dense_mult
+            
+            # --- B. Magnet Reward (Proximity Center) ---
+            # If inside Approach Radius (e.g. 2 * Checkpoint Radius or just Checkpoint Radius?)
+            # Let's say we pull them in from 1.5x Radius.
+            MAGNET_RADIUS = CHECKPOINT_RADIUS * 1.5
+            dist = new_dists[:, i]
+            
+            in_magnet_mask = dist < MAGNET_RADIUS
+            if in_magnet_mask.any():
+                # Score 0.0 to 1.0 (Close)
+                magnet_score = (1.0 - (dist[in_magnet_mask] / MAGNET_RADIUS))
+                # Square it to make the center much more attractive than the edge? No, linear is stable.
+                rewards_indiv[in_magnet_mask, i] += magnet_score * w_magnet[in_magnet_mask] * dense_mult
         
-        # We need Target Dir [B, 4, 2]
-        # new_dists is [B, 4]
-        # We need 'diff' vector from the loop above?
-        # Let's re-compute vectorized for safety/clarity.
-        
-        # Gather Target Pos [B, 4, 2]
-        batch_indices = torch.arange(self.num_envs, device=self.device).unsqueeze(1).expand(-1, 4)
-        target_pos_all = self.checkpoints[batch_indices, self.next_cp_id]
-        
-        # Diff
-        diff_vec = target_pos_all - self.physics.pos # [B, 4, 2]
-        dist_vec = torch.norm(diff_vec, dim=2, keepdim=True) + 1e-5
-        target_dir = diff_vec / dist_vec # [B, 4, 2] Normalized
-        
-        # Project Velocity
-        # Vel: [B, 4, 2]
-        vel_proj = (self.physics.vel * target_dir).sum(dim=2) # [B, 4] scalars
-        
-        # Apply Weights
-        # w_velocity is [B]
-        # scale is [B, 1]
-        scale = w_velocity.unsqueeze(1)
-        
-        # Scaling for Dense Reward (prevent positive feedback loop)
-        S_VEL = self.reward_scaling_config.velocity_scale_const
-        v_scaled = vel_proj * scale * S_VEL
-        
-        # Annealing
-        dense_mult = (1.0 - tau)
-        if isinstance(dense_mult, torch.Tensor):
-             dense_mult = dense_mult.squeeze()
-
-        rewards_indiv[:, 0] += v_scaled[:, 0] * dense_mult
-        rewards_indiv[:, 1] += v_scaled[:, 1] * dense_mult
-        rewards_indiv[:, 2] += v_scaled[:, 2] * dense_mult
-        rewards_indiv[:, 3] += v_scaled[:, 3] * dense_mult
-
-        # B. Orientation Reward
-        # ------------------------------------------------
-        # 1. Calculate desired angle to next checkpoint
-        # 2. Compare with current angle
-        # 3. Reward alignment
-        
-        # We need vector to next CP for ALL 4 pods
-        # We already computed 'new_dists' which uses 'target_pos'.
-        # Let's re-gather target_pos or reuse if possible. 
-        # For simplicity/clarity, re-gather or compute vectors.
-        
-        
-        orientation_rewards = torch.zeros((self.num_envs, 4), device=self.device)
-        # w_orient is [B]
-        
-        # Optimization: if ALL w_orient are 0, skip.
-        if w_orient.sum() > 0.0:
+        # --- C. Orientation Reward (Soft Guidance / Wrong Way) ---
+        if w_orient.sum() > 0.0 or w_wrong_way.sum() > 0.0:
             for i in range(4):
                 next_ids = self.next_cp_id[:, i]
                 batch_indices = torch.arange(self.num_envs, device=self.device)
-                target_pos = self.checkpoints[batch_indices, next_ids] # [B, 2]
-                curr_pos = self.physics.pos[:, i] # [B, 2]
+                target_pos = self.checkpoints[batch_indices, next_ids] 
+                curr_pos = self.physics.pos[:, i] 
                 
-                # Vector to target
                 diff = target_pos - curr_pos
-                # Angle of vector
-                target_angle = torch.atan2(diff[:, 1], diff[:, 0]) # Radians
-                
-                # Current Angle
-                curr_angle = torch.deg2rad(self.physics.angle[:, i]) # Radians
-                
-                # Alignment = Cos(Target - Current)
+                target_angle = torch.atan2(diff[:, 1], diff[:, 0])
+                curr_angle = torch.deg2rad(self.physics.angle[:, i])
                 alignment = torch.cos(target_angle - curr_angle)
 
-                # --- Refined Orientation Logic ---
-                # 1. Positive Reward: Narrow Cone (~60 deg)
-                # Map [0.5, 1.0] -> [0.0, 1.0]
-                THRESHOLD = self.reward_scaling_config.orientation_threshold
-                pos_score = torch.clamp((alignment - THRESHOLD) / (1.0 - THRESHOLD), 0.0, 1.0)
+                # Positive Reward (Soft Guidance)
+                if w_orient.sum() > 0.0:
+                    THRESHOLD = self.reward_scaling_config.orientation_threshold
+                    pos_score = torch.clamp((alignment - THRESHOLD) / (1.0 - THRESHOLD), 0.0, 1.0)
+                    rewards_indiv[:, i] += pos_score * w_orient * dense_mult
 
-                # 2. Negative Penalty: Wrong Way
-                # If cos < 0, apply penalty weight.
-                neg_score = torch.zeros_like(alignment)
-                neg_mask = alignment < 0
-                neg_score[neg_mask] = alignment[neg_mask] * w_wrong_way[neg_mask]
+                # Negative Penalty (Wrong Way)
+                neg_mask = alignment < -0.5 # Strictly facing away
+                if neg_mask.any():
+                    # Heavy penalty for wrong way
+                    rewards_indiv[neg_mask, i] += alignment[neg_mask] * w_wrong_way[neg_mask]
 
-                # Combine
-                # Note: w_orient scales the positive reward.
-                # The negative penalty is already scaled by w_wrong_way.
-                orientation_rewards[:, i] = (pos_score * w_orient) + neg_score
-            
-            # Mask inactive pods to prevent noise/bias
-            # SOLO: Pod 0 active.
-            # DUEL: Pod 0, 2 active.
-            # LEAGUE: All active.
-            # Mask inactive pods to prevent noise/bias
-            # Use configuration
-            # Invert Logic: Set everything to 0.0, then Enable active.
-            # actually masking is usually: if i in active: pass else 0.
-            
-            active_orient = self.config.orientation_active_pods
-            for i in range(4):
-                if i not in active_orient:
-                     orientation_rewards[:, i] = 0.0
 
-            # Add to rewards
-            rewards_indiv[:, 0] += orientation_rewards[:, 0] * dense_mult
-            rewards_indiv[:, 1] += orientation_rewards[:, 1] * dense_mult
-            rewards_indiv[:, 2] += orientation_rewards[:, 2] * dense_mult
-            rewards_indiv[:, 3] += orientation_rewards[:, 3] * dense_mult
-
-        # C. Step Penalty (Individual per Active Pod)
-        # Apply to all
-        # Progressive Penalty:
-        # 0 penalty for first half of timeout.
-        # Linearly scales to 1.0 * step_pen by end of timeout.
-        
-        # Step Penalty
-        # w_step_pen [B]
-        
+        # --- D. Step Penalty (Constant) ---
+        # Fixed negative reward per step to encourage speed.
         if w_step_pen.sum() > 0:
-            # elapsed = TIMEOUT_STEPS - self.timeouts # [B, 4]
-            # But self.timeouts was NOT decremented yet? 
-            # self.timeouts starts at TIMEOUT_STEPS. 
-            # We decrement at line 572. So currently it is the value for THIS step.
-            # wait, step() is called for t -> t+1.
-            # self.timeouts represents "steps remaining".
-            
-            steps_remaining = self.timeouts # [B, 4]
-            total_steps = self.config.timeout_steps
-            
-            # Linear Penalty from Step 0
-            # Alpha goes from 0.0 (at Start) to 1.0 (at Timeout) ? 
-            # Or constant?
-            # Standard RL: Constant penalty per step encourages speed.
-            # "Alpha" approach was to panic them at the end.
-            # Let's simple normalize: penalty = w_step_pen * (1.0) ?
-            # No, let's keep the "Urgency" factor but make it start immediately.
-            # alpha = (Total - Remaining) / Total
-            # At Start (Rem=100, Total=100): Alpha = 0.
-            # At End (Rem=0): Alpha = 1.
-            # This means step 0 is free? We want to remove free buffer.
-            # We want Alpha > 0 immediately?
-            # actually, standard -0.1 per step is best.
-            # Let's try: alpha = 1.0 always.
-            # Then w_step_pen (15.0) is subtracted every step.
-            # That's huge. 15 * 100 steps = -1500. Matches Win Reward.
-            # This effectively puts a "Time Limit" cost.
-            # Let's go with alpha = 1.0 (Constant Penalty).
-            
-            # Correction: User might prefer the "Panic" curve but without the zero-start.
-            # Let's use alpha = 0.2 + 0.8 * (Progress)
-            # Starts at 0.2, ends at 1.0.
-            
-            # [REFACTOR] Fixed Step Penalty (User Request)
-            # Annealing causes "bad orientation" (waiting behavior).
-            # Force constant penalty.
-            alpha = 1.0 
-            # (Old logic: alpha = 0.2 + 0.8 * progress)
-            # Team 1: Pods 2, 3
-            
-            # We average the penalty for the team? Or sum?
-            # Original code:
-            # rewards[:, 0] -= step_pen
-            # that applied 'step_pen' ONCE per team per step?
-            # Or is it per pod?
-            # The original code just did `rewards -= step_pen`.
-            # If we have 2 pods, and both are penalized, should we subtract 2 * step_pen?
-            # The original code: `rewards[:, 0] -= step_pen`.
-            # This implies a SINGLE penalty term per step for the team, regardless of pod count?
-            # Or maybe it assumes implicit aggregation.
-            # Let's Avg the alpha for the active pods of the team to maintain scale.
-            
-            # Active Masks
-            # Solo: Pod 0 only.
-            # Duel: Pod 0, 2 only.
-            # League: All.
-            
-            active_mask = torch.zeros_like(steps_remaining, dtype=torch.bool)
-            # Active Masks
-            active_mask = torch.zeros_like(steps_remaining, dtype=torch.bool)
+            active_mask = torch.zeros((self.num_envs, 4), dtype=torch.bool, device=self.device)
             for i in self.config.step_penalty_active_pods:
                 active_mask[:, i] = True
                 
-            # Apply Step Penalty Individually (Broadcast alpha)
-            # w_step_pen is [B]
+            # Apply to active pods
+            # w_step_pen is positive in config (e.g. 1.0), so we subtract it.
+            # Assuming w_step_pen broadcastable [B]
+            pen_val = w_step_pen.unsqueeze(1).expand(-1, 4)
             
-            # Pod 0
-            for i in range(4):
-                if active_mask[:, i].any():
-                     rewards_indiv[:, i] -= w_step_pen * alpha
+            # Only apply where mask is true
+            # rewards_indiv -= pen_val * active_mask.float()
+            # Careful with shape
+            penalty_tensor = pen_val * active_mask.float()
+            rewards_indiv -= penalty_tensor
 
         
         # D. Checkpoints (Individual Progress)
@@ -790,43 +642,14 @@ class PodRacerEnv:
                 infos["cp_steps"][pass_idx, i] = taken_steps
                 self.steps_last_cp[pass_idx, i] = 0
                 
-                # --- Dynamic Reward (The Carrot) ---
-                # Reward based on time remaining to incentivize speed.
-                # Formula: R = MinBase + (Bonus * (Rem/Total))
-                # User Plan: Decay from 2000 (Fast) to 200 (Slow).
-                # So MinBase = 200. MaxBase = 2000. Bonus = 1800.
-                
-                if self.config.dynamic_reward_base > 500.0:
-                    # Nursery-like (High Base, Low decay influence relative to Base?)
-                    # Or just use the value.
-                    dynamic_part = self.config.dynamic_reward_base
-                else:
-                    MIN_BASE = self.config.dynamic_reward_base
-                    TOTAL_BONUS = self.reward_scaling_config.dynamic_reward_bonus
-                    
-                    # Fraction remaining:
-                    steps_rem = self.timeouts[pass_idx, i].float()
-                    time_frac = torch.clamp(steps_rem / TIMEOUT_STEPS, 0.0, 1.0)
-                    
-                    dynamic_part = MIN_BASE + (TOTAL_BONUS * time_frac)
-                
-                # Use Weight to scale the whole thing if needed (e.g. RW_CHECKPOINT is multiplier?)
-                # Code uses w_checkpoint[pass_idx] directly as reward.
-                # We interpret RW_CHECKPOINT as the "MaxBase" in config (2000.0).
-                # But here we implement the logic explicitly.
-                
-                # Should we ignore w_checkpoint? 
-                # Better to use w_checkpoint as the "Max Possible Reward" scaler.
-                # If w_checkpoint is 2000.0:
-                # then dynamic_part is calculated relative to 2000.
-                
-                # Let's trust the Explicit Values derived from plan.
-                
+                # Simple Checkpoint Reward (Constant)
+                base_reward = w_checkpoint[pass_idx]
+
                 # Streak Bonus
                 streak_bonus = (streak - 1.0) * w_chk_scale[pass_idx]
                 
                 # Total
-                total_reward = dynamic_part + streak_bonus
+                total_reward = base_reward + streak_bonus
                 
                 # --- TIME EXTENSION ---
                 # --- TIME EXTENSION ---
@@ -849,7 +672,7 @@ class PodRacerEnv:
                 
                 # Scaling for Dense Reward (Explicit S_VEL)
                 # Correction applies to POD i
-                rewards_indiv[pass_idx, i] += overshoot_dist * scale[pass_idx, 0] * 0.001 * dense_mult # S_VEL=0.001
+                rewards_indiv[pass_idx, i] += overshoot_dist * w_progress[pass_idx] * dense_mult
 
         # Calculate dist_to_next for Nursery Metric [B, 4]
         # We need distance to next checkpoint for ALL pods, regardless of passing.
@@ -915,9 +738,9 @@ class PodRacerEnv:
                      # [CRITICAL UPDATE] Timeout Penalty must exceed Loss Penalty (5000.0)
                      # otherwise agents prefer to spin/stall than race and lose.
                      if self.curriculum_stage == STAGE_DUEL:
-                         MAX_PENALTY = 15000.0 # Huge penalty to force finishing
+                         MAX_PENALTY = TIMEOUT_PENALTY_DUEL # Huge penalty to force finishing
                      else:
-                         MAX_PENALTY = 2500.0
+                         MAX_PENALTY = TIMEOUT_PENALTY_STANDARD
                      
                      penalty = MAX_PENALTY * (1.0 - progress)
                      

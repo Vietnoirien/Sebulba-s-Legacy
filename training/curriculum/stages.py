@@ -4,7 +4,7 @@ from training.curriculum.base import Stage
 from config import TrainingConfig, CurriculumConfig, EnvConfig
 from simulation.env import (
     RW_WIN, RW_LOSS, RW_CHECKPOINT, RW_CHECKPOINT_SCALE, 
-    RW_VELOCITY, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
+    RW_PROGRESS, RW_MAGNET, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
     RW_STEP_PENALTY, RW_ORIENTATION, RW_WRONG_WAY, RW_COLLISION_MATE,
     STAGE_NURSERY, STAGE_SOLO, STAGE_DUEL, STAGE_TEAM, STAGE_LEAGUE
 )
@@ -23,7 +23,6 @@ class NurseryStage(Stage):
             num_checkpoints_fixed=3,
             active_pods=[0],
             use_bots=False,
-            dynamic_reward_base=2000.0,
             step_penalty_active_pods=[0],
             orientation_active_pods=[0],
             timeout_steps=self.config.nursery_timeout_steps
@@ -59,7 +58,7 @@ class NurseryStage(Stage):
         return None, ""
 
     def update_step_penalty(self, base_penalty: float) -> float:
-        return 10.0 # Small incentive to move
+        return 1.0 # Standard Fixed Penalty
 
     @property
     def target_evolve_interval(self) -> int:
@@ -68,8 +67,7 @@ class NurseryStage(Stage):
 class SoloStage(Stage):
     def __init__(self, config: CurriculumConfig):
         super().__init__("Solo", config)
-        self.low_efficiency_counter = 0
-        self.penalty_mode_active = False
+        # Dynamic Penalty Logic Removed (Standardized)
 
     def get_active_pods(self) -> List[int]:
         return [0]
@@ -80,7 +78,6 @@ class SoloStage(Stage):
             track_gen_type="max_entropy",
             active_pods=[0],
             use_bots=False,
-            dynamic_reward_base=200.0,
             step_penalty_active_pods=[0],
             orientation_active_pods=[0]
         )
@@ -121,39 +118,13 @@ class SoloStage(Stage):
                 
                 return STAGE_DUEL, f"Eff {avg_eff:.1f} < {self.config.solo_efficiency_threshold}"
         
-        # --- Dynamic Penalty Logic (Anti-Stagnation) ---
-        # If Efficiency matches "Safe Walk" (< Entry) but Consistency is high, 
-        # it means they are farming. Force them to run.
-        if avg_eff < self.config.solo_penalty_efficiency_threshold and avg_cons > self.config.solo_penalty_consistency_threshold:
-            self.low_efficiency_counter += 1
-            if self.low_efficiency_counter >= 2:
-                if not self.penalty_mode_active:
-                     trainer.log(f">>> DYNAMIC PENALTY ACTIVATED: Efficiency {avg_eff:.1f} < {self.config.solo_penalty_efficiency_threshold} for 2 gens. Penalizing Step ({self.config.solo_dynamic_step_penalty}) <<<")
-                self.penalty_mode_active = True
-        
-        elif self.penalty_mode_active:
-             # HYSTERESIS: Only deactivate if they improve significantly (Eff > Exit) OR crash (Cons < Threshold)
-             if avg_eff > self.config.solo_penalty_exit_efficiency_threshold or avg_cons < self.config.solo_penalty_consistency_threshold:
-                 trainer.log(f">>> DYNAMIC PENALTY DEACTIVATED: Efficiency {avg_eff:.1f} > {self.config.solo_penalty_exit_efficiency_threshold} or Cons dropped. Resetting Step Penalty. <<<")
-                 self.penalty_mode_active = False
-                 self.low_efficiency_counter = 0
-             else:
-                 # In Hysteresis Zone: Stay Active
-                 pass
-        
-        else:
-            # Not active and not meeting activation criteria -> Reset counter
-            self.low_efficiency_counter = 0
-
         return None, ""
         
     def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
         return False, ""
 
     def update_step_penalty(self, base_penalty: float) -> float:
-        if self.penalty_mode_active:
-            return self.config.solo_dynamic_step_penalty # Force Speed (Dynamic)
-        return 10.0 # Fixed Base Penalty (User Request: 10.0)
+        return 1.0 # Fixed Standard Penalty
 
 class DuelStage(Stage):
     def __init__(self, config: CurriculumConfig):
@@ -171,7 +142,6 @@ class DuelStage(Stage):
             active_pods=[0, 2],
             use_bots=True, 
             bot_pods=[2],
-            dynamic_reward_base=200.0,
             step_penalty_active_pods=[0, 2],
             orientation_active_pods=[0, 2]
         )
@@ -296,16 +266,7 @@ class DuelStage(Stage):
         return None, ""
 
     def update_step_penalty(self, base_penalty: float) -> float:
-        # We need access to bot_difficulty. Wait, it's not passed here. 
-        # But this method is called by Trainer usually. 
-        # Base class signature: update_step_penalty(base_penalty).
-        # We might need to change signature or access env via context?
-        # Actually Trainer calls this. Trainer could pass 'difficulty'.
-        # For now, let's assume we can't easily access env here unless passed.
-        # But update() is stateful.
-        # Let's fix this method signature in Base if needed, OR Trainer handles annealing.
-        # Let's keep it simple: Trainer calls `stage.on_step` or similar? 
-        return base_penalty # Fallback, assumes Trainer handles annealing if logic is complex
+        return 1.0
 
 class TeamStage(Stage):
     def __init__(self, config: CurriculumConfig):
@@ -343,7 +304,6 @@ class TeamStage(Stage):
             active_pods=[0, 1, 2, 3],
             use_bots=True,
             bot_pods=[2, 3],
-            dynamic_reward_base=200.0,
             step_penalty_active_pods=[0, 1, 2, 3],
             orientation_active_pods=[0, 1, 2, 3]
         )
@@ -450,7 +410,6 @@ class LeagueStage(Stage):
             track_gen_type="max_entropy",
             active_pods=[0, 1, 2, 3],
             use_bots=False, 
-            dynamic_reward_base=200.0,
             step_penalty_active_pods=[0, 1, 2, 3],
             orientation_active_pods=[0, 1, 2, 3]
         )
@@ -471,4 +430,4 @@ class LeagueStage(Stage):
         return None, ""
         
     def update_step_penalty(self, base_penalty: float) -> float:
-        return 0.0
+        return 1.0
