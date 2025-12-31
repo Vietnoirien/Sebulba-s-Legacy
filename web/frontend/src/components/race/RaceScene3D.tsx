@@ -1,6 +1,6 @@
 import React, { useRef, useLayoutEffect, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls, Grid, useTexture, useGLTF } from '@react-three/drei'
+import { OrbitControls, Grid, useTexture, useGLTF, Text } from '@react-three/drei'
 import { SkeletonUtils } from 'three-stdlib'
 import { useGameState, useGameActions } from '../../context/GameStateContext'
 import * as THREE from 'three'
@@ -45,6 +45,7 @@ import arcs2GlbUrl from '../../assets/models/Pods/pod-2/arcs-2.glb'
 // @ts-ignore
 import thrusters2GlbUrl from '../../assets/models/Pods/pod-2/thrusters-2.glb'
 import pod2SkinUrl from '../../assets/models/Pods/pod-2/pod-2-skin.png'
+import racerFontUrl from '../../fonts/racer/RACER___.TTF'
 
 // Constants matching backend (Physics world is roughly 16000x9000)
 const SCALE_FACTOR = 0.01
@@ -118,6 +119,21 @@ const SingleCheckpoint: React.FC<{
 
             <group ref={groupRef}>
                 <primitive object={Model} />
+                {!isStart && (
+                    <Text
+                        position={[0, 4, 0]}
+                        rotation={[0, Math.PI / 4, 0]}
+                        fontSize={2}
+                        color="white"
+                        anchorX="center"
+                        anchorY="middle"
+                        outlineWidth={0.1}
+                        outlineColor="black"
+                        font={racerFontUrl}
+                    >
+                        {cp.id}
+                    </Text>
+                )}
             </group>
 
             {showPod1 && (
@@ -249,7 +265,7 @@ const CheckpointsRenderer: React.FC = () => {
             const currentNext = pod.next_checkpoint ?? 1
             const prevNext = lastPodNextCps.current[index]
 
-            if (prevNext !== undefined && currentNext !== prevNext && prevNext !== 0) {
+            if (prevNext !== undefined && currentNext !== prevNext) {
                 // Optimization: ignore undefined (start)
                 // Detected crossing of prevNext
                 const passedCpId = prevNext
