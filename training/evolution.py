@@ -146,3 +146,44 @@ def calculate_crowding_distance(objectives: np.ndarray, fronts: List[List[int]])
                 distance[curr_id] += d
                 
     return distance
+
+def lexicographic_sort(population: List[Dict], stage: int) -> List[List[int]]:
+    """
+    Sorts population strictly based on hierarchical objectives.
+    Returns a list of lists (fronts), where each list contains one index.
+    This effectively assigns a unique rank 0..N to each agent.
+    """
+    # Helper for sort key
+    def get_key(p):
+        # Handle None values safely
+        wins = p.get('ema_wins', 0.0)
+        if wins is None: wins = 0.0
+        
+        cons = p.get('ema_consistency', 0.0)
+        if cons is None: cons = 0.0
+        
+        eff = p.get('ema_efficiency', 999.0)
+        if eff is None: eff = 999.0
+        
+        nov = p.get('novelty_score', 0.0)
+        if nov is None: nov = 0.0
+        
+        nur = p.get('nursery_score', 0.0)
+        if nur is None: nur = 0.0
+        
+        # STAGE Switch
+        if stage == 0: # Nursery
+            # 1. Consistency, 2. Nursery Score, 3. Novelty
+            return (cons, nur, nov)
+        else: # Solo (and potential fallback)
+            # 1. Wins, 2. Consistency, 3. -Efficiency, 4. Novelty
+            return (wins, cons, -eff, nov)
+
+    # Sort population indices
+    # We want DESCENDING order for the key (Higher is better)
+    indices = list(range(len(population)))
+    indices.sort(key=lambda i: get_key(population[i]), reverse=True)
+    
+    # Return as list of lists to mimic fronts: [[best], [2nd], ... [worst]]
+    # This assigns Rank 0 to best, Rank 1 to 2nd best, etc.
+    return [[i] for i in indices]

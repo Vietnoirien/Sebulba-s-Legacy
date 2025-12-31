@@ -26,7 +26,7 @@ from simulation.env import (
 from models.deepsets import PodAgent
 from training.self_play import LeagueManager
 from training.normalization import RunningMeanStd
-from training.evolution import calculate_novelty, fast_non_dominated_sort, calculate_crowding_distance
+from training.evolution import calculate_novelty, fast_non_dominated_sort, calculate_crowding_distance, lexicographic_sort
 from training.rnd import RNDModel
 from config import *
 from training.curriculum.manager import CurriculumManager
@@ -408,23 +408,34 @@ class PPOTrainer:
             p['novelty_score'] = novelty_scores[i]
             p['ema_dist'] = novelty_scores[i] # Just log it
             
-        # 3. Define Objectives for NSGA-II
-        # We need to format objective matrix [N, M]
-        # We assume HIGHER IS BETTER for all columns passed to sort.
-        # So we invert Efficiency (Lower is better).
-        
-        # 3. Define Objectives for NSGA-II
-        objectives_list = []
-        for p in self.population:
-             objectives_list.append(self.curriculum.get_objectives(p))
-
-        objectives_np = np.array(objectives_list)
-        
-        # 4. NSGA-II Sort
-        fronts = fast_non_dominated_sort(objectives_np)
+        # 3. Hybrid Selection Strategy
+        if self.env.curriculum_stage <= STAGE_SOLO:
+             # Strict Lexicographic Sort (Nursery & Solo)
+             # Returns [[best], [2nd], ...]
+             fronts = lexicographic_sort(self.population, self.env.curriculum_stage)
+             objectives_np = None 
+        else:
+             # NSGA-II for Duel+ (Strategy Diversity)
+             # Objectives: [Win Rate, Novelty]
+             # We explicitly ignore Consistency/Efficiency to prevent "safe loser" preservation
+             objectives_list = []
+             for p in self.population:
+                  w = p.get('ema_wins', 0.0)
+                  if w is None: w = 0.0
+                  n = p.get('novelty_score', 0.0)
+                  if n is None: n = 0.0
+                  objectives_list.append([w, n])
+                  
+             objectives_np = np.array(objectives_list)
+             fronts = fast_non_dominated_sort(objectives_np)
         
         # Calculate Crowding Distance
-        crowding = calculate_crowding_distance(objectives_np, fronts)
+        if objectives_np is not None:
+             crowding = calculate_crowding_distance(objectives_np, fronts)
+        else:
+             # For Lexicographic, rank is strict, so crowding is irrelevant for selection.
+             # Set to 0.0
+             crowding = np.zeros(self.config.pop_size)
         
         # Assign Fronts and Rank to Agents for Logging
         for rank, front in enumerate(fronts):
@@ -449,34 +460,40 @@ class PPOTrainer:
         # Update Pareto Indices (Rank 0) for Telemetry
         self.pareto_indices = [p['id'] for p in self.population if p.get('rank') == 0]
         # Logging
+        # Logging
         elite_ids = [p['id'] for p in elites]
-        self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
-        self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
-        if self.env.curriculum_stage == STAGE_NURSERY:
-             # Stage 0: Show Consistency and Novelty
-             cons = elites[0]['ema_consistency']
-             nov = elites[0]['novelty_score']
-             self.log(f"Elite (Crowded) Stats | Cons: {cons:.1f} | Nov: {nov:.2f}")
+        
+        if self.env.curriculum_stage <= STAGE_SOLO:
+             # Lexicographic Logging
+             self.log(f"Population Sorted: {len(fronts)} ranks (Strict)")
+             self.log(f"Top Elites: {elite_ids}")
+             
+             if self.env.curriculum_stage == STAGE_NURSERY:
+                  cons = elites[0]['ema_consistency']
+                  nov = elites[0]['novelty_score']
+                  self.log(f"Best Agent Stats | Cons: {cons:.1f} | Nov: {nov:.2f}")
+             elif self.env.curriculum_stage == STAGE_SOLO:
+                  eff = elites[0]['ema_efficiency']
+                  cons = elites[0]['ema_consistency']
+                  wins = elites[0].get('ema_wins', 0.0)
+                  nov = elites[0]['novelty_score']
+                  score = cons - eff
+                  self.log(f"Best Agent Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Wins: {wins:.1%} | Nov: {nov:.2f} | Score: {score:.1f}")
 
-        elif self.env.curriculum_stage == STAGE_SOLO:
-             # Stage 1: Show Consistency and Efficiency
-             eff = elites[0]['ema_efficiency']
-             cons = elites[0]['ema_consistency']
-             wins = elites[0].get('ema_wins', 0.0)
-             nov = elites[0]['novelty_score']
-             score = cons - eff
-             self.log(f"Elite (Crowded) Stats | Eff: {eff:.1f} | Cons: {cons:.1f} | Wins: {wins:.1%} | Nov: {nov:.2f} | Score: {score:.1f}")
-        elif self.env.curriculum_stage == STAGE_NURSERY:
-             self.log(f"Elite (Crowded) Stats | Nursery Score: {elites[0]['nursery_score']:.1f} | Nov: {elites[0]['novelty_score']:.2f}")
-        elif self.env.curriculum_stage == STAGE_DUEL:
-             self.log(f"Elite (Crowded) Stats | Wins: {elites[0]['ema_wins']:.1%} | Nov: {elites[0]['novelty_score']:.2f} | (Cons: {elites[0]['ema_consistency']:.1f})")
-             # Also show Best Winner if different
-             best_winner = max(front0_indices, key=lambda i: self.population[i].get('ema_wins', 0.0))
-             bw = self.population[best_winner]
-             if bw['id'] != elites[0]['id']:
-                  self.log(f"Elite (Heuristic) Stats | Wins: {bw['ema_wins']:.1%} | Nov: {bw['novelty_score']:.2f}")
         else:
-             self.log(f"Elite (Crowded) Stats | Eff: {elites[0]['ema_efficiency']:.1f} | Wins: {elites[0]['ema_wins']:.1%} | Nov: {elites[0]['novelty_score']:.2f}")
+             # NSGA-II Logging
+             self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
+             self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
+             
+             if self.env.curriculum_stage == STAGE_DUEL:
+                  # Duel: Wins & Novelty
+                  self.log(f"Elite (Crowded) Stats | Wins: {elites[0]['ema_wins']:.1%} | Nov: {elites[0]['novelty_score']:.2f}")
+             elif self.env.curriculum_stage == STAGE_NURSERY:
+                  # Fallback (Should not happen given if check above)
+                  pass 
+             else:
+                  # League/Team
+                  self.log(f"Elite (Crowded) Stats | Wins: {elites[0]['ema_wins']:.1%} | Nov: {elites[0]['novelty_score']:.2f}")
 
         # 6. Tournament Selection & Replacement
         # Identify Culls (Bottom 25% by Rank/Crowding)

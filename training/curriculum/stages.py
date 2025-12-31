@@ -96,8 +96,13 @@ class SoloStage(Stage):
         
     def update(self, trainer) -> Tuple[Optional[int], str]:
         # Strategy A: Proficiency & Consistency
-        sorted_by_consistency = sorted(trainer.population, key=lambda x: x.get('ema_consistency') or 0.0, reverse=True)
-        elites = sorted_by_consistency[:5]
+        # Sort by Wins (Desc), Consistency (Desc), Efficiency (Asc -> -Eff)
+        sorted_elites = sorted(trainer.population, key=lambda x: (
+            x.get('ema_wins', 0.0) or 0.0,
+            x.get('ema_consistency', 0.0) or 0.0,
+            -(x.get('ema_efficiency', 999.0) or 999.0)
+        ), reverse=True)
+        elites = sorted_elites[:5]
         
         avg_eff = np.mean([p.get('efficiency_score') if p.get('efficiency_score') is not None else 999.0 for p in elites])
         avg_cons = np.mean([p.get('ema_consistency') if p.get('ema_consistency') is not None else 0.0 for p in elites])
