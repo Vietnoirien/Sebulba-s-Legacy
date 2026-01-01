@@ -119,16 +119,16 @@ class CurriculumConfig:
     solo_penalty_efficiency_threshold: float = STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD
     solo_penalty_exit_efficiency_threshold: float = STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD
     solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
-    solo_min_win_rate: float = 0.90
+    solo_min_win_rate: float = 0.70
     
     # Stage 1 -> 2 (Duel Graduation)
-    duel_consistency_wr: float = 0.82
-    duel_absolute_wr: float = 0.84
+    duel_consistency_wr: float = 0.75
+    duel_absolute_wr: float = 0.78
     duel_consistency_checks: int = 5
     
     # Stage 2 -> 3 (Team Graduation)
-    team_consistency_wr: float = 0.85
-    team_absolute_wr: float = 0.88
+    team_consistency_wr: float = 0.75
+    team_absolute_wr: float = 0.78
     team_consistency_checks: int = 5
 
     # League Thresholds (Implicit/Monitor)
@@ -174,10 +174,10 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_LOSS: 2000.0,
     RW_CHECKPOINT: 2000.0,
     RW_CHECKPOINT_SCALE: 50.0,
-    RW_PROGRESS: 1.0, # 1.0 Reward per unit of distance closed. 
+    RW_PROGRESS: 0.2, # Scaled down to prevent overpowering Checkpoint (2000) 
     RW_COLLISION_RUNNER: 0.5,
     RW_COLLISION_BLOCKER: 1000.0,
-    RW_STEP_PENALTY: 1.0, # Fixed Constant (Negative in ENV)
+    RW_STEP_PENALTY: 10.0, # Increased to 10.0 to make Time Cost significant (Speed Incentive)
     RW_ORIENTATION: 1.0, # Reduced to soft guidance
     RW_WRONG_WAY: 10.0,
     RW_COLLISION_MATE: 2.0,

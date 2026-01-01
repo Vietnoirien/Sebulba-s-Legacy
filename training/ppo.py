@@ -1222,7 +1222,7 @@ class PPOTrainer:
                 if self.env.curriculum_stage == STAGE_DUEL:
                     current_tau = 0.5
                 elif self.env.curriculum_stage == STAGE_TEAM:
-                    current_tau = 0.0
+                    current_tau = 0.75
                 elif self.env.curriculum_stage == STAGE_LEAGUE:
                     current_tau = 0.9
                 

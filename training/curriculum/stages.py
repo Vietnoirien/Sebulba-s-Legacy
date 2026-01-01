@@ -58,7 +58,7 @@ class NurseryStage(Stage):
         return None, ""
 
     def update_step_penalty(self, base_penalty: float) -> float:
-        return 1.0 # Standard Fixed Penalty
+        return base_penalty
 
     @property
     def target_evolve_interval(self) -> int:
@@ -124,7 +124,7 @@ class SoloStage(Stage):
         return False, ""
 
     def update_step_penalty(self, base_penalty: float) -> float:
-        return 1.0 # Fixed Standard Penalty
+        return base_penalty
 
 class DuelStage(Stage):
     def __init__(self, config: CurriculumConfig):
@@ -266,7 +266,7 @@ class DuelStage(Stage):
         return None, ""
 
     def update_step_penalty(self, base_penalty: float) -> float:
-        return 1.0
+        return base_penalty
 
 class TeamStage(Stage):
     def __init__(self, config: CurriculumConfig):
@@ -430,4 +430,4 @@ class LeagueStage(Stage):
         return None, ""
         
     def update_step_penalty(self, base_penalty: float) -> float:
-        return 1.0
+        return base_penalty

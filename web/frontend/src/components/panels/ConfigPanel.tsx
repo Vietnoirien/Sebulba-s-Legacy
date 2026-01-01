@@ -31,20 +31,20 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v4', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v6', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
             [RW.CHECKPOINT]: 2000.0,
             [RW.CHECKPOINT_SCALE]: 50.0,
-            [RW.PROGRESS]: 1.0,
+            [RW.PROGRESS]: 0.2,
             [RW.MAGNET]: 10.0,
             [RW.ORIENTATION]: 1.0,
             [RW.WRONG_WAY]: 10.0,
             [RW.COLLISION_BLOCKER]: 1000.0,
             [RW.COLLISION_RUNNER]: 0.5,
             [RW.COLLISION_MATE]: 2.0,
-            [RW.STEP_PENALTY]: 1.0,
+            [RW.STEP_PENALTY]: 10.0,
             [RW.PROXIMITY]: 5.0
         },
         tau: 0.0,
