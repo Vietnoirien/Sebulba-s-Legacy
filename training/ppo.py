@@ -464,7 +464,7 @@ class PPOTrainer:
         # Logging
         elite_ids = [p['id'] for p in elites]
         
-        if self.env.curriculum_stage <= STAGE_SOLO:
+        if self.env.curriculum_stage <= STAGE_TEAM:
              # Lexicographic Logging
              self.log(f"Population Sorted: {len(fronts)} ranks (Strict)")
              self.log(f"Top Elites: {elite_ids}")
