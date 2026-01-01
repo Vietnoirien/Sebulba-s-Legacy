@@ -766,7 +766,7 @@ export const RaceScene3D: React.FC = () => {
                                 <input
                                     type="range"
                                     min="0.1"
-                                    max="2.0"
+                                    max="5.0"
                                     step="0.1"
                                     value={playbackSpeed}
                                     onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}

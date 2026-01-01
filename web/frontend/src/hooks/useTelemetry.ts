@@ -182,7 +182,11 @@ export const useTelemetry = () => {
                 // PLAYBACK
                 const queue = replayQueue.current
                 if (queue.length > 0) {
-                    const PLAYBACK_SPEED = playbackSpeedRef.current;
+                    // RESCALE: User wants "1.0" in UI to correspond to old "0.25"
+                    // So we multiply the UI value by 0.25 to get the actual step increment
+                    const SPEED_SCALER = 0.25;
+                    const PLAYBACK_SPEED = playbackSpeedRef.current * SPEED_SCALER;
+
                     const nextCursor = cursor + PLAYBACK_SPEED;
 
                     // Check boundaries
@@ -264,8 +268,9 @@ export const useTelemetry = () => {
         [ReadyState.UNINSTANTIATED]: 'Uninstantiated',
     }[readyState] as ConnectionStatus
 
-    const [playbackSpeed, _setPlaybackSpeed] = useState(0.5)
-    const playbackSpeedRef = useRef(0.5)
+    // Default 1.0 now equals old 0.25 behavior
+    const [playbackSpeed, _setPlaybackSpeed] = useState(1.0)
+    const playbackSpeedRef = useRef(1.0)
 
     const setPlaybackSpeed = useCallback((speed: number) => {
         _setPlaybackSpeed(speed)

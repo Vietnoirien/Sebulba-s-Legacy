@@ -410,7 +410,7 @@ class PPOTrainer:
             p['ema_dist'] = novelty_scores[i] # Just log it
             
         # 3. Hybrid Selection Strategy
-        if self.env.curriculum_stage <= STAGE_SOLO:
+        if self.env.curriculum_stage <= STAGE_TEAM:
              # Strict Lexicographic Sort (Nursery & Solo)
              # Returns [[best], [2nd], ...]
              fronts = lexicographic_sort(self.population, self.env.curriculum_stage)
