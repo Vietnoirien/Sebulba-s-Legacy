@@ -138,17 +138,17 @@ class CurriculumConfig:
     wr_warning: float = 0.45 # Trigger Warning/Streak
     
     # Progression Thresholds (Difficulty Increase)
-    wr_progression_standard: float = 0.60 # +0.05
-    wr_progression_turbo: float = 0.70 # +0.10
-    wr_progression_super_turbo: float = 0.85 # +0.20
-    wr_progression_insane_turbo: float = 0.95 # +0.50
+    wr_progression_standard: float = 0.55 # +0.01
+    wr_progression_turbo: float = 0.60 # +0.02
+    wr_progression_super_turbo: float = 0.75 # +0.05
+    wr_progression_insane_turbo: float = 0.90 # +0.1
     
     # Difficulty Steps
     diff_step_decrease: float = 0.02
-    diff_step_standard: float = 0.02
-    diff_step_turbo: float = 0.05
-    diff_step_super_turbo: float = 0.10
-    diff_step_insane_turbo: float = 0.20
+    diff_step_standard: float = 0.01
+    diff_step_turbo: float = 0.02
+    diff_step_super_turbo: float = 0.05
+    diff_step_insane_turbo: float = 0.10
     
     # Nursery Specifics
     nursery_timeout_steps: int = 300

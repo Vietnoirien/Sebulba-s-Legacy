@@ -1267,85 +1267,6 @@ class PPOTrainer:
                      norm_rewards[:, 0] += r_int[0] * self.rnd_coef
 
                 # Split rewards back to agents
-                for i in range(self.config.pop_size):
-                    start_env = i * self.config.envs_per_agent
-                    end_env = start_env + self.config.envs_per_agent
-                    
-                    r_chunks = []
-                    d_chunks = []
-                    
-                    raw_sum = 0
-                    raw_count = 0
-                    
-                    d_slice = dones[start_env:end_env]
-                    
-                    for p_idx, pid in enumerate(active_pods):
-                        r_slice = norm_rewards[start_env:end_env, pid]
-                        r_chunks.append(r_slice)
-                        d_chunks.append(d_slice)
-                        
-                        # Logging Raw (Blended or Pure? Let's log Blended as that's what we see)
-                        # Actually pure env feedback is useful (rewards_all).
-                        raw_r = rewards_all[start_env:end_env, pid]
-                        raw_sum += raw_r.mean().item()
-                        raw_count += 1
-                        
-                    flat_r = torch.cat(r_chunks, dim=0)
-                    flat_d = torch.cat(d_chunks, dim=0)
-                        
-                    self.agent_batches[i]['rewards'][step] = flat_r.detach()
-                    self.agent_batches[i]['dones'][step] = flat_d.float().detach()
-                    
-                    # Track Score for Evolution (Use RAW rewards)
-                    if raw_count > 0:
-                        self.population[i]['reward_score'] += (raw_sum / raw_count)
-                    
-                    # Track Cumulative Metrics (Laps & Checkpoints)
-                    # infos['laps_completed'] is [4096, 4]
-                    # We only care about active pods for this agent
-                    # Since evolution is based on "Agent Performance", we sum ALL events by pods controlled by this agent.
-                    
-                    # Checkpoints
-                    # Filter infos first
-                    agent_infos_laps = infos['laps_completed'][start_env:end_env] # [128, 4]
-                    agent_infos_cps = infos['checkpoints_passed'][start_env:end_env] # [128, 4]
-                    agent_start_streak = infos['current_streak'][start_env:end_env] # [128, 4]
-                    
-                    # Mask by active pods
-                    active_laps = 0
-                    active_cps = 0
-                    for pid in active_pods:
-                         active_laps += agent_infos_laps[:, pid].sum().item()
-                         # FILTER CP1 FARMERS: Only count if Streak > 0 (i.e. Heading to CP2+)
-                         # Must multiply by Event (cps) to avoid counting every frame!
-                         # agent_start_streak is PRE-UPDATE.
-                         # CP1 Hit: Streak 0 -> Filtered.
-                         # CP2 Hit: Streak 1 -> Counted.
-                         passed_mask = (agent_infos_cps[:, pid] > 0)
-                         streak_mask = (agent_start_streak[:, pid] > 0)
-                         active_cps += (passed_mask & streak_mask).sum().item()
-                         
-                    self.population[i]['laps_score'] += active_laps
-                    self.population[i]['checkpoints_score'] += active_cps
-                    
-                    # Accumulate Role Metrics
-                    agent_infos_vel = infos['runner_velocity'][start_env:end_env] # [128, 4]
-                    agent_infos_dmg = infos['blocker_damage'][start_env:end_env] # [128, 4]
-                    
-                    active_vel_sum = 0.0
-                    active_dmg_sum = 0.0
-                    
-                    for pid in active_pods:
-                         active_vel_sum += agent_infos_vel[:, pid].sum().item()
-                         active_dmg_sum += agent_infos_dmg[:, pid].sum().item()
-                         
-                    self.population[i]['avg_runner_vel'] += active_vel_sum
-                    self.population[i]['avg_blocker_dmg'] += active_dmg_sum
-                    
-                    # Track New Metrics
-                    start_streak = agent_start_streak # Reuse extracted
-                    start_steps = infos['cp_steps'][start_env:end_env] # [128, 4]
-
                 # --- Vectorized Nursery Metric Tracking ---
                 # Done OUTSIDE the loop to avoid 128x overhead
                 agent_dists = infos.get('dist_to_next', None)
@@ -1380,10 +1301,78 @@ class PPOTrainer:
                      # Update Buffer
                      self.nursery_metrics_buffer[:, 0] += agent_scores
                      self.nursery_metrics_buffer[:, 1] += agent_counts
-                    
+
+                # --- Per-Agent Stats Loop ---
                 for i in range(self.config.pop_size):
                     start_env = i * self.config.envs_per_agent
                     end_env = start_env + self.config.envs_per_agent
+                    
+                    r_chunks = []
+                    d_chunks = []
+                    
+                    raw_sum = 0
+                    raw_count = 0
+                    
+                    d_slice = dones[start_env:end_env]
+                    
+                    for p_idx, pid in enumerate(active_pods):
+                        r_slice = norm_rewards[start_env:end_env, pid]
+                        r_chunks.append(r_slice)
+                        d_chunks.append(d_slice)
+                        
+                        # Logging Raw
+                        raw_r = rewards_all[start_env:end_env, pid]
+                        raw_sum += raw_r.mean().item()
+                        raw_count += 1
+                        
+                    flat_r = torch.cat(r_chunks, dim=0)
+                    flat_d = torch.cat(d_chunks, dim=0)
+                        
+                    self.agent_batches[i]['rewards'][step] = flat_r.detach()
+                    self.agent_batches[i]['dones'][step] = flat_d.float().detach()
+                    
+                    # Track Score for Evolution (Use RAW rewards)
+                    if raw_count > 0:
+                        self.population[i]['reward_score'] += (raw_sum / raw_count)
+                    
+                    # Track Cumulative Metrics (Laps & Checkpoints)
+                    # infos['laps_completed'] is [4096, 4]
+                    
+                    # Checkpoints
+                    # Filter infos first
+                    agent_infos_laps = infos['laps_completed'][start_env:end_env] # [128, 4]
+                    agent_infos_cps = infos['checkpoints_passed'][start_env:end_env] # [128, 4]
+                    agent_start_streak = infos['current_streak'][start_env:end_env] # [128, 4]
+                    
+                    # Mask by active pods
+                    active_laps = 0
+                    active_cps = 0
+                    for pid in active_pods:
+                         active_laps += agent_infos_laps[:, pid].sum().item()
+                         passed_mask = (agent_infos_cps[:, pid] > 0)
+                         streak_mask = (agent_start_streak[:, pid] > 0)
+                         active_cps += (passed_mask & streak_mask).sum().item()
+                         
+                    self.population[i]['laps_score'] += active_laps
+                    self.population[i]['checkpoints_score'] += active_cps
+                    
+                    # Accumulate Role Metrics
+                    agent_infos_vel = infos['runner_velocity'][start_env:end_env] # [128, 4]
+                    agent_infos_dmg = infos['blocker_damage'][start_env:end_env] # [128, 4]
+                    
+                    active_vel_sum = 0.0
+                    active_dmg_sum = 0.0
+                    
+                    for pid in active_pods:
+                         active_vel_sum += agent_infos_vel[:, pid].sum().item()
+                         active_dmg_sum += agent_infos_dmg[:, pid].sum().item()
+                         
+                    self.population[i]['avg_runner_vel'] += active_vel_sum
+                    self.population[i]['avg_blocker_dmg'] += active_dmg_sum
+                    
+                    # Track New Metrics
+                    start_streak = agent_start_streak 
+                    start_steps = infos['cp_steps'][start_env:end_env] 
                     
                     # Max Streak
                     current_max = start_streak.max().item()
@@ -1398,38 +1387,17 @@ class PPOTrainer:
                         self.population[i]['total_cp_hits'] += mask.sum().item()
                     
                     # Wins (Track from env.winners on Reset)
-                    # winners is [4096] containing winner team index (0 or 1) or -1.
-                    # We need to attribute this to the agent.
-                    # This happens only when Done is True.
-                    # The env.winners is updated in env.step? 
-                    # Actually env.winners is usually set when 'dones' is set. 
-                    # Taking a look at logic, we might need to rely on the fact that 
-                    # if done[e] is true, we check winners[e].
-                    
-                    # Filter for done envs in this agent's batch
                     agent_dones = d_slice.bool()
                     if agent_dones.any():
                         # Global indices
-                        # start + relative indices of dones
-                        done_indices_rel = torch.nonzero(agent_dones).flatten()
-                        done_indices_global = start_env + done_indices_rel
+                        idx_rel = torch.nonzero(agent_dones).flatten()
+                        idx_global = start_env + idx_rel
                         
-                        current_winners = self.env.winners[done_indices_global] # [N_Done]
-                        
-                        # My pods:
-                        # If Solo: Pod 0 is Team 0.
-                        # If Duel: Pod 0 is Team 0.
-                        # If I am Team 0 (which I am, as Agent control Pod 0/1)
-                        # We just check if winner == 0.
-                        
-                        # Note: self.env.winners returns TEAM index (0 or 1).
-                        # In Solo/Duel, 'Agent' controls Team 0.
-                        # So a win is if winner == 0.
+                        current_winners = self.env.winners[idx_global]
                         
                         win_count = (current_winners == 0).sum().item()
                         self.population[i]['wins'] += win_count
                         
-                        # Count matches (any done is a match end)
                         match_count = agent_dones.sum().item()
                         self.population[i]['matches'] += match_count
                     
