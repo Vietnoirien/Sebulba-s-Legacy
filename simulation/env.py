@@ -79,6 +79,7 @@ class PodRacerEnv:
         
         # Rank Tracking for Potential-Based Reward
         self.prev_ranks = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device)
+        self.rank_range_cache = torch.arange(4, device=self.device).unsqueeze(0).expand(num_envs, 4)
         
         self.reset()
         
@@ -111,32 +112,26 @@ class PodRacerEnv:
         n_cps_local = self.num_checkpoints[env_ids]
         n_cps_expanded = n_cps_local.unsqueeze(1).expand(-1, 4)
         
-        effective_cp[mask_finish] = n_cps_expanded[mask_finish]
+        # Optimized: Use torch.where to avoid clone/mask assignment overhead
+        # effective_cp = mask ? n_cps : next_cp
+        effective_cp = torch.where(next_cp == 0, n_cps_expanded, next_cp)
 
         # Score calculation (Higher is better)
         # Using larger multipliers to ensure strict hierarchy: Lap > CP > Dist
         scores = (laps * 10000.0) + (effective_cp * 100.0) + dist_score
         
         # Sort scores descending to get ranks
-        # argsort(descending) gives indices of [1st place, 2nd place, ...]
-        # We want the rank FOR each pod.
-        # e.g. scores=[10, 30, 20, 5] -> sorted indices=[1, 2, 0, 3] (Pod 1 is 0th, Pod 2 is 1st...)
-        # To get rank map:
-        # ranks[sorted_indices] = 0, 1, 2, 3
-        
         sorted_indices = torch.argsort(scores, dim=1, descending=True)
         
         # Creating rank tensor
         m_ranks = torch.zeros_like(scores, dtype=torch.long)
         
-        # Broadcase ranges?
-        # A bit tricky in pure torch vectorized without loops if doing row-wise assignment to permuted indices.
-        # scatter is the friend here.
-        # src = arange(4).expand(N, 4)
-        # index = sorted_indices
-        # result.scatter_(1, index, src)
-        
-        rang = torch.arange(4, device=self.device).unsqueeze(0).expand(len(env_ids), 4)
+        # Optimized: Use pre-cached range if available, else allocate (fallback)
+        if hasattr(self, 'rank_range_cache') and self.rank_range_cache.shape[0] == len(scores):
+             rang = self.rank_range_cache
+        else:
+             rang = torch.arange(4, device=self.device).unsqueeze(0).expand(len(scores), 4)
+
         m_ranks.scatter_(1, sorted_indices, rang)
         
         return m_ranks
@@ -577,7 +572,8 @@ class PodRacerEnv:
         w_rank = reward_weights[:, RW_RANK]
         if w_rank.sum() > 0.0:
             # Calculate current ranks
-            curr_ranks = self._get_ranks(torch.arange(self.num_envs, device=self.device))
+            # Optimized: Pass slice(None) to avoid arange(num_envs) allocation
+            curr_ranks = self._get_ranks(slice(None))
             
             # Potential diff: Prev - Curr
             # Rank 1 (2nd) -> Rank 0 (1st). Diff = 1 - 0 = +1 (Improvement)
