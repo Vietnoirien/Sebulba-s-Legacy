@@ -33,7 +33,22 @@ def fuse_normalization_actor(model, rms_stats):
     layer = model.enemy_encoder[0]
     W = layer.weight.data.cpu().numpy() 
     b = layer.bias.data.cpu().numpy()
-    W_new = W / std_e[None, :]
+
+    # Mask out zero-variance features to prevent weight explosion
+    # Std is approx 0.01 if var=0 due to epsilon.
+    # If std < 0.02, we treat it as constant.
+    # Contribution from constant feature X=Mean is: (Mean - Mean)/Std * W = 0.
+    # So we can just set W_new = 0.
+    
+    # We construct W_new safely
+    W_new = np.zeros_like(W)
+    safe_mask = std_e > 0.05 # Threshold above epsilon 0.01
+    W_new[:, safe_mask] = W[:, safe_mask] / std_e[None, safe_mask]
+    
+    # Bias shift: b_new = b - sum(W_new * mean)
+    # Since W_new is 0 for unsafe features, they don't contribute shift.
+    # And since Input matches Mean for those features, (Input-Mean)/Std is 0.
+    # So mathematical equivalence is preserved.
     bias_shift = np.sum(W_new * mean_e[None, :], axis=1)
     b_new = b - bias_shift
     layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
@@ -50,13 +65,19 @@ def fuse_normalization_actor(model, rms_stats):
     W_ctx  = W[:, 31:47] # 16 (Latent)
     W_cp   = W[:, 47:53] # 6
     
-    W_self_new = W_self / std_s[None, :]
+    # Safe Self
+    W_self_new = np.zeros_like(W_self)
+    safe_s = std_s > 0.05
+    W_self_new[:, safe_s] = W_self[:, safe_s] / std_s[None, safe_s]
     shift_self = np.sum(W_self_new * mean_s[None, :], axis=1)
 
     # W_tm and W_ctx take latent inputs from previous layer (ReLU output), 
     # so they don't need input normalization.
     
-    W_cp_new = W_cp / std_c[None, :]
+    # Safe CP
+    W_cp_new = np.zeros_like(W_cp)
+    safe_c = std_c > 0.05
+    W_cp_new[:, safe_c] = W_cp[:, safe_c] / std_c[None, safe_c]
     shift_cp = np.sum(W_cp_new * mean_c[None, :], axis=1)
     
     W_new = np.concatenate([W_self_new, W_tm, W_ctx, W_cp_new], axis=1)
@@ -158,7 +179,6 @@ class A(N):
         self.c=0
         w1,b1,w2,b2=self.gw(416),self.gw(32),self.gw(512),self.gw(16)
         
-        # Helper for Encoder
         def enc(inp):
             h=[0.0]*32
             for r in range(32):
@@ -172,15 +192,12 @@ class A(N):
                 z[r]=a
             return z
             
-        # Encode Enemies
         encs=[]
         for en in e: encs.append(enc(en))
         g=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
         
-        # Encode Teammate
         tm = enc(t)
         
-        # Backbone Input: Self(15)+TM(16)+Ctx(16)+CP(6) = 53
         x=s+tm+g+c
         x=self.lin(x,53,HD,True)
         x=self.lin(x,HD,HD,True)
@@ -206,7 +223,7 @@ def tl(vx,vy,a):
 def solve():
     mr=A(WR,SC_R); mb=A(WB,SC_B)
 
-    # print("Init done", file=sys.stderr)
+
     input(); C=int(input())
     cps=[list(map(int,input().split())) for _ in range(C)]
     laps,p_ncp,to,scd,bavl=[0]*4,[1]*4,[100]*4,[0]*4,[True,True]
@@ -217,8 +234,7 @@ def solve():
         for i in range(4):
             p=pods[i]
             if p['n']!=p_ncp[i]:
-                if p['n']==1 and p_ncp[i]==C: laps[i]+=1
-                elif p['n']==0 and p_ncp[i]==C-1: laps[i]+=1
+                if p['n']==1 and p_ncp[i]==0: laps[i]+=1
                 to[i]=100
             else: to[i]-=1
             p_ncp[i]=p['n']
@@ -226,7 +242,8 @@ def solve():
         for i in range(4):
             p=pods[i]; cp=cps[p['n']] if p['n']<len(cps) else cps[0]
             d=math.sqrt((p['x']-cp[0])**2+(p['y']-cp[1])**2)
-            scrs.append(laps[i]*50000+p['n']*500+(20000-d))
+            eff_cp = C if p['n'] == 0 else p['n']
+            scrs.append(laps[i]*5000000+eff_cp*50000+(20000-d))
         run=[False]*4
         if scrs[0]>=scrs[1]: run[0]=True
         else: run[1]=True
@@ -277,7 +294,7 @@ def solve():
             cf,cr=tl(cx,cy,p['a'])
             ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
             
-            # --- DUAL LOGIC ---
+
             if run[i]: out=mr.f(oself,otm,oen,ocp)
             else: out=mb.f(oself,otm,oen,ocp)
             
