@@ -15,7 +15,7 @@ class PodActor(nn.Module):
     """
     def __init__(self, hidden_dim=160):
         super().__init__()
-        self.self_obs_dim = 14
+        self.self_obs_dim = 15 # +1 for Rank
         self.teammate_obs_dim = 13
         self.enemy_obs_dim = 13
         self.next_cp_dim = 6
@@ -83,7 +83,7 @@ class PodCritic(nn.Module):
     """
     def __init__(self, hidden_dim=256):
         super().__init__()
-        self.self_obs_dim = 14
+        self.self_obs_dim = 15 # +1 for Rank
         self.teammate_obs_dim = 13
         self.enemy_obs_dim = 13
         self.next_cp_dim = 6

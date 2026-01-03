@@ -456,7 +456,8 @@ class TrainingSession:
                 "laps": laps,
                 "next_cps": next_cps,
                 "checkpoints": checkpoints,
-                "collision_flags": collision_flags
+                "collision_flags": collision_flags,
+                "ranks": t_env.prev_ranks[idx].detach().cpu().numpy() if hasattr(t_env, 'prev_ranks') else None
             }
             
             try:

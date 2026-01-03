@@ -35,6 +35,7 @@ export interface Telemetry {
             next_checkpoint: number
             reward: number
             thrust: number
+            rank?: number
         }>
         checkpoints: Array<{
             x: number
@@ -326,7 +327,7 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
 
     const frames: ParsedFrame[] = []
     let offset = 0
-    const FRAME_SIZE = 192 // 16 Header + 4*44 Pods
+    const FRAME_SIZE = 208 // 16 Header + 4*48 Pods (48=11f+2H)
 
     while (offset + FRAME_SIZE <= len) {
         // Header
@@ -345,7 +346,7 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
         // Pods
         const pods: any[] = []
         for (let i = 0; i < 4; i++) {
-            // 10 floats + 2 shorts = 40 + 4 = 44 bytes
+            // 11 floats + 2 shorts = 44 + 4 = 48 bytes
             const x = view.getFloat32(offset, true)
             const y = view.getFloat32(offset + 4, true)
             const vx = view.getFloat32(offset + 8, true)
@@ -356,8 +357,9 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
             const boost = view.getFloat32(offset + 28, true)
             const reward = view.getFloat32(offset + 32, true)
             const collision = view.getFloat32(offset + 36, true)
-            const lap = view.getUint16(offset + 40, true)
-            const next_cp = view.getUint16(offset + 42, true)
+            const rank = view.getFloat32(offset + 40, true)
+            const lap = view.getUint16(offset + 44, true)
+            const next_cp = view.getUint16(offset + 46, true)
 
             pods.push({
                 id: i,
@@ -365,10 +367,10 @@ function parseBinaryReplay(b64: string, checkpoints: any[], race_id: string = "u
                 x, y, vx, vy, angle,
                 boost, shield, collision,
                 lap, next_checkpoint: next_cp,
-                reward, thrust
+                reward, thrust, rank
             })
 
-            offset += 44
+            offset += 48
         }
 
         frames.push({
@@ -425,7 +427,8 @@ function interpolateFrame(f1: ParsedFrame, f2: ParsedFrame, t: number): ParsedFr
             // Discrete values, keep from p1 or transition?
             // Usually step changes happening at keyframes, so p1 is safe.
             lap: p1.lap,
-            next_checkpoint: p1.next_checkpoint
+            next_checkpoint: p1.next_checkpoint,
+            rank: p1.rank
         }
     })
 

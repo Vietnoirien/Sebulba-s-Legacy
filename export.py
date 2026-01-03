@@ -44,11 +44,11 @@ def fuse_normalization_actor(model, rms_stats):
     W = layer.weight.data.cpu().numpy() 
     b = layer.bias.data.cpu().numpy()
     
-    # Input: Self(14) + TeammateLatent(16) + EnemyLatent(16) + CP(6) = 52
-    W_self = W[:, 0:14]
-    W_tm   = W[:, 14:30] # 16 (Latent) - No Norm Fusion needed (internal)
-    W_ctx  = W[:, 30:46] # 16 (Latent) - No Norm Fusion needed (internal)
-    W_cp   = W[:, 46:52] # 6
+    # Input: Self(15) + TeammateLatent(16) + EnemyLatent(16) + CP(6) = 53
+    W_self = W[:, 0:15]
+    W_tm   = W[:, 15:31] # 16 (Latent)
+    W_ctx  = W[:, 31:47] # 16 (Latent)
+    W_cp   = W[:, 47:53] # 6
     
     W_self_new = W_self / std_s[None, :]
     shift_self = np.sum(W_self_new * mean_s[None, :], axis=1)
@@ -180,9 +180,9 @@ class A(N):
         # Encode Teammate
         tm = enc(t)
         
-        # Backbone Input: Self(14)+TM(16)+Ctx(16)+CP(6) = 52
+        # Backbone Input: Self(15)+TM(16)+Ctx(16)+CP(6) = 53
         x=s+tm+g+c
-        x=self.lin(x,52,HD,True)
+        x=self.lin(x,53,HD,True)
         x=self.lin(x,HD,HD,True)
         th=self.lin(x,HD,1)[0]
         an=self.lin(x,HD,1)[0]
@@ -248,7 +248,11 @@ def solve():
             fla=laps[i]/3.0
             fle=1.0 if run[i] else 0.0
             vm=math.sqrt(p['vx']**2+p['vy']**2)*SV
-            oself=[fvf,fvr,ftf,ftr,ftd,fac,fas,fsh,fbo,fto,fla,fle,vm,0.0]
+            rnk=0
+            for s in scrs:
+                if s>scrs[i]: rnk+=1
+            flr=rnk/3.0
+            oself=[fvf,fvr,ftf,ftr,ftd,fac,fas,fsh,fbo,fto,fla,fle,vm,0.0,flr]
             otm,oen=[],[]
             for j in range(4):
                 if i==j: continue

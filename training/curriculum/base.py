@@ -54,10 +54,6 @@ class Stage(ABC):
         """Returns the step penalty for this stage."""
         return base_penalty
 
-    @property
-    def target_steps(self) -> int:
-        """Number of steps per iteration for this stage."""
-        return 256 # Default
 
     @property
     def target_evolve_interval(self) -> int:

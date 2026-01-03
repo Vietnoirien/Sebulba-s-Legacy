@@ -152,6 +152,8 @@ class TelemetryWorker(mp.Process):
         rewards = data['rewards'] 
         actions = data['actions'] 
         
+        ranks = data.get('ranks')
+        
         pods_bytes = []
         # Expect collision_flags in data if available
         coll_flags = data.get("collision_flags") # [4] numpy array or None
@@ -167,9 +169,13 @@ class TelemetryWorker(mp.Process):
             if coll_flags is not None:
                 p_collision = float(coll_flags[i])
 
-            # 10 floats (40 bytes) + 2 shorts (4 bytes) = 44 bytes
-            # Added p_collision at end of floats
-            p_data = struct.pack('<10f2H', 
+            p_rank = 0.0
+            if ranks is not None:
+                p_rank = float(ranks[i])
+
+            # 11 floats (44 bytes) + 2 shorts (4 bytes) = 48 bytes
+            # Added p_rank
+            p_data = struct.pack('<11f2H', 
                 float(pos[i, 0]), float(pos[i, 1]),
                 float(vel[i, 0]), float(vel[i, 1]),
                 float(angle[i]),
@@ -178,6 +184,7 @@ class TelemetryWorker(mp.Process):
                 p_boost,
                 p_reward,
                 p_collision,
+                p_rank,
                 int(laps[i]),
                 int(next_cps[i])
             )

@@ -62,7 +62,8 @@ class NurseryStage(Stage):
 
     @property
     def target_evolve_interval(self) -> int:
-        return 1 # Fast Evolution for Nursery
+        return 1 # Fast Evolution for Nursery (Every Iteration)
+
 
 class SoloStage(Stage):
     def __init__(self, config: CurriculumConfig):
@@ -150,11 +151,15 @@ class DuelStage(Stage):
         # Quality Gate: Novelty only counts if agent is competitive (> 5% Win Rate)
         # This prevents "Safe Losers" (consistent but slow) from crowding the front.
         nov = p.get('novelty_score', 0.0) * 100.0
-        if p.get('ema_wins', 0.0) < 0.05:
+        if p.get('ema_wins', 0.0) < 0.20:
             nov = 0.0
 
+        # Objectives: Win Rate, Efficiency (Speed), Novelty
+        eff = p.get('ema_efficiency', 999.0); eff = eff if eff is not None else 999.0
+        
         return [
             p.get('ema_wins', 0.0),
+            -eff,
             nov
         ]
         
@@ -202,9 +207,9 @@ class DuelStage(Stage):
             elif rec_wr < self.config.wr_warning:
                 # Warning Zone
                 self.failure_streak += 1
-                trainer.log(f"-> Warning Zone (WR < {self.config.wr_warning:.2f}): Streak {self.failure_streak}/2")
+                trainer.log(f"-> Warning Zone (WR < {self.config.wr_warning:.2f}): Streak {self.failure_streak}/4")
                 
-                if self.failure_streak >= 2:
+                if self.failure_streak >= 4:
                     if auto:
                         trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - self.config.diff_step_decrease)
                         trainer.log(f"-> Persistent Failure: Decreasing Bot Difficulty to {trainer.env.bot_difficulty:.2f}")
@@ -267,6 +272,12 @@ class DuelStage(Stage):
 
     def update_step_penalty(self, base_penalty: float) -> float:
         return base_penalty
+
+
+    @property
+    def target_evolve_interval(self) -> int:
+        return 5 # Slow Evolution for Duel
+
 
 class TeamStage(Stage):
     def __init__(self, config: CurriculumConfig):

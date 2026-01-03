@@ -18,7 +18,8 @@ const RW = {
     WRONG_WAY: 9,
     COLLISION_MATE: 10,
     PROXIMITY: 11,
-    MAGNET: 12
+    MAGNET: 12,
+    RANK: 13
 }
 
 interface ConfigPreset {
@@ -45,7 +46,8 @@ export const ConfigPanel: React.FC = () => {
             [RW.COLLISION_RUNNER]: 0.5,
             [RW.COLLISION_MATE]: 2.0,
             [RW.STEP_PENALTY]: 10.0,
-            [RW.PROXIMITY]: 5.0
+            [RW.PROXIMITY]: 5.0,
+            [RW.RANK]: 500.0
         },
         tau: 0.0,
         team_spirit: 0.0
@@ -327,6 +329,9 @@ export const ConfigPanel: React.FC = () => {
 
                             <Slider label="CHECKPOINT (BONUS)" min={0} max={5000} step={100} value={rewards.weights[RW.CHECKPOINT]}
                                 onChange={(e) => setWeight(RW.CHECKPOINT, parseFloat(e.target.value))} />
+
+                            <Slider label="RANK (OVERTAKE)" min={0} max={2000} step={50} value={rewards.weights[RW.RANK]}
+                                onChange={(e) => setWeight(RW.RANK, parseFloat(e.target.value))} />
                         </div>
 
                         {/* Penalties */}

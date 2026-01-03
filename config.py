@@ -12,7 +12,7 @@ BOOST_THRUST = 650.0
 MAX_TURN_DEGREES = 18.0
 TIMEOUT_STEPS = 100 # NEVER CHANGE THIS VALUE, THIS IS A GAME CONSTRAINT
 TIMEOUT_PENALTY_STANDARD = 3500.0
-TIMEOUT_PENALTY_DUEL = 15000.0
+TIMEOUT_PENALTY_DUEL = 3000.0
 
 # Training / Environment Constants
 MAX_LAPS = 3
@@ -32,8 +32,8 @@ STAGE_NURSERY_CONSISTENCY_THRESHOLD = 500.0
 
 # Stage 1 (Solo) -> 2 (Duel)
 # Goal: Efficiency (Speed) + Consistency
-STAGE_SOLO_EFFICIENCY_THRESHOLD = 45.0
-STAGE_SOLO_CONSISTENCY_THRESHOLD = 1500.0
+STAGE_SOLO_EFFICIENCY_THRESHOLD = 50.0
+STAGE_SOLO_CONSISTENCY_THRESHOLD = 1200.0
 STAGE_SOLO_PENALTY_CONSISTENCY_THRESHOLD = 1000.0
 STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD = 55.0
 STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD = 65.0
@@ -75,7 +75,7 @@ class TrainingConfig:
     # Resources
     total_timesteps: int = 2_000_000_000
     num_envs: int = 16384
-    num_steps: int = 256
+    num_steps: int = 512
     device: str = "cuda"
     
     # PBT Settings
@@ -85,7 +85,7 @@ class TrainingConfig:
     
     # Batch Size Config (Per Agent)
     update_epochs: int = 4
-    num_minibatches: int = 16
+    num_minibatches: int = 64
     
     @property
     def envs_per_agent(self) -> int:
@@ -134,8 +134,8 @@ class CurriculumConfig:
     # League Thresholds (Implicit/Monitor)
     
     # Critical Thresholds (Difficulty Adjustment)
-    wr_critical: float = 0.30 # Trigger Difficulty Decrease
-    wr_warning: float = 0.40 # Trigger Warning/Streak
+    wr_critical: float = 0.25 # Trigger Difficulty Decrease
+    wr_warning: float = 0.45 # Trigger Warning/Streak
     
     # Progression Thresholds (Difficulty Increase)
     wr_progression_standard: float = 0.60 # +0.05
@@ -144,14 +144,14 @@ class CurriculumConfig:
     wr_progression_insane_turbo: float = 0.95 # +0.50
     
     # Difficulty Steps
-    diff_step_decrease: float = 0.05
-    diff_step_standard: float = 0.05
-    diff_step_turbo: float = 0.10
-    diff_step_super_turbo: float = 0.20
-    diff_step_insane_turbo: float = 0.50
+    diff_step_decrease: float = 0.02
+    diff_step_standard: float = 0.02
+    diff_step_turbo: float = 0.05
+    diff_step_super_turbo: float = 0.10
+    diff_step_insane_turbo: float = 0.20
     
     # Nursery Specifics
-    nursery_timeout_steps: int = 200
+    nursery_timeout_steps: int = 300
 
 # Reward Indices
 # Reward Indices
@@ -167,7 +167,8 @@ RW_ORIENTATION = 8
 RW_WRONG_WAY = 9
 RW_COLLISION_MATE = 10
 RW_PROXIMITY = 11
-RW_MAGNET = 12 # New Proximity Bonus
+RW_MAGNET = 12 # Proximity Pull
+RW_RANK = 13 # Rank Improvement
 
 DEFAULT_REWARD_WEIGHTS = {
     RW_WIN: 10000.0,
@@ -182,7 +183,8 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_WRONG_WAY: 10.0,
     RW_COLLISION_MATE: 2.0,
     RW_PROXIMITY: 5.0,
-    RW_MAGNET: 10.0 # Proximity Pull
+    RW_MAGNET: 10.0, # Proximity Pull
+    RW_RANK: 500.0 # Rank Change
 }
 
 from typing import List, Optional

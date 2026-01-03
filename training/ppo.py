@@ -57,17 +57,18 @@ class PPOTrainer:
         self.generation = 0
         self.iteration = 0
         
-        # Reward Tensors [4096, 13]
-        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 13), device=self.device)
+        # Reward Weights [TotalEnvs, 14] - Per environment weights
+        # 14 = Win, Loss, CP, Scale, Progress, Runner, Blocker, StepPen, Orient, WrongWay, Mate, Prox, Magnet, Rank
+        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 14), device=self.device)
         
         # Normalization
-        self.rms_self = RunningMeanStd((14,), device=self.device)
+        self.rms_self = RunningMeanStd((15,), device=self.device)
         self.rms_ent = RunningMeanStd((13,), device=self.device)
         self.rms_cp = RunningMeanStd((6,), device=self.device)
         
         # RND Intrinsic Curiosity
         # Input: Normalized Self Obs (14)
-        self.rnd = RNDModel(input_dim=14, device=self.device)
+        self.rnd = RNDModel(input_dim=15, device=self.device)
         self.rnd_coef = 0.01 # PPO Intrinsic Coefficient
         
         # Reward Normalization
@@ -203,7 +204,7 @@ class PPOTrainer:
         self.agent_batches = []
         for _ in range(self.config.pop_size):
              self.agent_batches.append({
-                 'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 14), device=self.device),
+                 'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 15), device=self.device),
                  'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 13), device=self.device),
                  'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 13), device=self.device),
                  'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 6), device=self.device),
@@ -343,6 +344,8 @@ class PPOTrainer:
             
             # Proficiency Score (Raw)
             prof_score = raw_avg + (PENALTY_CONST / (np.sqrt(p['total_cp_hits'] + 1)))
+            if i < 5: # Debug first 5 agents
+                 self.log(f"DEBUG EFFICIENCY: Agent {p['id']} | Steps {p['total_cp_steps']} | Hits {p['total_cp_hits']} | RawAvg {raw_avg:.1f} | Score {prof_score:.1f}")
             p['efficiency_score'] = prof_score # Store raw for logs
             
             # Extract other raw metrics
@@ -410,22 +413,19 @@ class PPOTrainer:
             p['ema_dist'] = novelty_scores[i] # Just log it
             
         # 3. Hybrid Selection Strategy
-        if self.env.curriculum_stage <= STAGE_TEAM:
+        if self.env.curriculum_stage <= STAGE_SOLO:
              # Strict Lexicographic Sort (Nursery & Solo)
              # Returns [[best], [2nd], ...]
              fronts = lexicographic_sort(self.population, self.env.curriculum_stage)
              objectives_np = None 
         else:
              # NSGA-II for Duel+ (Strategy Diversity)
-             # Objectives: [Win Rate, Novelty]
-             # We explicitly ignore Consistency/Efficiency to prevent "safe loser" preservation
              objectives_list = []
              for p in self.population:
-                  w = p.get('ema_wins', 0.0)
-                  if w is None: w = 0.0
-                  n = p.get('novelty_score', 0.0)
-                  if n is None: n = 0.0
-                  objectives_list.append([w, n])
+                  # Delegate to Stage definition
+                  # This allows each stage to define its own Multi-Objective strategy
+                  objs = self.curriculum.current_stage.get_objectives(p)
+                  objectives_list.append(objs)
                   
              objectives_np = np.array(objectives_list)
              fronts = fast_non_dominated_sort(objectives_np)
@@ -464,7 +464,7 @@ class PPOTrainer:
         # Logging
         elite_ids = [p['id'] for p in elites]
         
-        if self.env.curriculum_stage <= STAGE_TEAM:
+        if self.env.curriculum_stage <= STAGE_SOLO:
              # Lexicographic Logging
              self.log(f"Population Sorted: {len(fronts)} ranks (Strict)")
              self.log(f"Top Elites: {elite_ids}")
@@ -483,7 +483,7 @@ class PPOTrainer:
 
         else:
              # NSGA-II Logging
-             self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
+             self.log(f"Pareto Fronts (Quality Gated > 20% WR): {[len(f) for f in fronts]}")
              self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
              
              if self.env.curriculum_stage == STAGE_DUEL:
@@ -877,8 +877,9 @@ class PPOTrainer:
             # Solo+: Stable Evolution (2). Steps 256.
             
             # SOTA Tuning (See stage_0_tuning_report.md)
-            # Delegated to Stage Class
-            target_steps = self.curriculum.current_stage.target_steps
+            # SOTA Tuning (See stage_0_tuning_report.md)
+            # Delegated to Stage Class (Evolve Interval)
+            # target_steps removed - fixed to config.num_steps (512)
             target_evolve = self.curriculum.current_stage.target_evolve_interval
             
             # Dynamic Evolve Check (if callable/property logic is complex, might need method)
@@ -887,17 +888,18 @@ class PPOTrainer:
             
             # Apply Evolve Interval
             self.current_evolve_interval = target_evolve         
-            # Check Active Pods Change
+            
+
             current_active_pods_ids = self.get_active_pods()
             active_count = len(current_active_pods_ids)
             
             needs_realloc = False
+            # Apply Num Steps (Fixed)
+            self.current_num_steps = self.config.num_steps
             
-            if target_steps != self.current_num_steps:
-                 self.log(f"Stage Change Triggered Config Update: Steps {self.current_num_steps} -> {target_steps}")
-                 self.current_num_steps = target_steps
+            if active_count != self.current_active_pods_count:
+                 self.log(f"Stage Change Triggered Config Update: Active Pods {self.current_active_pods_count} -> {active_count}")
                  needs_realloc = True
-                 
             if active_count != self.current_active_pods_count:
                  self.log(f"Stage Change Triggered Config Update: Active Pods {self.current_active_pods_count} -> {active_count}")
                  needs_realloc = True
@@ -981,7 +983,7 @@ class PPOTrainer:
             # obs_data is tuple (self, tm, en, cp) tensors [4, self.config.num_envs, ...]
             all_self, all_tm, all_en, all_cp = obs_data
             
-            for step in range(self.config.num_steps):
+            for step in range(self.current_num_steps):
                 if stop_event and stop_event.is_set(): break
                 # --- Global Normalization ---
                 # Normalize ALL active observations at once for efficiency
@@ -992,7 +994,7 @@ class PPOTrainer:
                 # all_self[active_pods] returns [N_Active, self.config.num_envs, 14]
                 # It copies and stacks them. Since all_self[i] is [self.config.num_envs, 14] contiguous, this is fast.
                 
-                raw_self = all_self[active_pods].view(-1, 14) # [N_Active * self.config.num_envs, 14]
+                raw_self = all_self[active_pods].view(-1, 15) # [N_Active * self.config.num_envs, 15]
                 raw_tm = all_tm[active_pods].view(-1, 13)
                 raw_en = all_en[active_pods].view(-1, 2, 13)
                 raw_cp = all_cp[active_pods].view(-1, 6)
@@ -1029,7 +1031,7 @@ class PPOTrainer:
                 # Actually, simpler:
                 # Keep normalized as [N_Active, self.config.num_envs, D]
                 
-                norm_self = norm_self.view(len(active_pods), self.config.num_envs, 14)
+                norm_self = norm_self.view(len(active_pods), self.config.num_envs, 15)
                 norm_tm = norm_tm.view(len(active_pods), self.config.num_envs, 13)
                 norm_en = norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
                 norm_cp = norm_cp.view(len(active_pods), self.config.num_envs, 6)
@@ -1048,7 +1050,7 @@ class PPOTrainer:
                     # Flattening [N_A, B, D] -> [N_A*B, D] stacks pods: Pod0(Batch), Pod1(Batch).
                     # This is fine.
                     
-                    t0_self = norm_self[:, start_env:end_env, :].reshape(-1, 14)
+                    t0_self = norm_self[:, start_env:end_env, :].reshape(-1, 15)
                     t0_tm = norm_tm[:, start_env:end_env, :].reshape(-1, 13)
                     t0_en = norm_en[:, start_env:end_env, :, :].reshape(-1, 2, 13)
                     t0_cp = norm_cp[:, start_env:end_env, :].reshape(-1, 6)
@@ -1219,7 +1221,9 @@ class PPOTrainer:
                 # Stage 1: 0.5
                 # Stage 2: 0.9
                 current_tau = 0.0
-                if self.env.curriculum_stage == STAGE_DUEL:
+                if self.env.curriculum_stage == STAGE_SOLO:
+                    current_tau = 0.25
+                elif self.env.curriculum_stage == STAGE_DUEL:
                     current_tau = 0.5
                 elif self.env.curriculum_stage == STAGE_TEAM:
                     current_tau = 0.75
@@ -1252,7 +1256,7 @@ class PPOTrainer:
                 
                 # --- Intrinsic Curiosity Update ---
                 # RND Logic
-                rnd_input = norm_self.reshape(-1, 14).detach() # [N_Active * self.config.num_envs, 14]
+                rnd_input = norm_self.reshape(-1, 15).detach() # [N_Active * self.config.num_envs, 15]
                 intrinsic_rewards = self.rnd.compute_intrinsic_reward(rnd_input) # [N_Active * self.config.num_envs]
                 
                 # Map Intrinsic to Pods
@@ -1457,8 +1461,6 @@ class PPOTrainer:
                                  telemetry_callback(global_step + step, sps, 0, 0, self.current_win_rate, t_env, 0, None, is_done_env, 
                                                     rewards_all[t_env].cpu().numpy(), env_actions[t_env].cpu().numpy(), 
                                                     collision_flags=coll_f)
-                                 
-                                 # Update stream target if current one finished (for NEXT step)
                                  if is_done_env:
                                      done_indices = torch.nonzero(dones).flatten()
                                      if len(done_indices) > 0:
@@ -1565,7 +1567,7 @@ class PPOTrainer:
             # Global Normalize Next Obs (Fixed=True)
             # Source: [4, self.config.num_envs, ...]
             
-            next_raw_self = all_self[active_pods].view(-1, 14)
+            next_raw_self = all_self[active_pods].view(-1, 15)
             next_raw_tm = all_tm[active_pods].view(-1, 13)
             next_raw_en = all_en[active_pods].view(-1, 2, 13)
             next_raw_cp = all_cp[active_pods].view(-1, 6)
@@ -1579,7 +1581,7 @@ class PPOTrainer:
             next_norm_cp = self.rms_cp(next_raw_cp, fixed=True)
             
             # View as [N_Act, self.config.num_envs, ...]
-            next_norm_self = next_norm_self.view(len(active_pods), self.config.num_envs, 14)
+            next_norm_self = next_norm_self.view(len(active_pods), self.config.num_envs, 15)
             next_norm_tm = next_norm_tm.view(len(active_pods), self.config.num_envs, 13)
             next_norm_en = next_norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
             next_norm_cp = next_norm_cp.view(len(active_pods), self.config.num_envs, 6)
@@ -1593,7 +1595,7 @@ class PPOTrainer:
                 start_env = i * self.config.envs_per_agent
                 end_env = start_env + self.config.envs_per_agent
                 
-                t0_self = next_norm_self[:, start_env:end_env, :].reshape(-1, 14)
+                t0_self = next_norm_self[:, start_env:end_env, :].reshape(-1, 15)
                 t0_tm = next_norm_tm[:, start_env:end_env, :].reshape(-1, 13)
                 t0_en = next_norm_en[:, start_env:end_env, :, :].reshape(-1, 2, 13)
                 t0_cp = next_norm_cp[:, start_env:end_env, :].reshape(-1, 6)
@@ -1622,7 +1624,7 @@ class PPOTrainer:
                 
                 # Flatten
                 # stored batches were [self.config.num_steps, rows_per_agent, ...]
-                b_obs_s = batch['self_obs'].reshape(-1, 14)
+                b_obs_s = batch['self_obs'].reshape(-1, 15)
                 b_obs_tm = batch['teammate_obs'].reshape(-1, 13)
                 b_obs_en = batch['enemy_obs'].reshape(-1, 2, 13)
                 b_obs_c = batch['cp_obs'].reshape(-1, 6)

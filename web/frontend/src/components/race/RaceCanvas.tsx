@@ -598,6 +598,7 @@ function drawDebugOverlay(
         ctx.fillText(`  Rew:  ${(pod.reward ?? 0).toFixed(1)}`, 20, y); y += lineHeight
         ctx.fillText(`  Thr:  ${(pod.thrust ?? 0).toFixed(0)}`, 20, y); y += lineHeight
         ctx.fillText(`  Spd:  ${speed}`, 20, y); y += lineHeight
+        ctx.fillText(`  Rank: ${pod.rank ?? "?"}`, 20, y); y += lineHeight
 
         y += 10 // Spacing
     })

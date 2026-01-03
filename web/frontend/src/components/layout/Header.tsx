@@ -1,5 +1,5 @@
 import React from 'react'
-import { Activity, Box, Layers } from 'lucide-react'
+import { Box, Layers } from 'lucide-react'
 import { useGameState, useGameActions } from '../../context/GameStateContext'
 import { ReadyState } from 'react-use-websocket'
 
@@ -21,8 +21,8 @@ export const Header: React.FC = () => {
     return (
         <header className="h-16 bg-panel-bg border-b border-gray-700 flex justify-between items-center px-6 shadow-lg z-10">
             <div className="flex items-center gap-3">
-                <div className="p-2 bg-slate-800 rounded-lg border border-cyan-900 icon-glow">
-                    <Activity className="text-neon-cyan" size={24} />
+                <div className="h-10 w-10 bg-slate-800 rounded-lg border border-cyan-900 icon-glow overflow-hidden relative">
+                    <img src="/sebulba_avv6.jpg" alt="Sebulba Logo" className="w-full h-full object-cover" />
                 </div>
                 <div>
                     <h1 className="text-lg font-bold tracking-wide text-white uppercase text-shadow-sm">

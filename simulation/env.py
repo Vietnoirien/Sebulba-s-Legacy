@@ -77,8 +77,70 @@ class PodRacerEnv:
 
 
         
+        # Rank Tracking for Potential-Based Reward
+        self.prev_ranks = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device)
+        
         self.reset()
         
+    def _get_ranks(self, env_ids):
+        """
+        Calculate current rank (0-3) for each pod based on progress score.
+        Score = Laps * 10000 + NextCP * 100 + (1 - Dist/20000)
+        """
+        # Gather data
+        laps = self.laps[env_ids] # [N, 4]
+        next_cp = self.next_cp_id[env_ids] # [N, 4]
+        # Use prev_dist as it is updated every step/reset and represents 'dist to next cp'
+        dists = self.prev_dist[env_ids] # [N, 4]
+        
+        # Max map dist approx 20000.
+        dist_score = 1.0 - (dists / 20000.0)
+        
+        # FIX: Handle Final Leg (NextCP == 0)
+        # NextCP=0 means passing last CP and aiming for Finish (Lap Completion).
+        # We should count this as "NumCPs" progress, not 0.
+        # Since NextCP starts at 1, 0 is unique to this state.
+        effective_cp = next_cp.clone()
+        # Create mask for envs where next_cp is 0
+        mask_finish = (effective_cp == 0)
+        
+        # We need num_checkpoints for each env
+        # self.num_checkpoints is [N_envs]
+        # We need to broadcast or index correctly
+        # env_ids is passed in, so we look up specific envs
+        n_cps_local = self.num_checkpoints[env_ids]
+        n_cps_expanded = n_cps_local.unsqueeze(1).expand(-1, 4)
+        
+        effective_cp[mask_finish] = n_cps_expanded[mask_finish]
+
+        # Score calculation (Higher is better)
+        # Using larger multipliers to ensure strict hierarchy: Lap > CP > Dist
+        scores = (laps * 10000.0) + (effective_cp * 100.0) + dist_score
+        
+        # Sort scores descending to get ranks
+        # argsort(descending) gives indices of [1st place, 2nd place, ...]
+        # We want the rank FOR each pod.
+        # e.g. scores=[10, 30, 20, 5] -> sorted indices=[1, 2, 0, 3] (Pod 1 is 0th, Pod 2 is 1st...)
+        # To get rank map:
+        # ranks[sorted_indices] = 0, 1, 2, 3
+        
+        sorted_indices = torch.argsort(scores, dim=1, descending=True)
+        
+        # Creating rank tensor
+        m_ranks = torch.zeros_like(scores, dtype=torch.long)
+        
+        # Broadcase ranges?
+        # A bit tricky in pure torch vectorized without loops if doing row-wise assignment to permuted indices.
+        # scatter is the friend here.
+        # src = arange(4).expand(N, 4)
+        # index = sorted_indices
+        # result.scatter_(1, index, src)
+        
+        rang = torch.arange(4, device=self.device).unsqueeze(0).expand(len(env_ids), 4)
+        m_ranks.scatter_(1, sorted_indices, rang)
+        
+        return m_ranks
+
     def reset(self, env_ids=None):
         if env_ids is None:
             # All
@@ -199,6 +261,9 @@ class PodRacerEnv:
         # Update Prev Dist for rewards
         self.update_progress_metric(env_ids)
         self._update_roles(env_ids)
+        
+        # Reset Ranks
+        self.prev_ranks[env_ids] = self._get_ranks(env_ids)
 
     def set_stage(self, stage_id: int, config: EnvConfig, reset_env: bool = False):
         self.curriculum_stage = stage_id
@@ -320,7 +385,7 @@ class PodRacerEnv:
         """
         if reward_weights is None:
             # Construct default tensor
-            reward_weights = torch.zeros((self.num_envs, 13), device=self.device)
+            reward_weights = torch.zeros((self.num_envs, 14), device=self.device)
             # Use default dict to fill 
             # Note: We can pre-compute this but for robust fallback:
             for k, v in DEFAULT_REWARD_WEIGHTS.items():
@@ -340,6 +405,7 @@ class PodRacerEnv:
         w_col_mate = reward_weights[:, RW_COLLISION_MATE] # Individual
         w_prox = reward_weights[:, RW_PROXIMITY] # Individual
         w_magnet = reward_weights[:, RW_MAGNET] # Individual (New)
+        w_rank = reward_weights[:, RW_RANK] # Rank Change
         
         # --- Team Spirit Blending ---
         # Modify weights based on spirit
@@ -505,6 +571,27 @@ class PodRacerEnv:
                 if neg_mask.any():
                     # Heavy penalty for wrong way
                     rewards_indiv[neg_mask, i] += alignment[neg_mask] * w_wrong_way[neg_mask]
+
+        # --- D. Rank Reward (Potential-Based) ---
+        # "Overtaking Reward"
+        w_rank = reward_weights[:, RW_RANK]
+        if w_rank.sum() > 0.0:
+            # Calculate current ranks
+            curr_ranks = self._get_ranks(torch.arange(self.num_envs, device=self.device))
+            
+            # Potential diff: Prev - Curr
+            # Rank 1 (2nd) -> Rank 0 (1st). Diff = 1 - 0 = +1 (Improvement)
+            # Rank 0 (1st) -> Rank 1 (2nd). Diff = 0 - 1 = -1 (Loss)
+            rank_diff = self.prev_ranks - curr_ranks
+            
+            # Apply Reward for each pod
+            # Note: rank_diff is [N, 4]
+            # w_rank is [N]. Expand.
+            
+            rewards_indiv += rank_diff.float() * w_rank.unsqueeze(1)
+            
+            # Update state
+            self.prev_ranks = curr_ranks
 
 
         # --- D. Step Penalty (Constant) ---
@@ -976,13 +1063,35 @@ class PodRacerEnv:
         lap = (self.laps.float() / 3.0).unsqueeze(-1)
         leader = self.is_runner.float().unsqueeze(-1)
         v_mag = torch.norm(vel, dim=-1, keepdim=True) * S_VEL
-        pad = torch.zeros_like(v_mag)
         
+        # --- Rank Calculation ---
+        # Score = Lap * 50000 + NextCP * 500 + (20000 - Dist)
+        # Dist is 'dest' (Normalized distance / S_POS = True Distance)
+        # dest is [B, 4, 1]. S_POS = 1/16000. So True Dist = dest * 16000.
+        true_dist = dest.squeeze(-1) / S_POS
+        
+        # Laps and NextCP
+        p_laps = self.laps.float()
+        p_ncp = self.next_cp_id.float()
+        
+        # Score [B, 4]
+        scores = p_laps * 50000.0 + p_ncp * 500.0 + (20000.0 - true_dist)
+        
+        # Calculate Rank (How many scores > my score)
+        # Compare [B, 4, 1] vs [B, 1, 4] -> [B, 4, 4]
+        s_col = scores.unsqueeze(2)
+        s_row = scores.unsqueeze(1)
+        # Count > Self (dim 2 sum)
+        ranks = (s_row > s_col).sum(dim=2).float().unsqueeze(-1) # [B, 4, 1]
+        
+        rank_norm = ranks / 3.0 # Normalize 0 (1st) to 1 (4th) range [0, 1]
+        pad = torch.zeros_like(v_mag)
+
         # Assemble Self
-        # [B, 4, 14]
-        # v_local: 2, t_vec_l: 2, dest: 1, align: 2, shield, boost, timeout, lap, leader, v_mag, pad
+        # [B, 4, 15] (+1 Rank, +1 Pad retained)
+        # v_local: 2, t_vec_l: 2, dest: 1, align: 2, shield, boost, timeout, lap, leader, v_mag, pad, rank
         self_obs = torch.cat([
-            v_local, t_vec_l, dest, align, shield, boost, timeout, lap, leader, v_mag, pad
+            v_local, t_vec_l, dest, align, shield, boost, timeout, lap, leader, v_mag, pad, rank_norm
         ], dim=-1)
         
         # --- Entity Features (3 x 13) ---
