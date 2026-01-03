@@ -1586,12 +1586,21 @@ class PPOTrainer:
             next_norm_en = next_norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
             next_norm_cp = next_norm_cp.view(len(active_pods), self.config.num_envs, 6)
             
+            # --- VECTORIZED GAE ---
+            # 1. Collect Global Data
+            all_next_vals = []
+            all_rewards = []
+            all_dones = []
+            all_values = []
+            
+            # Batch size per agent (Envs * ActivePods)
+            bs_per_agent = self.config.envs_per_agent * len(active_pods)
+
+            # Pre-compute Next Values for all agents
             for i in range(self.config.pop_size):
-                batch = self.agent_batches[i]
                 agent = self.population[i]['agent']
-                optimizer = self.population[i]['optimizer']
                 
-                # Slice Next Val
+                # Slice Next Val Inputs matches current loop logic
                 start_env = i * self.config.envs_per_agent
                 end_env = start_env + self.config.envs_per_agent
                 
@@ -1601,26 +1610,50 @@ class PPOTrainer:
                 t0_cp = next_norm_cp[:, start_env:end_env, :].reshape(-1, 6)
                 
                 with torch.no_grad():
-                    next_val = agent.get_value(t0_self, t0_tm, t0_en, t0_cp).flatten()
+                     n_v = agent.get_value(t0_self, t0_tm, t0_en, t0_cp).flatten()
+                     all_next_vals.append(n_v)
                 
-                # GAE
-                b_rewards = batch['rewards']
-                b_dones = batch['dones']
-                b_values = batch['values']
+                # Collect buffer Refs
+                batch = self.agent_batches[i]
+                all_rewards.append(batch['rewards'])
+                all_dones.append(batch['dones'])
+                all_values.append(batch['values'])
+
+            # 2. Global Concatenation [Time, TotalBatch]
+            g_next_val = torch.cat(all_next_vals, dim=0) # [TotalBatch]
+            g_rewards = torch.cat(all_rewards, dim=1)    # [Time, TotalBatch]
+            g_dones = torch.cat(all_dones, dim=1)        # [Time, TotalBatch]
+            g_values = torch.cat(all_values, dim=1)      # [Time, TotalBatch]
+            
+            # 3. Single Global GAE Loop (512 iters vs 65k)
+            g_adv = torch.zeros_like(g_rewards)
+            lastgaelam = 0
+            
+            for t in reversed(range(self.current_num_steps)):
+                if t == self.current_num_steps - 1:
+                    nextnonterminal = 1.0 - g_dones[t]
+                    nextvalues = g_next_val
+                else:
+                    nextnonterminal = 1.0 - g_dones[t+1]
+                    nextvalues = g_values[t+1]
                 
-                adv = torch.zeros_like(b_rewards)
-                lastgaelam = 0
-                for t in reversed(range(self.current_num_steps)):
-                    if t == self.current_num_steps - 1:
-                        nextnonterminal = 1.0 - b_dones[t]
-                        nextvalues = next_val
-                    else:
-                        nextnonterminal = 1.0 - b_dones[t+1]
-                        nextvalues = b_values[t+1]
-                    delta = b_rewards[t] + self.config.gamma * nextvalues * nextnonterminal - b_values[t]
-                    adv[t] = lastgaelam = delta + self.config.gamma * self.config.gae_lambda * nextnonterminal * lastgaelam
+                delta = g_rewards[t] + self.config.gamma * nextvalues * nextnonterminal - g_values[t]
+                g_adv[t] = lastgaelam = delta + self.config.gamma * self.config.gae_lambda * nextnonterminal * lastgaelam
+            
+            g_returns = g_adv + g_values
+
+            # 4. PPO Update Loop (Slicing back)
+            for i in range(self.config.pop_size):
+                batch = self.agent_batches[i]
+                agent = self.population[i]['agent']
+                optimizer = self.population[i]['optimizer']
+
+                # Slice Global Results
+                st_idx = i * bs_per_agent
+                ed_idx = st_idx + bs_per_agent
                 
-                returns = adv + b_values
+                adv = g_adv[:, st_idx:ed_idx]
+                returns = g_returns[:, st_idx:ed_idx]
                 
                 # Flatten
                 # stored batches were [self.config.num_steps, rows_per_agent, ...]
