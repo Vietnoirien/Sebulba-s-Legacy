@@ -255,6 +255,9 @@ class PodRacerEnv:
         
         # Update Prev Dist for rewards
         self.update_progress_metric(env_ids)
+        
+        # Reset Role Locks
+        self.role_lock_timer[env_ids] = 0
         self._update_roles(env_ids)
         
         # Reset Ranks

@@ -32,7 +32,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v6', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v7', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -42,7 +42,7 @@ export const ConfigPanel: React.FC = () => {
             [RW.MAGNET]: 10.0,
             [RW.ORIENTATION]: 1.0,
             [RW.WRONG_WAY]: 10.0,
-            [RW.COLLISION_BLOCKER]: 1000.0,
+            [RW.COLLISION_BLOCKER]: 5.0,
             [RW.COLLISION_RUNNER]: 0.5,
             [RW.COLLISION_MATE]: 2.0,
             [RW.STEP_PENALTY]: 10.0,
@@ -350,7 +350,7 @@ export const ConfigPanel: React.FC = () => {
                                 onChange={(e) => setWeight(RW.WIN, parseFloat(e.target.value))} />
                             <Slider label="LOSS" min={0} max={10000} step={500} value={rewards.weights[RW.LOSS]}
                                 onChange={(e) => setWeight(RW.LOSS, parseFloat(e.target.value))} />
-                            <Slider label="HUMILIATION (BLOCKER)" min={0} max={2000} step={50} value={rewards.weights[RW.COLLISION_BLOCKER]}
+                            <Slider label="HUMILIATION (BLOCKER)" min={0} max={50} step={0.5} value={rewards.weights[RW.COLLISION_BLOCKER]}
                                 onChange={(e) => setWeight(RW.COLLISION_BLOCKER, parseFloat(e.target.value))} />
                             <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit}
                                 onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />

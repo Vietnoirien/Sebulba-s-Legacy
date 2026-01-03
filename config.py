@@ -177,7 +177,7 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_CHECKPOINT_SCALE: 50.0,
     RW_PROGRESS: 0.2, # Scaled down to prevent overpowering Checkpoint (2000) 
     RW_COLLISION_RUNNER: 0.5,
-    RW_COLLISION_BLOCKER: 1000.0,
+    RW_COLLISION_BLOCKER: 5.0, # Reduced from 1000.0 (Impact is ~800, so 5*800=4000 ~ 2 Checkpoints)
     RW_STEP_PENALTY: 10.0, # Increased to 10.0 to make Time Cost significant (Speed Incentive)
     RW_ORIENTATION: 1.0, # Reduced to soft guidance
     RW_WRONG_WAY: 10.0,
