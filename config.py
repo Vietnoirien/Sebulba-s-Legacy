@@ -142,8 +142,8 @@ class CurriculumConfig:
     # Progression Thresholds (Difficulty Increase)
     wr_progression_standard: float = 0.55 # +0.01
     wr_progression_turbo: float = 0.60 # +0.02
-    wr_progression_super_turbo: float = 0.75 # +0.05
-    wr_progression_insane_turbo: float = 0.90 # +0.1
+    wr_progression_super_turbo: float = 0.70 # +0.05
+    wr_progression_insane_turbo: float = 0.85 # +0.1
     
     # Difficulty Steps
     diff_step_decrease: float = 0.02
