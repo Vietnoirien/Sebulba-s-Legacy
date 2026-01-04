@@ -69,7 +69,7 @@ const BackgroundRenderer: React.FC = () => {
         const clone = SkeletonUtils.clone(scene)
 
         // Apply Global Scale
-        clone.scale.set(0.2, 0.2, 0.2)
+        clone.scale.set(1, 1, 1)
 
         // Fix Orientation? OBJ usually comes in Y-up, but game coords might differ.
         // If it was exported from Blender +Z up, we might need rotation.
@@ -83,7 +83,7 @@ const BackgroundRenderer: React.FC = () => {
         return clone
     }, [scene])
 
-    return <primitive object={mapClone} position={[80, -14, 40]} rotation={[0, Math.PI / 2, 0]} />
+    return <primitive object={mapClone} position={[MAP_CENTER_X, -82, MAP_CENTER_Z]} />
 }
 
 const SingleCheckpoint: React.FC<{

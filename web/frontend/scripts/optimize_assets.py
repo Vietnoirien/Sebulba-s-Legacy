@@ -11,7 +11,7 @@ except ImportError:
 # Configuration
 ASSETS_DIR = os.path.abspath("web/frontend/src/assets/models")
 BLENDER_BIN = "blender" # Assumes blender is in PATH
-MAX_TEXTURE_SIZE = 1024
+MAX_TEXTURE_SIZE = 2048
 
 # Blender conversion script
 BLENDER_SCRIPT = """
@@ -181,7 +181,7 @@ def main():
                 convert_obj_to_glb(obj_path)
             elif file.endswith(".png"):
                  # Check if it's a skin texture (usually large)
-                 if "skin" in file.lower() or "checkpoint" in file.lower():
+                 if "skin" in file.lower() or "checkpoint" in file.lower() or "stonequarry" in file.lower():
                      png_path = os.path.join(root, file)
                      resize_texture(png_path)
 

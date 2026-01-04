@@ -24,3 +24,9 @@ submission.py
 # IDEs
 .idea/
 .vscode/
+
+# 3D Source Files (Keep GLB)
+*.obj
+*.mtl
+*.blend
+*.fbx
