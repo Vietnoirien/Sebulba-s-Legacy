@@ -32,8 +32,8 @@ STAGE_NURSERY_CONSISTENCY_THRESHOLD = 500.0
 
 # Stage 1 (Solo) -> 2 (Duel)
 # Goal: Efficiency (Speed) + Consistency
-STAGE_SOLO_EFFICIENCY_THRESHOLD = 50.0
-STAGE_SOLO_CONSISTENCY_THRESHOLD = 1200.0
+STAGE_SOLO_EFFICIENCY_THRESHOLD = 40.0
+STAGE_SOLO_CONSISTENCY_THRESHOLD = 3000.0
 STAGE_SOLO_PENALTY_CONSISTENCY_THRESHOLD = 1000.0
 STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD = 55.0
 STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD = 65.0
@@ -119,7 +119,7 @@ class CurriculumConfig:
     solo_penalty_efficiency_threshold: float = STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD
     solo_penalty_exit_efficiency_threshold: float = STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD
     solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
-    solo_min_win_rate: float = 0.70
+    solo_min_win_rate: float = 0.90
     
     # Stage 2 (Duel) -> 3 (Team) Graduation
     # Graduation triggers when Bot Difficulty >= graduation_difficulty

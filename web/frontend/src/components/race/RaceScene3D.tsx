@@ -719,7 +719,12 @@ export const RaceScene3D: React.FC = () => {
                 className="w-full h-full"
             >
                 <React.Suspense fallback={null}>
-                    <SceneContent mode={cameraMode} focusedPodIndex={focusedPodIndex} swapSkins={swapSkins} />
+                    <SceneContent
+                        key={telemetry?.match_id}
+                        mode={cameraMode}
+                        focusedPodIndex={focusedPodIndex}
+                        swapSkins={swapSkins}
+                    />
                 </React.Suspense>
             </Canvas>
 

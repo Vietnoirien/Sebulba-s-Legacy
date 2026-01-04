@@ -876,7 +876,7 @@ class PPOTrainer:
             self.check_curriculum()
             
             # If Stage Changed, we MUST reset the environment to spawn new pods/apply new logic immediately.
-            if self.env.curriculum_stage != prev_stage:
+             if self.env.curriculum_stage != prev_stage:
                  self.log(f"Config: Stage Transition {prev_stage} -> {self.env.curriculum_stage}. Resetting Environment...")
                  
                  # --- Mitosis Strategy (Transition to Team Mode) ---
@@ -892,6 +892,10 @@ class PPOTrainer:
                            p['optimizer'] = optim.Adam(agent.parameters(), lr=p['lr'], eps=1e-5)
                            
                  self.env.reset()
+                 
+                 # GENERATE NEW MATCH ID (Forces Frontend Reset)
+                 self.match_id = str(uuid.uuid4())
+                 
                  obs_data = self.env.get_obs()
 
 
