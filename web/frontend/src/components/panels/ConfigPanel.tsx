@@ -63,16 +63,20 @@ export const ConfigPanel: React.FC = () => {
         ent_coef: 0.01
     })
 
-    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v2', {
+    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v10', {
         nursery_consistency_threshold: 500.0,
         solo_efficiency_threshold: 45.0,
         solo_consistency_threshold: 1500.0,
-        duel_consistency_wr: 0.82,
-        duel_absolute_wr: 0.84,
-        duel_consistency_checks: 5,
-        team_consistency_wr: 0.85,
-        team_absolute_wr: 0.88,
-        team_consistency_checks: 5
+
+        // Stage 2 -> 3
+        duel_graduation_difficulty: 0.80,
+        duel_graduation_win_rate: 0.65,
+        duel_graduation_checks: 5,
+
+        // Stage 3 -> 4
+        team_graduation_difficulty: 0.85,
+        team_graduation_win_rate: 0.70,
+        team_graduation_checks: 5
     })
 
     // Presets
@@ -255,19 +259,29 @@ export const ConfigPanel: React.FC = () => {
 
                     {st === 2 && (
                         <>
-                            <Slider label="REQ WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.duel_consistency_wr} valueDisplay={(transitions.duel_consistency_wr * 100).toFixed(0) + "%"}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_consistency_wr: parseFloat(e.target.value) }))} />
-                            <Slider label="ABSOLUTE WR" min={0.5} max={1.0} step={0.01} value={transitions.duel_absolute_wr} valueDisplay={(transitions.duel_absolute_wr * 100).toFixed(0) + "%"}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_absolute_wr: parseFloat(e.target.value) }))} />
-                            <Slider label="CHECKS COUNT" min={1} max={10} step={1} value={transitions.duel_consistency_checks}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, duel_consistency_checks: parseFloat(e.target.value) }))} />
+                            <div className="p-2 border border-gray-700 rounded bg-gray-900/50 space-y-3">
+                                <h4 className="text-[10px] text-neon-cyan mb-2">COMPETENCE STANDARD</h4>
+                                <Slider label="GRADUATION DIFFICULTY" min={0.5} max={1.0} step={0.05} value={transitions.duel_graduation_difficulty} valueDisplay={transitions.duel_graduation_difficulty?.toFixed(2)}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_difficulty: parseFloat(e.target.value) }))} />
+                                <Slider label="MIN WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.duel_graduation_win_rate} valueDisplay={(transitions.duel_graduation_win_rate * 100).toFixed(0) + "%"}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_win_rate: parseFloat(e.target.value) }))} />
+                                <Slider label="CONSISTENCY CHECKS" min={1} max={10} step={1} value={transitions.duel_graduation_checks}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_checks: parseFloat(e.target.value) }))} />
+                            </div>
                         </>
                     )}
 
                     {st === 3 && (
                         <>
-                            <Slider label="REQ WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.team_consistency_wr} valueDisplay={(transitions.team_consistency_wr * 100).toFixed(0) + "%"}
-                                onChange={(e) => setTransitions(prev => ({ ...prev, team_consistency_wr: parseFloat(e.target.value) }))} />
+                            <div className="p-2 border border-gray-700 rounded bg-gray-900/50 space-y-3">
+                                <h4 className="text-[10px] text-neon-cyan mb-2">COMPETENCE STANDARD</h4>
+                                <Slider label="GRADUATION DIFFICULTY" min={0.5} max={1.0} step={0.05} value={transitions.team_graduation_difficulty} valueDisplay={transitions.team_graduation_difficulty?.toFixed(2)}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, team_graduation_difficulty: parseFloat(e.target.value) }))} />
+                                <Slider label="MIN WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.team_graduation_win_rate} valueDisplay={(transitions.team_graduation_win_rate * 100).toFixed(0) + "%"}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, team_graduation_win_rate: parseFloat(e.target.value) }))} />
+                                <Slider label="CONSISTENCY CHECKS" min={1} max={10} step={1} value={transitions.team_graduation_checks}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, team_graduation_checks: parseFloat(e.target.value) }))} />
+                            </div>
                         </>
                     )}
                 </div>

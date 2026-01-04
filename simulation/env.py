@@ -383,7 +383,7 @@ class PodRacerEnv:
         """
         if reward_weights is None:
             # Construct default tensor
-            reward_weights = torch.zeros((self.num_envs, 14), device=self.device)
+            reward_weights = torch.zeros((self.num_envs, 15), device=self.device)
             # Use default dict to fill 
             # Note: We can pre-compute this but for robust fallback:
             for k, v in DEFAULT_REWARD_WEIGHTS.items():
@@ -728,16 +728,44 @@ class PodRacerEnv:
                 infos["cp_steps"][pass_idx, i] = taken_steps
                 self.steps_last_cp[pass_idx, i] = 0
                 
-                # Simple Checkpoint Reward (Constant)
-                base_reward = w_checkpoint[pass_idx]
-
-                # Streak Bonus
+                # --- REWARD CALCULATION ---
+                # RW_LAP imported from config
+                
+                w_cp_base = w_checkpoint[pass_idx]
+                w_lap_base = reward_weights[pass_idx, RW_LAP] if reward_weights.shape[1] > RW_LAP else torch.full((len(pass_idx),), 2000.0, device=self.device)
+                
+                # Split Logic: Lap vs Normal CP
+                # 'just_passed_zero' is boolean mask for pass_idx
+                
+                # 1. Normal CP Rewards
+                # Apply to ~just_passed_zero
+                normal_mask = ~just_passed_zero
+                
+                # Calculate Normal Reward for ALL (we will mask later)
                 streak_bonus = (streak - 1.0) * w_chk_scale[pass_idx]
+                reward_normal = w_cp_base + streak_bonus
                 
-                # Total
-                total_reward = base_reward + streak_bonus
+                # 2. Lap Rewards
+                # Reward = Base * (Multiplier ^ LapIndex)
+                # Note: self.laps was ALREADY incremented above for 'just_passed_zero' entries.
+                # So we use current lap count (which is 1 for first lap, 2 for second...)
+                # Wait, self.laps starts at 0. After crossing start line once (finish lap 1), it becomes 1.
+                # So 'Lap 1' completion -> laps=1.
+                # Formula: Base * (1.5 ** (laps - 1))?
+                # Lap 1 (laps=1): Base * 1.5^0 = Base. Correct.
+                # Lap 2 (laps=2): Base * 1.5^1 = Base * 1.5. Correct.
+                current_laps = self.laps[pass_idx, i]
+                lap_mult_pow = torch.clamp(current_laps - 1, min=0).float()
                 
-                # --- TIME EXTENSION ---
+                # Multiplier
+                mult = torch.pow(LAP_REWARD_MULTIPLIER, lap_mult_pow)
+                reward_lap = w_lap_base * mult
+                
+                # Combine
+                # If just_passed_zero: use reward_lap
+                # Else: use reward_normal
+                total_reward = torch.where(just_passed_zero, reward_lap, reward_normal)
+
                 # --- TIME EXTENSION ---
                 # Reset Timeout AFTER reward calc (so we used 'steps remaining' accurately)
                 self.timeouts[pass_idx, i] = self.config.timeout_steps

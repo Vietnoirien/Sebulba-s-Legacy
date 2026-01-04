@@ -121,16 +121,18 @@ class CurriculumConfig:
     solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
     solo_min_win_rate: float = 0.70
     
-    # Stage 1 -> 2 (Duel Graduation)
-    duel_consistency_wr: float = 0.75
-    duel_absolute_wr: float = 0.78
-    duel_consistency_checks: int = 5
+    # Stage 2 (Duel) -> 3 (Team) Graduation
+    # Graduation triggers when Bot Difficulty >= graduation_difficulty
+    # AND Win Rate >= graduation_win_rate for graduation_checks
+    duel_graduation_difficulty: float = 0.80
+    duel_graduation_win_rate: float = 0.65
+    duel_graduation_checks: int = 5
     
-    # Stage 2 -> 3 (Team Graduation)
-    team_consistency_wr: float = 0.75
-    team_absolute_wr: float = 0.78
-    team_consistency_checks: int = 5
-
+    # Stage 3 (Team) -> 4 (League) Graduation
+    team_graduation_difficulty: float = 0.85
+    team_graduation_win_rate: float = 0.70
+    team_graduation_checks: int = 5
+ 
     # League Thresholds (Implicit/Monitor)
     
     # Critical Thresholds (Difficulty Adjustment)
@@ -169,11 +171,13 @@ RW_COLLISION_MATE = 10
 RW_PROXIMITY = 11
 RW_MAGNET = 12 # Proximity Pull
 RW_RANK = 13 # Rank Improvement
+RW_LAP = 14 # Lap Completion
+LAP_REWARD_MULTIPLIER = 1.5
 
 DEFAULT_REWARD_WEIGHTS = {
     RW_WIN: 10000.0,
     RW_LOSS: 2000.0,
-    RW_CHECKPOINT: 2000.0,
+    RW_CHECKPOINT: 500.0, # Reduced from 2000.0 to 500.0 (User Request)
     RW_CHECKPOINT_SCALE: 50.0,
     RW_PROGRESS: 0.2, # Scaled down to prevent overpowering Checkpoint (2000) 
     RW_COLLISION_RUNNER: 0.5,
@@ -184,7 +188,8 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_COLLISION_MATE: 2.0,
     RW_PROXIMITY: 5.0,
     RW_MAGNET: 10.0, # Proximity Pull
-    RW_RANK: 500.0 # Rank Change
+    RW_RANK: 500.0, # Rank Change
+    RW_LAP: 2000.0 # RW_LAP (New) - Index 14 manually assigned
 }
 
 from typing import List, Optional

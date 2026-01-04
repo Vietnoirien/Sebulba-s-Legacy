@@ -114,8 +114,10 @@ class SoloStage(Stage):
             if trainer.curriculum_mode == "auto":
                 # Special Config Update for Duel
                 trainer.env.bot_difficulty = 0.0
-                trainer.reward_weights_tensor[:, RW_CHECKPOINT] = 2000.0
-                trainer.log("Config Update: Resetting RW_CHECKPOINT to 2000.0 for Stage 1+")
+                # trainer.reward_weights_tensor[:, RW_CHECKPOINT] = 2000.0
+                # trainer.log("Config Update: Resetting RW_CHECKPOINT to 2000.0 for Stage 1+")
+                # REMOVED: Respect Global Config (RW_CHECKPOINT=500, RW_LAP=2000)
+                trainer.log("Config Update: Entering Duel Stage (Difficulty Reset).")
                 
                 return STAGE_DUEL, f"Eff {avg_eff:.1f} < {self.config.solo_efficiency_threshold}"
         
@@ -239,9 +241,14 @@ class DuelStage(Stage):
                      pass
             
             # Graduation Check
-            if trainer.env.bot_difficulty >= 1.0:
+            # Relaxed Constraint: Use Configurable Difficulty Threshold (e.g. 0.8) instead of 1.0
+            if trainer.env.bot_difficulty >= self.config.duel_graduation_difficulty:
                 cons_wr = self.config.duel_consistency_wr
                 abs_wr = self.config.duel_absolute_wr
+                
+                # New "Competent" Threshold
+                min_wr = self.config.duel_graduation_min_wr
+                
                 cons_checks = self.config.duel_consistency_checks
 
                 if rec_wr > cons_wr:
@@ -252,12 +259,20 @@ class DuelStage(Stage):
                 should_graduate = False
                 reason = ""
                 
+                # 1. Absolute Dominance
                 if rec_wr >= abs_wr and self.grad_consistency_counter >= 2:
                     should_graduate = True
-                    reason = f"WR {rec_wr:.2f} >= {abs_wr}"
+                    reason = f"Dominance: WR {rec_wr:.2f} >= {abs_wr}"
+                    
+                # 2. Consistent Competence
                 elif self.grad_consistency_counter >= cons_checks:
                     should_graduate = True
-                    reason = f"WR > {cons_wr} for {cons_checks} checks"
+                    reason = f"Consistency: WR > {cons_wr} for {cons_checks} checks"
+                    
+                # 3. "Good Enough" Competence at High Difficulty (New Path)
+                elif rec_wr >= min_wr and self.grad_consistency_counter >= 3:
+                     should_graduate = True
+                     reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} (Diff {trainer.env.bot_difficulty:.2f})"
                     
                 if should_graduate:
                      trainer.log(f">>> UPGRADING TO STAGE 3: TEAM ({reason}) <<<")
@@ -299,7 +314,6 @@ class TeamStage(Stage):
         # Let's fix PPO to handle dynamic if needed, OR we just set it to 2 for now to simplify.
         # Actually PPO commented: "Dynamic Interval for Team matches... target_evolve = int(8 - 4 * self.env.bot_difficulty)"
         # If I return 2 here, I lose that logic.
-        # I will leave PPO to handle Team dynamic logic? No I replaced it.
         # I should bind env to stage? 
         # Ideally Stage.on_enter(env) saves the env?
         # Yes, Stage can hold a reference to Env if initialized/entered.
@@ -320,12 +334,12 @@ class TeamStage(Stage):
         )
 
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
-        rv = p.get('ema_runner_vel', 0.0); rv = rv if rv is not None else 0.0
-        bd = p.get('ema_blocker_dmg', 0.0); bd = bd if bd is not None else 0.0
+        # Objectives: Win Rate, Spirit, Novelty
+        eff = p.get('ema_efficiency', 999.0); eff = eff if eff is not None else 999.0
         return [
             p.get('ema_wins', 0.0),
-            rv,
-            bd
+            p.get('team_spirit', 0.0),
+            -eff
         ]
         
     def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
@@ -380,26 +394,17 @@ class TeamStage(Stage):
                     trainer.log(f"-> Progress: Diff {trainer.env.bot_difficulty:.2f}")
 
             # Graduation to League
-            if trainer.env.bot_difficulty >= 1.0:
-                cons_wr = self.config.team_consistency_wr
-                abs_wr = self.config.team_absolute_wr
-                cons_checks = self.config.team_consistency_checks
+            if trainer.env.bot_difficulty >= self.config.team_graduation_difficulty:
+                min_wr = self.config.team_graduation_win_rate
+                checks = self.config.team_graduation_checks
                 
-                if rec_wr > cons_wr:
+                if rec_wr >= min_wr:
                     self.grad_consistency_counter += 1
                 else:
                     self.grad_consistency_counter = 0
                     
-                should_graduate = False
-                reason = ""
-                if rec_wr >= abs_wr:
-                    should_graduate = True
-                    reason = f"WR {rec_wr:.2f} >= {abs_wr}"
-                elif self.grad_consistency_counter >= cons_checks:
-                    should_graduate = True
-                    reason = f"WR > {cons_wr} for {cons_checks} checks"
-                    
-                if should_graduate:
+                if self.grad_consistency_counter >= checks:
+                    reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} (Diff {trainer.env.bot_difficulty:.2f}) for {checks} checks"
                     trainer.log(f">>> UPGRADING TO STAGE 4: LEAGUE ({reason}) <<<")
                     if auto:
                         trainer.env.stage_metrics["recent_games"] = 0

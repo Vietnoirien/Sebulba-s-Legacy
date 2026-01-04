@@ -57,9 +57,9 @@ class PPOTrainer:
         self.generation = 0
         self.iteration = 0
         
-        # Reward Weights [TotalEnvs, 14] - Per environment weights
-        # 14 = Win, Loss, CP, Scale, Progress, Runner, Blocker, StepPen, Orient, WrongWay, Mate, Prox, Magnet, Rank
-        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 14), device=self.device)
+        # Reward Weights [TotalEnvs, 15] - Per environment weights
+        # 15 = Win, Loss, CP, Scale, Progress, Runner, Blocker, StepPen, Orient, WrongWay, Mate, Prox, Magnet, Rank, Lap
+        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 15), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((15,), device=self.device)
@@ -184,6 +184,10 @@ class PPOTrainer:
         
         # Allocate Initial Buffers
         self.allocate_buffers()
+        
+        # Time Tracking
+        self.train_start_time = time.time()
+        self.last_log_time = time.time()
         
     def allocate_buffers(self):
         """Allocates or Re-allocates batch buffers based on current_num_steps"""
@@ -790,8 +794,30 @@ class PPOTrainer:
         # Get Current Step Penalty (Mean, as it might vary slightly or be uniform)
         curr_step_pen = self.reward_weights_tensor[:, RW_STEP_PENALTY].mean().item()
         
+        # Calculate Times
+        current_time = time.time()
+        iter_duration = current_time - self.last_log_time
+        total_duration = current_time - self.train_start_time
+        self.last_log_time = current_time
+        
+        # Format Iteration Duration (MM:SS)
+        iter_m, iter_s = divmod(int(iter_duration), 60)
+        iter_str = f"{iter_m:02d}:{iter_s:02d}"
+        
+        # Format Total Duration (Dd Hh Mm)
+        total_m, total_s = divmod(int(total_duration), 60)
+        total_h, total_m = divmod(total_m, 60)
+        total_d, total_h = divmod(total_h, 24)
+        
+        if total_d > 0:
+            total_str = f"{total_d}d {total_h:02d}h {total_m:02d}m"
+        elif total_h > 0:
+             total_str = f"{total_h}h {total_m:02d}m"
+        else:
+             total_str = f"{total_m}m {total_s}s"
+        
         self.log(border)
-        self.log(f" ITERATION {self.iteration} | Gen {self.generation} | Step {global_step} | SPS {sps}")
+        self.log(f" ITERATION {self.iteration} | Gen {self.generation} | Step {global_step} | SPS {sps} | Iter: {iter_str} | Total: {total_str}")
         self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f} | Step Pen: {curr_step_pen:.1f}")
         self.log("-" * 80)
         self.log(f" {'Metric':<15} | {'Leader':<10} | {'Pop Avg':<10} | {'Best Agt':<10}")

@@ -1,10 +1,11 @@
 import React, { useRef, useLayoutEffect, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls, Grid, useTexture, useGLTF, Text } from '@react-three/drei'
+import { OrbitControls, useTexture, useGLTF, Text, Environment, Sky } from '@react-three/drei'
 import { SkeletonUtils } from 'three-stdlib'
 import { useGameState, useGameActions } from '../../context/GameStateContext'
 import * as THREE from 'three'
-import bgImage from '../../assets/background.jpg'
+// @ts-ignore
+import mapGlbUrl from '../../assets/models/maps/StoneQuarry_SPT_mesh.glb'
 // Checkpoint Assets
 // @ts-ignore
 // @ts-ignore
@@ -60,16 +61,29 @@ const TEAM_COLORS = [
 ]
 
 const BackgroundRenderer: React.FC = () => {
-    const texture = useTexture(bgImage)
+    // Load Map Model
+    const { scene } = useGLTF(mapGlbUrl)
 
-    // Background is 16000x9000. 
-    // Position center at [80, -0.2, 45] to align with game coordinates starting at 0,0
-    return (
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[MAP_CENTER_X, -0.2, MAP_CENTER_Z]}>
-            <planeGeometry args={[MAP_WIDTH, MAP_HEIGHT]} />
-            <meshBasicMaterial map={texture} toneMapped={false} />
-        </mesh>
-    )
+    // Memoize the cloned scene to avoid re-cloning on every render
+    const mapClone = React.useMemo(() => {
+        const clone = SkeletonUtils.clone(scene)
+
+        // Apply Global Scale
+        clone.scale.set(0.2, 0.2, 0.2)
+
+        // Fix Orientation? OBJ usually comes in Y-up, but game coords might differ.
+        // If it was exported from Blender +Z up, we might need rotation.
+        // Based on previous ground plane: rotation={[-Math.PI / 2, 0, 0]}
+        // Let's assume the GLB is correct or needs standard X-flip if it was Z-up in Blender
+        // Standard GLTF is Y-up. If our map is Z-up in data, we usually rotate X by -90 deg.
+        // However, the optimize_assets script didn't rotate.
+        // Let's suspect we might need a rotation if it lies flat. 
+        // We'll inspect visuals. For now, assume Y-up GLTF standard.
+
+        return clone
+    }, [scene])
+
+    return <primitive object={mapClone} position={[80, -14, 40]} rotation={[0, Math.PI / 2, 0]} />
 }
 
 const SingleCheckpoint: React.FC<{
@@ -647,24 +661,14 @@ const SceneContent: React.FC<{
             <pointLight position={[10, 100, 10]} intensity={1.0} />
             <directionalLight position={[-100, 200, 50]} intensity={1.5} castShadow />
 
-            <Grid
-                position={[MAP_CENTER_X, -0.1, MAP_CENTER_Z]}
-                args={[200, 200]}
-                cellSize={10}
-                cellThickness={0.5}
-                cellColor="#222"
-                sectionSize={50}
-                sectionThickness={1}
-                sectionColor="#444"
-                fadeDistance={250}
-                infiniteGrid
-            />
 
             <BackgroundRenderer />
             <CheckpointsRenderer />
             <PodsRenderer swapSkins={swapSkins} />
             <ShieldsRenderer />
 
+            <Environment preset="sunset" />
+            <Sky />
             <CameraController mode={mode} focusedPodIndex={focusedPodIndex} />
         </>
     )
@@ -709,7 +713,7 @@ export const RaceScene3D: React.FC = () => {
     return (
         <div ref={containerRef} className="relative w-full aspect-[16/9] bg-black group">
             <Canvas
-                camera={{ position: [MAP_CENTER_X, 100, MAP_CENTER_Z + 80], fov: 60 }}
+                camera={{ position: [MAP_CENTER_X, 100, MAP_CENTER_Z + 80], fov: 60, far: 5000 }}
                 shadows
                 dpr={[1, 2]}
                 className="w-full h-full"
