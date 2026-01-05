@@ -95,33 +95,36 @@ graph TD
         Sim["Vectorized Simulation (8192 Envs)"]
         Physics["Custom Physics Engine & Rewards"]
         
-        subgraph AgentModel [Split DeepSets Agent]
+        subgraph AgentModel ["Split DeepSets Agent"]
             Input["Observation (52-dim)"]
-            Backbone[Shared Backbone]
+            Backbone["Shared Backbone"]
             
-            subgraph DualHeads [Heterogeneous Heads]
-                Runner[Runner Actor]
-                Blocker[Blocker Actor]
+            subgraph DualHeads ["Heterogeneous Heads"]
+                Runner["Runner Actor"]
+                Blocker["Blocker Actor"]
             end
             
-            Encoder[DeepSets Enemy Encoder]
+            Encoder["DeepSets Enemy Encoder"]
         end
     end
     
-    subgraph CPU [CPU Orchestration]
-        PPO[PPO Trainer + VectorizedAdam]
+    subgraph CPU ["CPU Orchestration"]
+        PPO["PPO Trainer + VectorizedAdam"]
         GA["Evolutionary Controller (NSGA-II)"]
         League["League Manager (PFSP)"]
-        Mitosis[Mitosis Manager]
+        Mitosis["Mitosis Manager"]
     end
     
     Sim -->|States (Batch)| Input
-    Input -->|Self + Team + Map| Backbone
-    Input -->|Enemies| Encoder --> Backbone
-    Backbone --> Runner & Blocker
-    Runner & Blocker -->|Role Mux| Sim
+    Input -->|"Self + Team + Map"| Backbone
+    Input -->|Enemies| Encoder 
+    Encoder --> Backbone
+    Backbone --> Runner
+    Backbone --> Blocker
+    Runner -->|Role Mux| Sim
+    Blocker -->|Role Mux| Sim
     
-    PPO -->|Gradients| AgentModel
+    PPO -->|Gradients| Backbone
     GA -->|Mutations| PPO
     Mitosis -->|Cloning| PPO
 ```
