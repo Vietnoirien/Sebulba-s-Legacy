@@ -91,7 +91,7 @@ The training process is automated through distinct stages of difficulty:
 
 ```mermaid
 graph TD
-    subgraph GPU [GPU Acceleration (16k SPS)]
+    subgraph GPU ["GPU Acceleration (66k SPS)"]
         Sim["Vectorized Simulation (8192 Envs)"]
         Physics["Custom Physics Engine & Rewards"]
         
