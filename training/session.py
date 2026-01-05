@@ -340,8 +340,8 @@ class TrainingSession:
                 trans = config["transitions"]
                 # Update known keys
                 for k in ["solo_efficiency_threshold", "solo_consistency_threshold",
-                          "duel_consistency_wr", "duel_absolute_wr", "duel_consistency_checks",
-                          "team_consistency_wr", "team_absolute_wr", "team_consistency_checks"]:
+                          "duel_graduation_difficulty", "duel_graduation_win_rate", "duel_graduation_checks",
+                          "team_graduation_difficulty", "team_graduation_win_rate", "team_graduation_checks"]:
                      if k in trans:
                          setattr(self.trainer.curriculum_config, k, float(trans[k]))
                 

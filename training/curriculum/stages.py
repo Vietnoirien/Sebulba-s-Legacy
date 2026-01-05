@@ -232,10 +232,12 @@ class DuelStage(Stage):
                 elif rec_wr > self.config.wr_progression_standard:
                     new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_standard); msg = "Standard"
 
-                if trainer.env.bot_difficulty < 1.0:
+                max_diff = self.config.duel_graduation_difficulty
+                if trainer.env.bot_difficulty < max_diff:
+                    if new_diff > max_diff: new_diff = max_diff
                     if msg and auto:
                          trainer.env.bot_difficulty = new_diff
-                         trainer.log(f"-> {msg}: Increasing Bot Difficulty to {trainer.env.bot_difficulty:.2f}")
+                         trainer.log(f"-> {msg}: Increasing Bot Difficulty to {trainer.env.bot_difficulty:.2f} (Capped at {max_diff})")
                 else:
                      # Max difficulty reached
                      pass
@@ -243,15 +245,10 @@ class DuelStage(Stage):
             # Graduation Check
             # Relaxed Constraint: Use Configurable Difficulty Threshold (e.g. 0.8) instead of 1.0
             if trainer.env.bot_difficulty >= self.config.duel_graduation_difficulty:
-                cons_wr = self.config.duel_consistency_wr
-                abs_wr = self.config.duel_absolute_wr
+                min_wr = self.config.duel_graduation_win_rate
+                checks = self.config.duel_graduation_checks
                 
-                # New "Competent" Threshold
-                min_wr = self.config.duel_graduation_min_wr
-                
-                cons_checks = self.config.duel_consistency_checks
-
-                if rec_wr > cons_wr:
+                if rec_wr >= min_wr:
                     self.grad_consistency_counter += 1
                 else:
                     self.grad_consistency_counter = 0
@@ -259,20 +256,9 @@ class DuelStage(Stage):
                 should_graduate = False
                 reason = ""
                 
-                # 1. Absolute Dominance
-                if rec_wr >= abs_wr and self.grad_consistency_counter >= 2:
+                if self.grad_consistency_counter >= checks:
                     should_graduate = True
-                    reason = f"Dominance: WR {rec_wr:.2f} >= {abs_wr}"
-                    
-                # 2. Consistent Competence
-                elif self.grad_consistency_counter >= cons_checks:
-                    should_graduate = True
-                    reason = f"Consistency: WR > {cons_wr} for {cons_checks} checks"
-                    
-                # 3. "Good Enough" Competence at High Difficulty (New Path)
-                elif rec_wr >= min_wr and self.grad_consistency_counter >= 3:
-                     should_graduate = True
-                     reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} (Diff {trainer.env.bot_difficulty:.2f})"
+                    reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} (Diff {trainer.env.bot_difficulty:.2f}) for {checks} checks"
                     
                 if should_graduate:
                      trainer.log(f">>> UPGRADING TO STAGE 3: TEAM ({reason}) <<<")
@@ -389,9 +375,11 @@ class TeamStage(Stage):
                 elif rec_wr > self.config.wr_progression_standard: new_diff += self.config.diff_step_standard
                 new_diff = min(1.0, new_diff)
                 
-                if trainer.env.bot_difficulty < 1.0 and auto:
+                max_diff = self.config.team_graduation_difficulty
+                if trainer.env.bot_difficulty < max_diff and auto:
+                    if new_diff > max_diff: new_diff = max_diff
                     trainer.env.bot_difficulty = new_diff
-                    trainer.log(f"-> Progress: Diff {trainer.env.bot_difficulty:.2f}")
+                    trainer.log(f"-> Progress: Diff {trainer.env.bot_difficulty:.2f} (Capped at {max_diff})")
 
             # Graduation to League
             if trainer.env.bot_difficulty >= self.config.team_graduation_difficulty:

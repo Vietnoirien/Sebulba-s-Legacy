@@ -367,12 +367,12 @@ DEFAULT_CONFIG = {
     "transitions": {
          "solo_efficiency_threshold": 30.0,
          "solo_consistency_threshold": 2000.0,
-         "duel_consistency_wr": 0.82,
-         "duel_absolute_wr": 0.84,
-         "duel_consistency_checks": 5,
-         "team_consistency_wr": 0.85,
-         "team_absolute_wr": 0.88,
-         "team_consistency_checks": 5
+         "duel_graduation_difficulty": 0.80,
+         "duel_graduation_win_rate": 0.65,
+         "duel_graduation_checks": 5,
+         "team_graduation_difficulty": 0.85,
+         "team_graduation_win_rate": 0.70,
+         "team_graduation_checks": 5
     }
 }
 

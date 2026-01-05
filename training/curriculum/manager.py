@@ -65,6 +65,26 @@ class CurriculumManager:
          # Trainer checks (prev != current) loop start and resets.
          # So we just set the state here.
          
+         if next_stage_id == STAGE_TEAM:
+             self.perform_mitosis(trainer)
+
+    def perform_mitosis(self, trainer):
+        """
+        Clones the Runner Actor's weights to the Blocker Actor for the entire population.
+        This provides a "Hot Start" for the Blocker, which otherwise starts random.
+        """
+        trainer.log(">>> [MITOSIS] Cloning Runner Weights to Blocker for all agents... <<<")
+        for p in trainer.population:
+            agent = p['agent']
+            # Clone state dict
+            runner_state = agent.runner_actor.state_dict()
+            agent.blocker_actor.load_state_dict(runner_state)
+            
+        # CRITICAL: Sync changes back to the Vectorized Stack (used for Inference/Training)
+        trainer.sync_agents_to_vectorized()
+        trainer.log(">>> [MITOSIS] Complete. Blocker initialized from Runner. <<<")
+
+         
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
         return self.current_stage.get_objectives(p)
         

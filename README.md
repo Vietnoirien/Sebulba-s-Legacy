@@ -10,22 +10,28 @@
 Unlike traditional RL implementations that run a handful of environments, this project leverages a custom **GPU-Accelerated Physics Engine** to simulate up to **32,768 environments in parallel** on a single consumer GPU (achieving **~16,000 Steps Per Second** on an RTX 5070). This massive throughput allows for the training of robust agents using **Population-Based Training (PBT)** within hours rather than days.
 
 > [!WARNING]
-> **Hardware Limits**: The configuration of **32,768 environments** (where **Minibatch Size ≈ Batch Size / 2**) is the confirmed stability limit for **12GB VRAM** GPUs (e.g., RTX 4070/5070). Exceeding these values may cause system freezes or OOM errors. For stability, we recommend **16,384 environments** (where **Minibatch Size ≈ Batch Size**).
+> **Hardware Limits**: 
+> *   **12GB VRAM (RTX 4070/5070)**: We recommend **8,192 Environments** with a **Population of 64**. This maintains a stable sample batch size while fitting within memory.
+> *   **16GB+ VRAM (RTX 3090/4090)**: You can scale up to **16,384 Environments** (Pop 128) for faster convergence.
+> *   **Note**: Exceeding these values may cause system freezes or OOM errors.
 
 The system combines state-of-the-art techniques from Deep Learning and Evolutionary Algorithms to solve complex continuous control problems.
 
 ## 🚀 Key Features
 
 ### 🧠 Advanced Reinforcement Learning
-*   **Massive Parallelism**: Trains on **16,384 concurrent environments** using pure PyTorch operations (Sim-to-Tensor), bypassing CPU bottlenecks.
+*   **Massive Parallelism**: Trains on **8,192+ concurrent environments** using pure PyTorch operations (Sim-to-Tensor), bypassing CPU bottlenecks.
 *   **PPO + GAE**: Utilizes Proximal Policy Optimization with Generalized Advantage Estimation for stable and sample-efficient learning.
-*   **Split DeepSets Architecture**:  
+*   **Vectorized Population Optimization**:
+    *   **Sim-to-Tensor**: Simulation states are kept on GPU, never copying to CPU.
+    *   **`torch.vmap` Training**: Leverages PyTorch's `vmap` (Vectorizing Map) to compute gradients for the **entire population of 128 agents** in a single kernel call.
+    *   **Vectorized Adam**: A custom optimizer implementation that applies updates to stacked parameters in parallel, supporting per-agent learning rates for PBT without the overhead of 128 separate optimizer instances.
+*   **Split DeepSets Architecture (~153k Params)**:  
     *   **Teammate Awareness**: Explicitly feeds teammate observations (Position, Velocity, Shield) directly to the backbone, enabling precise cooperative strategies (e.g., blocking, drafting).
-    *   **Heterogeneous Dual-Brain**: We deploy two specialized networks within the same agent:
+    *   **Heterogeneous Dual-Brain**: We deploy two specialized networks within the same agent (Inference size: ~72.7k Params):
         *   **Runner Brain** (Hidden 160): Optimized for racing lines and speed.
         *   **Blocker Brain** (Hidden 160): Optimized for interception and disruption.
-        *   This setup fits within the 100k char export limit (~68k chars) while allowing role specialization.
-    *   **Enemy Permutation Invariance**: Processes enemy observations via a **DeepSets Encoders** to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
+    *   **Shared Enemy Encoder**: Processes enemy observations via a **DeepSets Encoders** (Permutation Invariant) to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
     *   **Observation Space**: Flattened structure: `[Self Params, Teammate Params, Enemy Context (DeepSets), Checkpoint Vector]`.
 *   **Intrinsic Curiosity (RND)**: Incorporates **Random Network Distillation** to encourage exploration in sparse reward scenarios, preventing premature convergence.
 *   **Role Regularization**: implements a custom **Diversity Loss** (KL Divergence) between the Runner and Blocker heads during the Team stage. This forces the two efficient policy heads to specialize and behave differently in identical situations, preventing mode collapse.
@@ -34,17 +40,17 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
     *   **Implicit League Exploiter**: Standard PFSP agents that prey on the weaknesses of the entire history.
     *   **Implicit Main Exploiter**: A 10% chance to sample opponents from the **latest generation**, forcing the population to remain robust against the current meta.
 *   **Explicit League Exploiters**:
-    *   **Grouped Batch Inference**: In the League Stage, the system efficiently splits the 16,384-environment batch to allow different agents to fight different opponents simultaneously (Main vs History, Exploiters vs Leader).
+    *   **Grouped Batch Inference**: In the League Stage, the system efficiently splits the environment batch to allow different agents to fight different opponents simultaneously (Main vs History, Exploiters vs Leader).
     *   **Targeted Evolution**: A sub-population of "Exploiter" agents (dynamically scaled to **12.5% of population**) evolves purely to maximize Win Rate against the **Current Leader**, preventing cyclic drift while Main agents focus on historical robustness.
 
 ### 🧬 Evolutionary Strategy (GA + RL)
-*   **Population-Based Training (PBT)**: Evolves a population of **128 distinct agents**. Agents don't just learn a policy; they evolve their hyperparameters (**Learning Rate**, **Entropy Coefficient**, **Clip Range**) and reward weights over time. This allows the population to dynamically adjust its "conservativeness" and exploration vs exploitation balance.
+*   **Population-Based Training (PBT)**: Evolves a population of distinct agents. Agents don't just learn a policy; they evolve their hyperparameters (**Learning Rate**, **Entropy Coefficient**, **Clip Range**) and reward weights over time. This allows the population to dynamically adjust its "conservativeness" and exploration vs exploitation balance.
 *   **NSGA-II Selection**: Uses **Non-Dominated Sorting Genetic Algorithm II** to select elite agents based on multiple conflicting objectives that change per stage:
-    *   **Stage 0 (Nursery)**: Minimize Distance to Checkpoint + Maximize Consistency.
-    *   **Stage 1 (Solo)**: Maximize Efficiency (Minimize Steps) + Maximize Consistency.
-    *   **Stage 2 (Duel)**: Maximize Win Streak + Maximize Novelty (Quality Gated).
-    *   **Stage 3 (Team)**: Maximize Win Rate + Maximize Runner Velocity + Maximize Blocker Damage.
-    *   **Stage 4 (League)**: Maximize Win Rate + Maximize Laps Completed + Minimize Steps.
+    *   **Stage 0 (Nursery)**: Consistency + Nursery Score + Novelty.
+    *   **Stage 1 (Solo)**: Wins + Consistency + **(-Efficiency)**.
+    *   **Stage 2 (Duel)**: Win Rate + **(-Efficiency)** + Novelty. (Quality Gate: Novelty=0 if WR < 20%).
+    *   **Stage 3 (Team)**: Win Rate + **Team Spirit** + **(-Efficiency)**.
+    *   **Stage 4 (League)**: Win Rate + Laps + **(-Efficiency)**.
     *   **All Stages**: Maximize **Behavioral Novelty** (using EMA of speed/steering vectors) to maintain diversity.
 *   **Dynamic Reward Shaping**: The system "discovers" the optimal reward function by mutating the weights of various signals (Velocity, Orientation, Winning) during evolution.
 
@@ -55,17 +61,12 @@ The training process is automated through distinct stages of difficulty:
     *   **Graduation**: Consistency Score > **500.0**.
 2.  **Stage 1: Solo Time Trial (Optimization)**: Agents race against the clock on full procedural maps.
     *   **Goal**: Maximize Speed and Efficiency.
-    *   **Anti-Farming Mechanism**: A **Dynamic Step Penalty** activates if agents are "farming" high consistency with low speed. It forces a constant high penalty (~15.0 per step) to urgentize movement and avoid directional noise.
-    *   **Graduation**: Efficiency < **45.0** (Steps/CP) AND Consistency > **1500.0**.
+    *   **Thresholds**: Efficiency < **40.0** (Steps/CP), Consistency > 3000.0, Wins > 0.90.
 3.  **Stage 2: Duel (1v1)**: Agents face a scripted bot with **Dynamic Difficulty Scaling**.
-    *   **Progression Mechanism**:
-        *   **Standard**: Difficulty increases (+0.05) if Win Rate > **60%**.
-        *   **Turbo**: Difficulty increases (+0.10) if Win Rate > **70%**.
-        *   **Super Turbo**: Difficulty jumps (+0.20) if Win Rate > **85%**.
-        *   **Insane Turbo**: Difficulty jumps (+0.50) if Win Rate > **95%**.
-    *   **Graduation**: Absolute WR > **0.88** OR WR > **0.85** for 5 sequential consistency checks.
+    *   **Progression Mechanism**: Difficulty increases based on Win Rate thresholds (Standard/Turbo/Insane).
+    *   **Graduation**: Difficulty > 0.80 and WR > 0.65.
 4.  **Stage 3: Team (2v2)**: Agents control two pods (Runner & Blocker) against a scripted 2v2 team. 
-    *   **Mitosis Transition**: Upon entering Stage 2, the **Runner's weights are cloned to the Blocker**. This ensures the team starts with two competent drivers, preventing the "Dead Weight Blocker" problem. The Blocker then evolves independently towards aggression.
+    *   **Mitosis Transition**: Upon entering Stage 3, the **Runner's weights are explicitly cloned to the Blocker**. This provides a "Hot Start" for the Blocker, ensuring the team starts with two competent drivers before the Blocker evolves towards aggression.
     *   **Team Spirit**: A blending factor (`0.0` to `0.5`) linearly blends the reward signal from "Selfish" (My Velocity/Checkpoints) to "Cooperative" (Team Average) as difficulty increases.
 5.  **Stage 4: League**: Agents compete against a persistent "League" of historical elite agents in full 4-pod races.
 
@@ -85,57 +86,44 @@ The training process is automated through distinct stages of difficulty:
     *   **Technical Highlights**:
         *   **Two-Pass Glass Rendering**: Implements a custom dual-pass rendering technique (Back-face then Front-face) to handle complex transparency for checkpoints, eliminating sorting artifacts.
         *   **Instanced Assets**: Efficiently clones high-fidelity GLTF models using `SkeletonUtils` to maintain 60 FPS performance even with complex geometries.
-        *   **Crossing Indicators**: Visual markers appear on checkpoints when traversed, synchronized with the simulation state.
-
-### 🧬 Evolutionary Strategy (NSGA-II)
-We use a **Multi-Objective Genetic Algorithm** to select the best agents for the next generation.
-*   **Stage 0 (Nursery)**: `[Consistency, Nursery Score, Novelty]` (Lexicographic)
-*   **Stage 1 (Solo)**: `[Wins, Consistency, -Efficiency]` (Lexicographic)
-*   **Stage 2 (Duel)**: `[Win Rate, Novelty]` (NSGA-II)
-*   **Stage 3 (Team)**: `[Win Rate, Runner Vel, Blocker Dmg]` (NSGA-II)
-    *   **Win Rate**: Primary objective.
-    *   **Runner Velocity**: Maximize average velocity of the Runner pod.
-    *   **Blocker Damage**: Maximize impact damage dealt by the Blocker pod.
-*   **Stage 3 (League)**: 
-    *   **Main Agents**: `[Win Rate, Laps, -Efficiency]`
-    *   **Exploiter Agents**: `[Win Rate, Novelty]` (Pure Aggression)
-
-### 📊 Real-Time Visualization
-*   **Web Dashboard**: A React + Konva frontend rendering the simulation at 60 FPS.
-*   **Telemetry**: Displays real-time metrics for Learning Rate, Entropy, Win Rate, and detailed Population Stats.
-*   **Interactive Control**: Allows users to manually halt training, export submissions, or "Wipe/Reset" checkpoints dynamically.
 
 ## 🛠️ Architecture
 
 ```mermaid
 graph TD
-    subgraph GPU [GPU Acceleration]
-        Sim["Vectorized Simulation (4096 Envs)"]
-        Physics[Custom Physics Engine]
-        Models["Agent Population (DeepSets)"]
+    subgraph GPU [GPU Acceleration (16k SPS)]
+        Sim["Vectorized Simulation (8192 Envs)"]
+        Physics["Custom Physics Engine & Rewards"]
+        
+        subgraph AgentModel [Split DeepSets Agent]
+            Input[Observation (52-dim)]
+            Backbone[Shared Backbone]
+            
+            subgraph DualHeads [Heterogeneous Heads]
+                Runner[Runner Actor]
+                Blocker[Blocker Actor]
+            end
+            
+            Encoder[DeepSets Enemy Encoder]
+        end
     end
     
     subgraph CPU [CPU Orchestration]
-        PPO[PPO Trainer]
+        PPO[PPO Trainer + VectorizedAdam]
         GA["Evolutionary Controller (NSGA-II)"]
         League["League Manager (PFSP)"]
-        API[FastAPI Backend]
+        Mitosis[Mitosis Manager]
     end
     
-    subgraph Client [Web Interface]
-        React[React Dashboard]
-        Config[Config Panel]
-    end
+    Sim -->|States (Batch)| Input
+    Input -->|Self + Team + Map| Backbone
+    Input -->|Enemies| Encoder --> Backbone
+    Backbone --> Runner & Blocker
+    Runner & Blocker -->|Role Mux| Sim
     
-    Sim -->|States & Rewards| PPO
-    PPO -->|Actions| Sim
-    PPO -->|Telemetry| API
-    PPO -->|Metrics| GA
-    GA -->|Mutated Weights| PPO
-    League <-->|Opponents & Results| PPO
-    API -->|WebSockets| React
-    Config -->|Live Updates| API
-    API -->|Control & Config| PPO
+    PPO -->|Gradients| AgentModel
+    GA -->|Mutations| PPO
+    Mitosis -->|Cloning| PPO
 ```
 
 ## 📦 Installation
