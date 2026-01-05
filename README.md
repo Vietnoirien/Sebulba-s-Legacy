@@ -96,7 +96,7 @@ graph TD
         Physics["Custom Physics Engine & Rewards"]
         
         subgraph AgentModel [Split DeepSets Agent]
-            Input[Observation (52-dim)]
+            Input["Observation (52-dim)"]
             Backbone[Shared Backbone]
             
             subgraph DualHeads [Heterogeneous Heads]
