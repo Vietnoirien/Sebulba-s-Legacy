@@ -214,12 +214,6 @@ class PodRacerEnv:
                 # if num_reset > 0:
                 #      print(f"DEBUG: Generated MAX ENTROPY tracks for {num_curr} envs (CPs: {MIN_CHECKPOINTS}-{MAX_CHECKPOINTS}).")
                 self.checkpoints[curr_env_ids] = cps
-                # Standard
-                cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-                # if num_reset > 0:
-                #      print(f"DEBUG: Generated MAX ENTROPY tracks for {num_curr} envs (CPs: {MIN_CHECKPOINTS}-{MAX_CHECKPOINTS}).")
-                self.checkpoints[curr_env_ids] = cps
-
             
         # 2. Reset Pods
         # Start at CP0

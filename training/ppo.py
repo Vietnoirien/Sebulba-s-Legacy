@@ -1665,23 +1665,25 @@ class PPOTrainer:
                      self.behavior_stats_tensor[:, 2] += ag_dist
                      self.behavior_stats_tensor[:, 3] += count_val
                 
-                # Legacy support: If we still rely on population dict buffer for something, we update it at END of loop.
-                # But 'behavior_buffer' in dict was only used for EMA update.
-                # We can update the dicts ONCE after collection.
+                # Legacy legacy
+                pass
+                     
+                t_behavior_end = time.time() # T8 Ends Behavior
 
                 # Manual Reset
                 if dones.any():
                     reset_ids = torch.nonzero(dones).squeeze(-1)
                     self.env.reset(reset_ids)
+                
+                t_reset_end = time.time() # T9 Ends Reset
 
                 # Next Obs (New Start State)
                 with torch.no_grad():
                     obs_data = self.env.get_obs()
-                t_obs_end = time.time()
+                t_obs_end = time.time() # T10 Ends Obs
                 
                 if step % 100 == 0:
-                     t_post_behavior = time.time() # T8
-                     self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_post_behavior-t_post_telemetry)*1000:.1f} | H_Reset={(t_obs_end-t_post_behavior)*1000:.1f}")
+                     self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_behavior_end-t_post_telemetry)*1000:.1f} | H_Res={(t_reset_end-t_behavior_end)*1000:.1f} | I_Obs={(t_obs_end-t_reset_end)*1000:.1f}")
                     
                 all_self, all_tm, all_en, all_cp = obs_data
 
