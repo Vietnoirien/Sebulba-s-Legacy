@@ -234,3 +234,8 @@ class PodAgent(nn.Module):
              return action, log_prob, entropy, value, divergence
         else:
              return action, log_prob, entropy, value
+             
+    def forward(self, *args, method='get_action_and_value', **kwargs):
+        if method == 'get_value':
+            return self.get_value(*args, **kwargs)
+        return self.get_action_and_value(*args, **kwargs)

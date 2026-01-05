@@ -30,6 +30,8 @@ from training.evolution import calculate_novelty, fast_non_dominated_sort, calcu
 from training.rnd import RNDModel
 from config import *
 from training.curriculum.manager import CurriculumManager
+from training.optimizers import VectorizedAdam
+from torch.func import functional_call, vmap, grad
 
 # Hyperparameters and Constants moved to config.py
 
@@ -87,47 +89,37 @@ class PPOTrainer:
         else:
             self.scaler = None
         
-        self.compile_model = True if self.device.type == 'cuda' else False # Default to compile on CUDA
+        self.compile_model = True if self.device.type == 'cuda' else False 
         
+        # Template Agent for Functional Calls (Reference architecture)
+        self.template_agent = PodAgent().to(self.device)
+        # self.template_agent.forward is now handled by class definition with 'method' kwarg
+
         for i in range(self.config.pop_size):
             agent = PodAgent().to(self.device)
-            
-            # JIT Compilation (One-time cost at startup)
-            if self.compile_model and hasattr(torch, 'compile'):
-                 # Compile the agent! 
-                 # Note: efficient_compiler might be needed on some setups, but default is usually fine.
-                 # "reduce-overhead" is good for RL small batches, BUT "default" is safer for stability.
-                 try:
-                     agent = torch.compile(agent, mode="default") 
-                 except Exception as e:
-                     print(f"Warning: torch.compile failed for agent {i}: {e}")
-
-            optimizer = optim.Adam(agent.parameters(), lr=self.config.lr, eps=1e-5)
+            # No torch.compile here. No optimizer here.
             
             # Initial Reward Config (Clone Default)
-            # Add some noise for initial diversity?
             weights = DEFAULT_REWARD_WEIGHTS.copy()
-            # Randomize slightly?
             if i > 0:
-                 # Mutate orientation and velocity slightly
                  weights[RW_ORIENTATION] *= random.uniform(0.8, 1.2)
                  weights[RW_PROGRESS] *= random.uniform(0.8, 1.2)
             
             self.population.append({
                 'id': i,
-                'type': 'exploiter' if i >= split_index else 'main', # Dynamic Exploiter Split
+                'type': 'exploiter' if i >= split_index else 'main',
                 'agent': agent,
-                'optimizer': optimizer,
-                'weights': weights, # Python Dict for mutation logic
+                # 'optimizer': optimizer, # REMOVED
+                'weights': weights, 
                 'lr': self.config.lr,
-                'ent_coef': self.config.ent_coef, # Individual Entropy Coefficient
-                'clip_range': self.config.clip_range, # Individual Clip Range
+                'ent_coef': self.config.ent_coef,
+                'clip_range': self.config.clip_range,
                 'laps_score': 0,
                 'checkpoints_score': 0,
                 'reward_score': 0.0,
                 'efficiency_score': 999.0,
-                'wins': 0, # Track wins for League stage
-                'matches': 0, # Track completed matches
+                'wins': 0,
+                'matches': 0,
                 'max_streak': 0,
                 'total_cp_steps': 0,
                 'total_cp_hits': 0,
@@ -135,20 +127,16 @@ class PPOTrainer:
                 'avg_runner_vel': 0.0,
                 'avg_blocker_dmg': 0.0,
                 
-                # --- GA Robustness (EMA Stats) ---
-                'ema_efficiency': None, # Lower is better? We will invert or handle logic.
-                'ema_consistency': None, # Checkpoint Score
+                'ema_efficiency': None,
+                'ema_consistency': None,
                 'ema_wins': None,
                 'ema_laps': None,
                 'ema_runner_vel': None,
                 'ema_blocker_dmg': None,
-                'ema_dist': None, # Novelty Distance
+                'ema_dist': None,
                 
-                # --- Behavior Characterization ---
-                # Buffer to accumulate [Speed, Steering, MateDist] per step: [SumSpeed, SumSteer, SumDist, Count]
                 'behavior_buffer': torch.zeros(4, device=self.device),
                 
-                # Nursery Metrics (Inverse Distance)
                 'accum_dist_fraction': 0.0,
                 'accum_dist_count': 0.0,
                 'nursery_score': 0.0
@@ -159,6 +147,9 @@ class PPOTrainer:
             end_idx = start_idx + self.config.envs_per_agent
             for k, v in weights.items():
                 self.reward_weights_tensor[start_idx:end_idx, k] = v
+
+        # Initialize Stacked Params and Vectorized Optimizer
+        self.init_vectorized_population()
 
         # Default Pointer for API compatibility (Leader)
         self.leader_idx = 0
@@ -213,7 +204,6 @@ class PPOTrainer:
         """Allocates or Re-allocates batch buffers based on current_num_steps"""
         active_pods = self.get_active_pods()
         self.current_active_pods_count = len(active_pods)
-        self.log(f"Allocating buffers for {self.current_num_steps} steps per iteration. Active Pods: {self.current_active_pods_count}")
         
         # Decide Active Pods Max (Assume max 2 for buffer sizing to be safe, or separate?)
         # Buffers are per AGENT.
@@ -224,6 +214,11 @@ class PPOTrainer:
             
         # Total batch dimension = Steps * EnvsPerAgent * NumActivePods
         num_active_per_agent_step = num_active_pods * self.config.envs_per_agent
+        
+        # Log only if significantly changed or first run
+        if not hasattr(self, 'last_buffer_shape') or self.last_buffer_shape != (self.current_num_steps, num_active_per_agent_step):
+             self.log(f"Allocating buffers for {self.current_num_steps} steps per iteration. Active Pods: {self.current_active_pods_count}")
+             self.last_buffer_shape = (self.current_num_steps, num_active_per_agent_step)
         
         self.agent_batches = []
         for _ in range(self.config.pop_size):
@@ -248,6 +243,144 @@ class PPOTrainer:
         else:
              self.behavior_stats_tensor.zero_()
     
+    def init_vectorized_population(self):
+        """
+        Consolidates individual agent parameters into a single stacked TensorDict.
+        Initializes VectorizedAdam.
+        """
+        # 1. Stack Parameters
+        first_agent = self.population[0]['agent']
+        # We use strict ordering from named_parameters keys
+        param_names = [n for n, _ in first_agent.named_parameters()]
+        
+        self.stacked_params = {}
+        # Cache references for fast syncing
+        self.agent_param_refs = [dict(p['agent'].named_parameters()) for p in self.population]
+        
+        for name in param_names:
+            # Collect from all agents
+            all_p = [self.agent_param_refs[i][name] for i in range(self.config.pop_size)]
+            self.stacked_params[name] = torch.stack(all_p).detach().requires_grad_(True)
+            
+        # 2. Stack Buffers
+        buffer_names = [n for n, _ in first_agent.named_buffers()]
+        self.stacked_buffers = {}
+        self.agent_buffer_refs = [dict(p['agent'].named_buffers()) for p in self.population]
+        
+        for name in buffer_names:
+            all_b = [self.agent_buffer_refs[i][name] for i in range(self.config.pop_size)]
+            self.stacked_buffers[name] = torch.stack(all_b)
+            
+        # 3. Collect LRs
+        lrs = torch.tensor([p['lr'] for p in self.population], device=self.device)
+        
+        # 4. Initialize Vectorized Optimizer
+        self.vectorized_adam = VectorizedAdam(self.stacked_params, lrs, eps=1e-5)
+        
+        # 5. Compile Functional Wrapper (Optional but good)
+        # self.vmap_inference = torch.compile(vmap(self._functional_forward, ...))?
+        
+        self.log(f"Vectorized Population Initialized: {len(self.stacked_params)} param tensors stacked.")
+
+    def sync_vectorized_to_agents(self):
+        """
+        Copies stacked params back to individual agent instances.
+        Required for checkpointers, league manager, and evolution that rely on agent.state_dict().
+        """
+        with torch.no_grad():
+            Pop = self.config.pop_size
+            
+            for name, stacked_p in self.stacked_params.items():
+                for i in range(Pop):
+                     # In-place copy to existing parameter tensor
+                     self.agent_param_refs[i][name].copy_(stacked_p[i])
+                     
+            for name, stacked_b in self.stacked_buffers.items():
+                for i in range(Pop):
+                     self.agent_buffer_refs[i][name].copy_(stacked_b[i])
+
+    def sync_agents_to_vectorized(self):
+        """
+        Copies individual agent params TO the stacked vectorized tensors.
+        Must be called after loading checkpoints or manually modifying agents.
+        """
+        with torch.no_grad():
+            Pop = self.config.pop_size
+            
+            # Sync Params
+            for name, stacked_p in self.stacked_params.items():
+                # We can iterate or stack-copy. Stack copy might be cleaner but slower?
+                # stacked_p is [Pop, ...].
+                # We can construct a temp stack and copy it in?
+                # Or just loop. Loop 128 is fast.
+                for i in range(Pop):
+                    stacked_p[i].copy_(self.agent_param_refs[i][name])
+            
+            # Sync Buffers
+            for name, stacked_b in self.stacked_buffers.items():
+                for i in range(Pop):
+                    stacked_b[i].copy_(self.agent_buffer_refs[i][name])
+        
+        self.log("Synced Agents -> Vectorized Stack.")
+
+    def broadcast_checkpoint(self, state_dict):
+        """
+        Loads a state_dict (single agent) into ALL agents in the population 
+        and syncs to vectorized stack.
+        """
+        self.log(f"Broadcasting checkpoint to all {self.config.pop_size} agents...")
+        for p in self.population:
+            p['agent'].load_state_dict(state_dict)
+            # Reset Optimizer Momentums? Maybe.
+            # But let's assume we are loading for Evaluation mostly.
+            
+        self.sync_agents_to_vectorized()
+
+    def _functional_inference(self, params, buffers, s, tm, en, cp):
+        """
+        Functional wrapper for vmap inference.
+        """
+        return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'compute_divergence': False})
+
+    def _functional_get_value(self, params, buffers, s, tm, en, cp):
+        return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'method': 'get_value'})
+
+    def _functional_loss(self, params, buffers, s, tm, en, cp, act, old_logp, old_val, adv, ret, use_div, ent_coef, clip_range, vf_coef, div_coef):
+        # Forward
+        if use_div:
+            _, logp, ent, val, div = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp, act), kwargs={'compute_divergence': True})
+        else:
+            _, logp, ent, val = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp, act), kwargs={'compute_divergence': False})
+            div = torch.tensor(0.0, device=s.device)
+            
+        val = val.flatten()
+        ratio = (logp - old_logp).exp()
+        
+        # Advantage Normalization (Per-batch inside vmap? No, PPO usually norms batch-wide)
+        # But here 'adv' input is already normalized minibatches? 
+        # Standard PPO normalizes advantage over the MINIBATCH.
+        # If we normalize inside vmap, we normalize over 1 sample? NO.
+        # vmap maps over the POPULATION dimension.
+        # Inside vmap, 's' is [Minibatch, D] corresponding to ONE agent.
+        # So we can normalize adv inside here!
+        # adv is [Minibatch].
+        
+        if adv.numel() > 1:
+            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+            
+        # PPO Clip
+        surr1 = -adv * ratio
+        surr2 = -adv * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
+        pg_loss = torch.max(surr1, surr2).mean()
+        
+        # Value Loss
+        v_loss = 0.5 * ((val - ret) ** 2).mean()
+        
+        # Entropy & Div
+        loss = pg_loss - ent_coef * ent.mean() + vf_coef * v_loss - div_coef * div.mean()
+        
+        return loss, loss.detach()
+
     def log(self, msg):
         print(msg)
         if self.logger_callback:
@@ -564,83 +697,75 @@ class PPOTrainer:
         parent_candidates = sorted_pop_indices[:num_parents]
         
         # Replacement Logic
-        for idx in cull_indices:
-            loser = self.population[idx]
-            
-            # Tournament Selection from candidates
-            # Pick 3, choose Best (lowest rank, highest crowding)
-            competitors = random.sample(parent_candidates, 3)
-            competitors.sort(key=lambda i: (self.population[i]['rank'], -self.population[i]['crowding']))
-            parent_idx = competitors[0]
-            parent = self.population[parent_idx]
-            
-            # Clone Logic
-            loser['agent'].load_state_dict(parent['agent'].state_dict())
-            loser['lr'] = parent['lr']
-            loser['ent_coef'] = parent.get('ent_coef', self.config.ent_coef)
-            
-            # Clone EMAs! (Robustness Inheritance)
-            loser['ema_efficiency'] = parent['ema_efficiency']
-            loser['ema_wins'] = parent['ema_wins']
-            loser['ema_consistency'] = parent['ema_consistency']
-            loser['ema_laps'] = parent['ema_laps']
-            loser['ema_runner_vel'] = parent['ema_runner_vel']
-            loser['ema_blocker_dmg'] = parent['ema_blocker_dmg']
-            loser['ema_behavior'] = parent['ema_behavior'].clone() if parent.get('ema_behavior') is not None else None
-            
-            # Mutate Rewards (Still useful for PPO inner loop)
-            new_weights = parent['weights'].copy()
-            keys = list(new_weights.keys())
-            num_mutations = random.choice([1, 2])
-            for _ in range(num_mutations):
-                k = random.choice(keys)
-                factor = random.uniform(0.7, 1.3)
-                new_weights[k] *= factor
-            loser['weights'] = new_weights
-            
-            # Mutate Hyperparams
-            if random.random() < 0.3:
-                loser['lr'] *= random.uniform(0.8, 1.2)
+        # Replacement Logic
+        with torch.no_grad():
+            for idx in cull_indices:
+                loser = self.population[idx]
                 
-            # Reset Optimizer logic updated:
-            # We want to PRESERVE Momentum to avoid "lobotomy".
-            # Solution: Create new optimizer (linked to new parameters), then copy state.
-            
-            loser['optimizer'] = optim.Adam(loser['agent'].parameters(), lr=loser['lr'], eps=1e-5)
-            
-            # Copy Optimizer State (Momentum) from Parent
-            parent_opt = parent['optimizer']
-            loser_opt = loser['optimizer']
-            
-            # Adam state is mapped by Parameter object.
-            # We need to map Parent Param -> State -> Loser Param -> State.
-            # Since architectures are identical, we can use index mapping.
-            
-            parent_params = list(parent['agent'].parameters())
-            loser_params = list(loser['agent'].parameters())
-            
-            for p_src, p_dst in zip(parent_params, loser_params):
-                if p_src in parent_opt.state:
-                    # Deep copy the state (exp_avg, exp_avg_sq, step) to fresh buffer
-                    # We must ensure tensors are on correct device (should be same device)
-                    src_state = parent_opt.state[p_src]
-                    dst_state = copy.deepcopy(src_state) # Safe copy
-                    loser_opt.state[p_dst] = dst_state
-            
-            if random.random() < 0.3:
-                loser['ent_coef'] *= random.uniform(0.8, 1.2)
-                loser['ent_coef'] = max(0.0001, min(0.1, loser['ent_coef']))
+                # Tournament Selection from candidates
+                competitors = random.sample(parent_candidates, 3)
+                competitors.sort(key=lambda i: (self.population[i]['rank'], -self.population[i]['crowding']))
+                parent_idx = competitors[0]
+                parent = self.population[parent_idx]
                 
-            if random.random() < 0.3:
-                loser['clip_range'] *= random.uniform(0.8, 1.2)
-                loser['clip_range'] = max(0.05, min(0.4, loser['clip_range']))
+                # 1. Clone Params & Buffers (Stacked)
+                for name, p_stack in self.stacked_params.items():
+                    p_stack[idx].copy_(p_stack[parent_idx])
+                for name, b_stack in self.stacked_buffers.items():
+                    b_stack[idx].copy_(b_stack[parent_idx])
+                
+                # 2. Clone/Mutate Metadata
+                loser['lr'] = parent['lr']
+                loser['ent_coef'] = parent.get('ent_coef', self.config.ent_coef)
+                
+                # Clone EMAs
+                loser['ema_efficiency'] = parent['ema_efficiency']
+                loser['ema_wins'] = parent['ema_wins']
+                loser['ema_consistency'] = parent['ema_consistency']
+                loser['ema_laps'] = parent['ema_laps']
+                loser['ema_runner_vel'] = parent['ema_runner_vel']
+                loser['ema_blocker_dmg'] = parent['ema_blocker_dmg']
+                loser['ema_behavior'] = parent['ema_behavior'].clone() if parent.get('ema_behavior') is not None else None
+                
+                # Mutate Rewards
+                new_weights = parent['weights'].copy()
+                keys = list(new_weights.keys())
+                num_mutations = random.choice([1, 2])
+                for _ in range(num_mutations):
+                    k = random.choice(keys)
+                    factor = random.uniform(0.7, 1.3)
+                    new_weights[k] *= factor
+                loser['weights'] = new_weights
+                
+                # Mutate Hyperparams
+                if random.random() < 0.3:
+                    loser['lr'] *= random.uniform(0.8, 1.2)
+                    
+                # 3. Update Vectorized Optimizer State
+                self.vectorized_adam.lrs[idx] = loser['lr']
+                
+                for name, m_stack in self.vectorized_adam.exp_avg.items():
+                     m_stack[idx].copy_(m_stack[parent_idx])
+                for name, v_stack in self.vectorized_adam.exp_avg_sq.items():
+                     v_stack[idx].copy_(v_stack[parent_idx])
+                
+                if random.random() < 0.3:
+                    loser['ent_coef'] *= random.uniform(0.8, 1.2)
+                    loser['ent_coef'] = max(0.0001, min(0.1, loser['ent_coef']))
+                if random.random() < 0.3:
+                    loser['clip_range'] *= random.uniform(0.8, 1.2)
+                    loser['clip_range'] = max(0.05, min(0.4, loser['clip_range']))
 
-            self.log(f"Agent {loser['id']} (Rank {loser['rank']}) replaced by clone of {parent['id']} (Rank {parent['rank']})")
-             # Update Global Tensor
-            start_idx = loser['id'] * self.config.envs_per_agent
-            end_idx = start_idx + self.config.envs_per_agent
-            for k, v in new_weights.items():
-                self.reward_weights_tensor[start_idx:end_idx, k] = v
+                self.log(f"Agent {loser['id']} (Rank {loser['rank']}) replaced by clone of {parent['id']} (Rank {parent['rank']})")
+                
+                # Update Global Reward Tensor
+                start_idx = loser['id'] * self.config.envs_per_agent
+                end_idx = start_idx + self.config.envs_per_agent
+                for k, v in new_weights.items():
+                    self.reward_weights_tensor[start_idx:end_idx, k] = v
+        
+        # Sync back to instances for saving/compatibility
+        self.sync_vectorized_to_agents()
                  
         # 5. Save & Reset
         self.save_generation()
@@ -988,10 +1113,8 @@ class PPOTrainer:
             if current_stage == STAGE_TEAM and self.current_active_pods_count == 1:
                 self.log(f"DEBUG: Stage IS Team, but Alloc Count is 1. Active Count: {active_count}. Needs Realloc: {needs_realloc}")
 
-            if needs_realloc:
-                 self.log("DEBUG: Calling allocate_buffers()...")
-                 self.allocate_buffers() # Re-allocate
-                 self.log(f"DEBUG: New Batch Shape: {self.agent_batches[0]['self_obs'].shape}")
+            # Re-allocate buffers (Always, as they are consumed by update loop to save VRAM)
+            self.allocate_buffers()
                  
             if target_evolve != self.current_evolve_interval:
                  self.log(f"Config Update: Evolve Interval {self.current_evolve_interval} -> {target_evolve}")
@@ -1115,67 +1238,47 @@ class PPOTrainer:
                 # Actually, simpler:
                 # Keep normalized as [N_Active, self.config.num_envs, D]
                 
-                norm_self = norm_self.view(len(active_pods), self.config.num_envs, 15)
-                norm_tm = norm_tm.view(len(active_pods), self.config.num_envs, 13)
-                norm_en = norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
-                norm_cp = norm_cp.view(len(active_pods), self.config.num_envs, 6)
-                
-                # Now Agent i needs envs i*128 : (i+1)*128
-                # across ALL active pods.
-                # So we slice dim 1.
-                
                 t_loop_start = time.time() # T1
 
-                for i in range(self.config.pop_size):
-                    start_env = i * self.config.envs_per_agent
-                    end_env = start_env + self.config.envs_per_agent
-                    
-                    # Slice Normalized Tensors [N_Active, Batch, D]
-                    # We want [N_Active * Batch, D] for input to network
-                    # But careful with ordering. DeepSets treats input as Batch independent.
-                    # Flattening [N_A, B, D] -> [N_A*B, D] stacks pods: Pod0(Batch), Pod1(Batch).
-                    # This is fine.
-                    
-                    t0_self = norm_self[:, start_env:end_env, :].reshape(-1, 15)
-                    t0_tm = norm_tm[:, start_env:end_env, :].reshape(-1, 13)
-                    t0_en = norm_en[:, start_env:end_env, :, :].reshape(-1, 2, 13)
-                    t0_cp = norm_cp[:, start_env:end_env, :].reshape(-1, 6)
-                    
-                    with torch.no_grad():
-                        agent = self.population[i]['agent']
-                        action0, logprob0, _, value0 = agent.get_action_and_value(t0_self, t0_tm, t0_en, t0_cp)
-                        
-                    # Store
-                    # Agent batch storage expectation:
-                    # 'self_obs': [self.config.num_steps, n_active_per_agent, 14]
-                    # n_active_per_agent = N_Active * self.config.envs_per_agent
-                    # t0_self matches this size.
-                    
-                    
-                    batch = self.agent_batches[i]
-                    batch['self_obs'][step] = t0_self.detach()
-                    batch['teammate_obs'][step] = t0_tm.detach()
-                    batch['enemy_obs'][step] = t0_en.detach()
-                    batch['cp_obs'][step] = t0_cp.detach()
-                    batch['actions'][step] = action0.detach()
-                    batch['logprobs'][step] = logprob0.detach()
-                    batch['values'][step] = value0.flatten().detach()
-                    
-                    full_actions.append(action0)
-
-                # 2. Step Environment (Global)
-                # We need to construct [4096, 4, 4] action tensor
-                # full_actions is list of [N_Active * 512, 4]
-                # We need to map back to env structure
+                # === VECTORIZED INFERENCE ===
+                Pop = self.config.pop_size
+                N_A = len(active_pods)
+                EPA = self.config.envs_per_agent
                 
-                # Simple logic:
-                if len(active_pods) == 1:
-                     combined_act0 = torch.cat(full_actions, dim=0) # [4096, 4]
-                     act_map = { active_pods[0]: combined_act0 }
-                else:
-                     combined_act0 = torch.cat(full_actions, dim=0) # [4096 * 2, 4] (stacked)
-                     chunks = torch.chunk(combined_act0, len(active_pods), dim=0)
-                     act_map = { pid: c for pid, c in zip(active_pods, chunks) }
+                # Reshape for VMAP
+                # Source: [N_Active, TotalEnvs, D] (norm_self is still flat [N*T, D] until reshaped)
+                # Wait, code above line 1152 defined norm_self.view(...)
+                # But here we are replacing starting at 1152.
+                # Previous logic: norm_self = self.rms_self(raw_self) -> [N*T, D].
+                
+                v_s = norm_self.view(N_A, Pop, EPA, 15).permute(1, 0, 2, 3).reshape(Pop, -1, 15)
+                v_tm = norm_tm.view(N_A, Pop, EPA, 13).permute(1, 0, 2, 3).reshape(Pop, -1, 13)
+                v_en = norm_en.view(N_A, Pop, EPA, 2, 13).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 13)
+                v_cp = norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
+                
+                # VMAP Execution
+                v_act, v_lp, _, v_val = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0), randomness='different')(
+                    self.stacked_params, self.stacked_buffers, v_s, v_tm, v_en, v_cp
+                )
+                
+                # Store
+                for i in range(Pop):
+                    batch = self.agent_batches[i]
+                    batch['self_obs'][step] = v_s[i].detach()
+                    batch['teammate_obs'][step] = v_tm[i].detach()
+                    batch['enemy_obs'][step] = v_en[i].detach()
+                    batch['cp_obs'][step] = v_cp[i].detach()
+                    batch['actions'][step] = v_act[i].detach()
+                    batch['logprobs'][step] = v_lp[i].detach()
+                    batch['values'][step] = v_val[i].flatten().detach()
+                    
+                # Prepare act_map
+                r_act = v_act.view(Pop, N_A, EPA, 4)
+                out_act = r_act.permute(1, 0, 2, 3).reshape(N_A, Pop * EPA, 4)
+                
+                act_map = {}
+                for idx, pid in enumerate(active_pods):
+                     act_map[pid] = out_act[idx]
                 
                 # --- Timing Debug ---
                 t_infer_end = time.time() # T2
@@ -1763,41 +1866,40 @@ class PPOTrainer:
             all_next_vals = []
             all_rewards = []
             all_dones = []
-            all_values = []
-            
-            # Batch size per agent (Envs * ActivePods)
+            # === VECTORIZED UPDATE PHASE ===
             bs_per_agent = self.config.envs_per_agent * len(active_pods)
+            Pop = self.config.pop_size
+            N_A = len(active_pods)
+            EPA = self.config.envs_per_agent
 
-            # Pre-compute Next Values for all agents
-            for i in range(self.config.pop_size):
-                agent = self.population[i]['agent']
-                
-                # Slice Next Val Inputs matches current loop logic
-                start_env = i * self.config.envs_per_agent
-                end_env = start_env + self.config.envs_per_agent
-                
-                t0_self = next_norm_self[:, start_env:end_env, :].reshape(-1, 15)
-                t0_tm = next_norm_tm[:, start_env:end_env, :].reshape(-1, 13)
-                t0_en = next_norm_en[:, start_env:end_env, :, :].reshape(-1, 2, 13)
-                t0_cp = next_norm_cp[:, start_env:end_env, :].reshape(-1, 6)
-                
-                with torch.no_grad():
-                     n_v = agent.get_value(t0_self, t0_tm, t0_en, t0_cp).flatten()
-                     all_next_vals.append(n_v)
-                
-                # Collect buffer Refs
-                batch = self.agent_batches[i]
-                all_rewards.append(batch['rewards'])
-                all_dones.append(batch['dones'])
-                all_values.append(batch['values'])
-
-            # 2. Global Concatenation [Time, TotalBatch]
-            g_next_val = torch.cat(all_next_vals, dim=0) # [TotalBatch]
-            g_rewards = torch.cat(all_rewards, dim=1)    # [Time, TotalBatch]
-            g_dones = torch.cat(all_dones, dim=1)        # [Time, TotalBatch]
-            g_values = torch.cat(all_values, dim=1)      # [Time, TotalBatch]
+            # 1. Next Values (Vectorized)
+            # Reshape next_norm_* [N_A, TotalEnvs, D] -> [Pop, Batch, D]
+            v_n_s = next_norm_self.view(N_A, Pop, EPA, 15).permute(1, 0, 2, 3).reshape(Pop, -1, 15)
+            v_n_tm = next_norm_tm.view(N_A, Pop, EPA, 13).permute(1, 0, 2, 3).reshape(Pop, -1, 13)
+            v_n_en = next_norm_en.view(N_A, Pop, EPA, 2, 13).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 13)
+            v_n_cp = next_norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
             
-            # 3. Single Global GAE Loop (512 iters vs 65k)
+            with torch.no_grad():
+                v_next_vals = vmap(self._functional_get_value, in_dims=(0,0,0,0,0,0), randomness='different')(
+                     self.stacked_params, self.stacked_buffers, v_n_s, v_n_tm, v_n_en, v_n_cp
+                )
+            
+            # Flatten to [TotalBatch] matching g_dones structure
+            g_next_val = v_next_vals.flatten()
+            
+            # 2. Global GAE Construction
+            # Stack agent batches [Pop, Time, BPA]
+            # Use pop() to clear from agent_batches immediately to save VRAM
+            s_rew = torch.stack([b.pop('rewards') for b in self.agent_batches]) 
+            s_don = torch.stack([b.pop('dones') for b in self.agent_batches])
+            s_val = torch.stack([b.pop('values') for b in self.agent_batches])
+            
+            # Transpose to [Time, Pop, BPA] -> Flatten to [Time, TotalBatch]
+            g_rewards = s_rew.permute(1, 0, 2).reshape(self.current_num_steps, -1)
+            g_dones = s_don.permute(1, 0, 2).reshape(self.current_num_steps, -1)
+            g_values = s_val.permute(1, 0, 2).reshape(self.current_num_steps, -1)
+            
+            # 3. GAE Loop (Unchanged logic, just running on Global Tensors)
             g_adv = torch.zeros_like(g_rewards)
             lastgaelam = 0
             
@@ -1814,113 +1916,87 @@ class PPOTrainer:
             
             g_returns = g_adv + g_values
 
-            # 4. PPO Update Loop (Slicing back)
-            t_ppo_start = time.time()
-            for i in range(self.config.pop_size):
-                batch = self.agent_batches[i]
-                agent = self.population[i]['agent']
-                optimizer = self.population[i]['optimizer']
+            # Free GAE intermediates to save memory
+            del s_rew, s_don, g_rewards, g_dones, g_values, g_next_val
 
-                # Slice Global Results
-                st_idx = i * bs_per_agent
-                ed_idx = st_idx + bs_per_agent
-                
-                adv = g_adv[:, st_idx:ed_idx]
-                returns = g_returns[:, st_idx:ed_idx]
-                
-                # Flatten
-                # stored batches were [self.config.num_steps, rows_per_agent, ...]
-                b_obs_s = batch['self_obs'].reshape(-1, 15)
-                b_obs_tm = batch['teammate_obs'].reshape(-1, 13)
-                b_obs_en = batch['enemy_obs'].reshape(-1, 2, 13)
-                b_obs_c = batch['cp_obs'].reshape(-1, 6)
-                b_act   = batch['actions'].reshape(-1, 4)
-                b_logp  = batch['logprobs'].reshape(-1)
-                b_adv   = adv.reshape(-1)
-                b_ret   = returns.reshape(-1)
-                
-                # PPO Update
-                agent_samples = b_obs_s.size(0)
-                inds = np.arange(agent_samples)
-                
-                for _ in range(self.config.update_epochs):
-                    np.random.shuffle(inds)
-                    minibatch_size = self.config.batch_size // self.config.num_minibatches
-                    for st in range(0, agent_samples, minibatch_size):
-                        ed = st + minibatch_size
-                        mb = inds[st:ed]
-                        
-                        
-                        # Already Normalised in Collection phase!
-                        # Verify: t0_self = norm_self... -> Batch stores normalized.
-                        # So we do NOT normalize again here.
-                        
-                        b_s_norm = b_obs_s[mb]
-                        b_tm_norm = b_obs_tm[mb]
-                        b_en_norm = b_obs_en[mb]
-                        b_c_norm = b_obs_c[mb]
-                        
-                        
-                        # Get Values (for RND logging if needed, but mainly for PPO)
-                        
-                        
-                        # AMP Update
-                        with torch.amp.autocast('cuda', enabled=self.use_amp):
-                             # Role Regularization (Diversity)
-                             use_div = (self.env.curriculum_stage >= STAGE_TEAM)
-                             
-                             if use_div:
-                                  _, newlog, ent, newval, divergence = agent.get_action_and_value(
-                                     b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=True
-                                  )
-                             else:
-                                  divergence = torch.tensor(0.0, device=self.device)
-                                  _, newlog, ent, newval = agent.get_action_and_value(
-                                     b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=False
-                                  )
-                             
-                             newval = newval.flatten()
-                             ratio = (newlog - b_logp[mb]).exp()
-                             
-                             mb_adv = b_adv[mb]
-                             mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
-                             
-                             pg1 = -mb_adv * ratio
-                             current_clip = self.population[i].get('clip_range', self.config.clip_range)
-                             if torch.is_tensor(current_clip): current_clip = current_clip.detach()
-                             pg2 = -mb_adv * torch.clamp(ratio, 1-current_clip, 1+current_clip)
-                             pg_loss = torch.max(pg1, pg2).mean()
-                             
-                             v_loss = 0.5 * ((newval - b_ret[mb])**2).mean()
-     
-                             # Use Agent's Specific Entropy Coefficient
-                             current_ent_coef = self.population[i].get('ent_coef', self.config.ent_coef)
-                             if torch.is_tensor(current_ent_coef): current_ent_coef = current_ent_coef.detach()
-                             
-                             div_loss = divergence.mean()
-                             loss = pg_loss - current_ent_coef * ent.mean() + self.config.vf_coef * v_loss - self.config.div_coef * div_loss
-                        
-                        optimizer.zero_grad()
-                        
-                        if self.scaler is not None:
-                            # Scalar Scaling for AMP
-                            self.scaler.scale(loss).backward()
-                            self.scaler.unscale_(optimizer) # Unscale for clip_grad
-                            nn.utils.clip_grad_norm_(agent.parameters(), self.config.max_grad_norm)
-                            self.scaler.step(optimizer)
-                            self.scaler.update()
-                        else:
-                            # Standard Update
-                            loss.backward()
-                            nn.utils.clip_grad_norm_(agent.parameters(), self.config.max_grad_norm)
-                            optimizer.step()
-                        
-                        # Update RND (Intrinsic Curiosity)
-                        # We use the normalized observations of this batch to update the predictor
-                        # CRITICAL: Detach b_s_norm to prevent backward() from trying to access PPO graph nodes already freed.
-                        rnd_loss = self.rnd.update(b_s_norm.detach())
-                        
-                total_loss += loss.item()
+            # 4. PPO Update (Vectorized)
+            t_ppo_start = time.time()
+            
+            # Flatten Batches for Training: [Pop, TotalSamples, D]
+            # Aggressively release memory using pop()
+            flat_s = torch.stack([b.pop('self_obs') for b in self.agent_batches]).flatten(1, 2)
+            flat_tm = torch.stack([b.pop('teammate_obs') for b in self.agent_batches]).flatten(1, 2)
+            flat_en = torch.stack([b.pop('enemy_obs') for b in self.agent_batches]).flatten(1, 2)
+            flat_cp = torch.stack([b.pop('cp_obs') for b in self.agent_batches]).flatten(1, 2)
+            flat_act = torch.stack([b.pop('actions') for b in self.agent_batches]).flatten(1, 2)
+            flat_old_logp = torch.stack([b.pop('logprobs') for b in self.agent_batches]).flatten(1, 2)
+            
+            # Reuse s_val reference for old_val (since we need [Pop, Time, BPA] -> [Pop, TotalSamples])
+            # Wait, s_val was stacked [Pop, Time, BPA].
+            flat_old_val = s_val.flatten(1, 2) 
+            del s_val
+            
+            # Advantages: [Time, Pop*BPA] -> Permute/View back to [Pop, Time*BPA]
+            flat_adv = g_adv.view(self.current_num_steps, Pop, -1).permute(1, 0, 2).flatten(1, 2)
+            flat_ret = g_returns.view(self.current_num_steps, Pop, -1).permute(1, 0, 2).flatten(1, 2)
+            
+            # Config Tensors
+            t_ent = torch.tensor([p.get('ent_coef', self.config.ent_coef) for p in self.population], device=self.device)
+            t_clip = torch.tensor([p.get('clip_range', self.config.clip_range) for p in self.population], device=self.device)
+            t_vf = torch.tensor(self.config.vf_coef, device=self.device)
+            t_div_coef = torch.tensor(self.config.div_coef, device=self.device)
+            use_div = (self.env.curriculum_stage >= STAGE_TEAM)
+            
+            # Training Loop
+            num_samples = flat_s.shape[1]
+            inds = np.arange(num_samples)
+            # Use separate random state for shuffling? np.random.shuffle is in-place global. Fine.
+            batch_size = self.config.batch_size # This config is usually GLOBAL batch size?
+            # self.config.batch_size in standard PPO is usually num_steps * num_envs.
+            # Here we want per-agent batch size logic.
+            # self.config.batch_size // num_minibatches?
+            # Let's trust self.config.num_minibatches.
+            minibatch_size = num_samples // self.config.num_minibatches
+            
+            # Compiled Grad Function (Memoized by vmap implicitly? Better to compile)
+            compute_grad = vmap(grad(self._functional_loss, has_aux=True), in_dims=(0,0,0,0,0,0,0,0,0,0,0,None,0,0,None,None))
+            
+            for _ in range(self.config.update_epochs):
+                 np.random.shuffle(inds)
+                 for start in range(0, num_samples, minibatch_size):
+                      end = start + minibatch_size
+                      mb_inds = inds[start:end]
+                      
+                      # Slice [Pop, MB, D]
+                      m_s = flat_s[:, mb_inds]
+                      m_tm = flat_tm[:, mb_inds]
+                      m_en = flat_en[:, mb_inds]
+                      m_cp = flat_cp[:, mb_inds]
+                      m_act = flat_act[:, mb_inds]
+                      m_lp = flat_old_logp[:, mb_inds]
+                      m_v = flat_old_val[:, mb_inds]
+                      m_adv = flat_adv[:, mb_inds]
+                      m_ret = flat_ret[:, mb_inds]
+                      
+                      # Compute Vectorized Gradients
+                      # (Pop parallel)
+                      grads, batch_loss = compute_grad(
+                          self.stacked_params, self.stacked_buffers,
+                          m_s, m_tm, m_en, m_cp, m_act, m_lp, m_v, m_adv, m_ret, 
+                          use_div, t_ent, t_clip, t_vf, t_div_coef
+                      )
+                      
+                      total_loss += batch_loss.sum().item()
+                      
+                      # Optimizer Step
+                      self.vectorized_adam.step(grads)
+                      
+                      # RND Update (Flatten Population)
+                      self.rnd.update(m_s.reshape(-1, 15).detach())
+                 
+            # Sync back to agent instances (Partial)? 
+            # Not strictly needed for training, but for checkpoints/evolution.
+            # We defer sync to checkpoint time or evolution time.
 
             # Stats & Evolution
             t_final = time.time()
@@ -2042,6 +2118,8 @@ class PPOTrainer:
             
             # Save Checkpoint (Leader)
             if self.iteration % 50 == 0:
+                # Sync first!
+                self.sync_vectorized_to_agents()
                 # Save leader
                 leader_agent = self.population[self.leader_idx]['agent']
                 torch.save(leader_agent.state_dict(), f"data/checkpoints/model_gen{self.generation}_best.pt")

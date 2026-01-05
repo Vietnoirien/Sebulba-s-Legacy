@@ -298,7 +298,7 @@ async def load_checkpoint(name: str):
         
     try:
         state = torch.load(path, map_location=session.trainer.device)
-        session.trainer.agent.load_state_dict(state)
+        session.trainer.broadcast_checkpoint(state)
         # Set Active Model Name
         session.trainer.active_model_name = name
         return {"status": "loaded", "name": name}

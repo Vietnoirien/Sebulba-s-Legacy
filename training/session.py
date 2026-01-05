@@ -183,6 +183,9 @@ class TrainingSession:
                          
                          # Load RMS Stats
                          self._load_rms_stats(path)
+
+                         # IMPORTANT: Sync to Vectorized Stack
+                         self.trainer.sync_agents_to_vectorized()
                              
                      else:
                          self.trainer.log(f"No valid agent files found in {model_name}")
@@ -195,7 +198,8 @@ class TrainingSession:
                  self.trainer.log(f"Loading initial model: {model_name} from {path}")
                  try:
                     state = torch.load(path, map_location=self.trainer.device)
-                    self._safe_load_state_dict(self.trainer.agent, state)
+                    # Use broadcast to sync all
+                    self.trainer.broadcast_checkpoint(state)
                     self.trainer.active_model_name = model_name
                     import re
                     match = re.search(r"gen_(\d+)", model_name)

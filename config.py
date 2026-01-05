@@ -74,12 +74,12 @@ class TrainingConfig:
     
     # Resources
     total_timesteps: int = 2_000_000_000
-    num_envs: int = 16384
+    num_envs: int = 8192
     num_steps: int = 512
     device: str = "cuda"
     
     # PBT Settings
-    pop_size: int = 128
+    pop_size: int = 64
     evolve_interval: int = 2
     exploiter_ratio: float = 0.125
     
