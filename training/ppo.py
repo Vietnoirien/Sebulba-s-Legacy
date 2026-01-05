@@ -377,7 +377,10 @@ class PPOTrainer:
         v_loss = 0.5 * ((val - ret) ** 2).mean()
         
         # Entropy & Div
-        loss = pg_loss - ent_coef * ent.mean() + vf_coef * v_loss - div_coef * div.mean()
+        # CLAMP DIVERGENCE to prevent explosion (e.g. max 10.0)
+        div_clamped = torch.clamp(div.mean(), max=10.0)
+        
+        loss = pg_loss - ent_coef * ent.mean() + vf_coef * v_loss - div_coef * div_clamped
         
         return loss, loss.detach()
 
@@ -1063,8 +1066,18 @@ class PPOTrainer:
                            agent = p['agent']
                            # Clone Weights
                            agent.blocker_actor.load_state_dict(agent.runner_actor.state_dict())
-                           # Reset Optimizer (Critical to break old momentum)
-                           p['optimizer'] = optim.Adam(agent.parameters(), lr=p['lr'], eps=1e-5)
+                           
+                      # Reset Vectorized Optimizer State (Critical to break old momentum)
+                      self.log(">>> [MITOSIS] Resetting Vectorized Optimizer State to clear Stage 2 momentum. <<<")
+                      self.vectorized_adam.reset_state()
+
+                      # Reset Normalization Statistics (RMS) for Stage 3 Adaptation
+                      # Critical: Input distribution changes (Ghost -> Real), Stats must be flushed.
+                      self.log(">>> [MITOSIS] Resetting Return Normalization (RMS_RET) ONLY for Stage 3 Adaptation. Keeping Obs Stats. <<<")
+                      # self.rms_self.reset() # REMOVED: Keep physics scaling
+                      # self.rms_ent.reset()  # REMOVED: Keep entity scaling
+                      # self.rms_cp.reset()   # REMOVED: Keep cp scaling
+                      self.rms_ret.reset()    # KEEP: Reward scale changes significantly in Team Mode
                            
                  self.env.reset()
                  
@@ -1978,6 +1991,8 @@ class PPOTrainer:
                       m_adv = flat_adv[:, mb_inds]
                       m_ret = flat_ret[:, mb_inds]
                       
+                      # Compute Vectorized Gradients
+                      # (Pop parallel)
                       # Compute Vectorized Gradients
                       # (Pop parallel)
                       grads, batch_loss = compute_grad(

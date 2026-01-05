@@ -26,11 +26,11 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
     *   **Sim-to-Tensor**: Simulation states are kept on GPU, never copying to CPU.
     *   **`torch.vmap` Training**: Leverages PyTorch's `vmap` (Vectorizing Map) to compute gradients for the **entire population of 128 agents** in a single kernel call.
     *   **Vectorized Adam**: A custom optimizer implementation that applies updates to stacked parameters in parallel, supporting per-agent learning rates for PBT without the overhead of 128 separate optimizer instances.
-*   **Split DeepSets Architecture (~153k Params)**:  
+*   **Split Backbone Architecture (~141k Params)**:  
     *   **Teammate Awareness**: Explicitly feeds teammate observations (Position, Velocity, Shield) directly to the backbone, enabling precise cooperative strategies (e.g., blocking, drafting).
-    *   **Heterogeneous Dual-Brain**: We deploy two specialized networks within the same agent (Inference size: ~72.7k Params):
-        *   **Runner Brain** (Hidden 160): Optimized for racing lines and speed.
-        *   **Blocker Brain** (Hidden 160): Optimized for interception and disruption.
+    *   **Heterogeneous Dual-Brain**: We deploy two specialized networks within the same agent (Inference size: ~60.2k Params):
+        *   **PilotNet** (Hidden 64): Dedicated to robust driving (Input: Self + CP).
+        *   **CommanderNet** (Hidden 128): Dedicated to tactics (Input: Self + Team + Enemies).
     *   **Shared Enemy Encoder**: Processes enemy observations via a **DeepSets Encoders** (Permutation Invariant) to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
     *   **Observation Space**: Flattened structure: `[Self Params, Teammate Params, Enemy Context (DeepSets), Checkpoint Vector]`.
 *   **Intrinsic Curiosity (RND)**: Incorporates **Random Network Distillation** to encourage exploration in sparse reward scenarios, preventing premature convergence.
@@ -95,13 +95,12 @@ graph TD
         sim_vec["Vectorized Simulation (8192 Envs)"]
         physics_eng["Custom Physics Engine & Rewards"]
         
-        subgraph agent_model ["Split DeepSets Agent"]
-            obs_input["Observation (52-dim)"]
-            backbone_net["Shared Backbone"]
+        subgraph agent_model ["Split Backbone Agent"]
+            obs_input["Observation"]
             
-            subgraph dual_heads ["Heterogeneous Heads"]
-                actor_runner["Runner Actor"]
-                actor_blocker["Blocker Actor"]
+            subgraph split_brains ["Split Computation"]
+                pilot_net["PilotNet (Driving)"]
+                commander_net["CommanderNet (Tactics)"]
             end
             
             enemy_encoder["DeepSets Enemy Encoder"]
@@ -115,16 +114,15 @@ graph TD
         mitosis_mgr["Mitosis Manager"]
     end
     
-    sim_vec -- "States (Batch)" --> obs_input
-    obs_input -- "Self + Team + Map" --> backbone_net
-    obs_input -- "Enemies" --> enemy_encoder 
-    enemy_encoder --> backbone_net
-    backbone_net --> actor_runner
-    backbone_net --> actor_blocker
-    actor_runner -- "Role Mux" --> sim_vec
-    actor_blocker -- "Role Mux" --> sim_vec
+    sim_vec -- "Self+CP" --> pilot_net
+    sim_vec -- "Enemies" --> enemy_encoder 
+    enemy_encoder --> commander_net
+    sim_vec -- "Self+Team" --> commander_net
     
-    ppo_trainer -- "Gradients" --> backbone_net
+    pilot_net -- "Thrust, Angle" --> sim_vec
+    commander_net -- "Bias, Shield, Boost" --> sim_vec
+    
+    ppo_trainer -- "Gradients" --> split_brains
     ga_ctrl -- "Mutations" --> ppo_trainer
     mitosis_mgr -- "Cloning" --> ppo_trainer
 ```

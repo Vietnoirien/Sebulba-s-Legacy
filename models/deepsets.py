@@ -8,73 +8,127 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class PodActor(nn.Module):
+class PilotNet(nn.Module):
     """
-    Specialized Actor Network for a specific role (Runner or Blocker).
-    Fits within the 50k char budget (Hidden 160).
+    Pilot: Robust Driving (Self + CP).
+    Small capacity, focused on path following.
+    Input: Self(15) + CP(6) = 21
+    Output: Thrust(1), Angle(1)
     """
-    def __init__(self, hidden_dim=160):
+    def __init__(self, hidden_dim=64):
         super().__init__()
-        self.self_obs_dim = 15 # +1 for Rank
+        self.input_dim = 15 + 6
+        self.hidden_dim = hidden_dim
+        
+        self.net = nn.Sequential(
+            layer_init(nn.Linear(self.input_dim, self.hidden_dim)),
+            nn.ReLU(),
+            layer_init(nn.Linear(self.hidden_dim, self.hidden_dim)),
+            nn.ReLU()
+        )
+        
+        # Pilot Heads
+        self.head_thrust = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
+        self.head_angle = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
+        
+    def forward(self, self_obs, next_cp_obs):
+        # [B, 21]
+        x = torch.cat([self_obs, next_cp_obs], dim=1)
+        h = self.net(x)
+        return self.head_thrust(h), self.head_angle(h)
+
+class CommanderNet(nn.Module):
+    """
+    Commander: Tactics (Self + Team + Enemy).
+    Input: Self(15) + Team(13) + Enemy(13xN)
+    Output: Shield(2), Boost(2), Bias_Thrust(1), Bias_Angle(1)
+    """
+    def __init__(self, hidden_dim=128):
+        super().__init__()
+        self.self_obs_dim = 15
         self.teammate_obs_dim = 13
         self.enemy_obs_dim = 13
-        self.next_cp_dim = 6
         self.latent_dim = 16
         self.hidden_dim = hidden_dim
         
-        # Shared "Car" Encoder (Used for Enemy AND Teammate)
-        self.enemy_encoder = nn.Sequential(
+        # Shared Encoder for Enemies/Teammate
+        self.encoder = nn.Sequential(
             layer_init(nn.Linear(self.enemy_obs_dim, 32)),
             nn.ReLU(),
             layer_init(nn.Linear(32, self.latent_dim)),
         )
         
-        # Backbone
-        # Input: Self(14) + TeammateLatent(16) + EnemyLatent(16) + CP(6) = 52
-        input_dim = self.self_obs_dim + self.latent_dim + self.latent_dim + self.next_cp_dim
+        # Backbone Input: Self(15) + Team(16) + Enemy(16) = 47
         self.backbone = nn.Sequential(
-            layer_init(nn.Linear(input_dim, self.hidden_dim)),
+            layer_init(nn.Linear(self.self_obs_dim + self.latent_dim * 2, self.hidden_dim)),
             nn.ReLU(),
             layer_init(nn.Linear(self.hidden_dim, self.hidden_dim)),
             nn.ReLU(),
         )
         
         # Heads
-        self.actor_thrust_mean = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
-        self.actor_angle_mean  = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
+        self.head_shield = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
+        self.head_boost = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
+        self.head_bias_thrust = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
+        self.head_bias_angle = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
         
-        # LogStd (Learnable)
-        self.actor_logstd = nn.Parameter(torch.zeros(2)) 
+    def forward(self, self_obs, teammate_obs, enemy_obs):
+        # 1. Encode Teammate [B, 13] -> [B, 16]
+        tm_latent = self.encoder(teammate_obs)
         
-        # Discrete
-        self.actor_shield = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
-        self.actor_boost = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
-
-    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
-        # 1. Encode Teammate (Shared Encoder)
-        # Teammate is [B, 13]
-        tm_latent = self.enemy_encoder(teammate_obs) # [B, 16]
-
-        # 2. Encode Enemies (Shared Encoder + DeepSets)
+        # 2. Encode Enemies [B, N, 13] -> [B, 16] (DeepSets)
         B, N, _ = enemy_obs.shape
-        flat_enemies = enemy_obs.reshape(B * N, -1)
-        encodings = self.enemy_encoder(flat_enemies)
-        encodings = encodings.view(B, N, -1)
-        enemy_context, _ = torch.max(encodings, dim=1) # [B, 16]
+        flat_en = enemy_obs.reshape(B*N, -1)
+        enc_en = self.encoder(flat_en).view(B, N, -1)
+        env_ctx, _ = torch.max(enc_en, dim=1)
         
         # 3. Backbone
-        combined = torch.cat([self_obs, tm_latent, enemy_context, next_cp_obs], dim=1)
-        features = self.backbone(combined)
+        x = torch.cat([self_obs, tm_latent, env_ctx], dim=1)
+        h = self.backbone(x)
         
-        # Actor Heads
-        thrust_mean = torch.sigmoid(self.actor_thrust_mean(features))
-        angle_mean = torch.tanh(self.actor_angle_mean(features))
+        return (
+            self.head_shield(h),
+            self.head_boost(h),
+            self.head_bias_thrust(h),
+            self.head_bias_angle(h)
+        )
+
+class PodActor(nn.Module):
+    """
+    Split Backbone Actor.
+    Combines Pilot (Driving) and Commander (Tactics).
+    """
+    def __init__(self, hidden_dim=128): # hidden_dim for Commander
+        super().__init__()
+        
+        self.pilot = PilotNet(hidden_dim=64)
+        self.commander = CommanderNet(hidden_dim=hidden_dim)
+        
+        # LogStd (Learnable)
+        self.actor_logstd = nn.Parameter(torch.zeros(2))
+        
+    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
+        # Pilot
+        p_thrust, p_angle = self.pilot(self_obs, next_cp_obs)
+        
+        # Commander
+        c_shield, c_boost, c_bias_thrust, c_bias_angle = self.commander(self_obs, teammate_obs, enemy_obs)
+        
+        # Combine
+        # Thrust = Sigmoid(Pilot + CommanderBias)
+        # Angle = Tanh(Pilot + CommanderBias)
+        
+        thrust_logits = p_thrust + c_bias_thrust
+        angle_input = p_angle + c_bias_angle
+        
+        thrust_mean = torch.sigmoid(thrust_logits)
+        angle_mean = torch.tanh(angle_input)
+        
+        # Clamp std
         std = torch.exp(self.actor_logstd).expand_as(torch.cat([thrust_mean, angle_mean], 1))
+        std = torch.clamp(std, min=0.05)
         
-        shield_logits = self.actor_shield(features)
-        boost_logits = self.actor_boost(features)
-        
-        return (thrust_mean, angle_mean), std, (shield_logits, boost_logits)
+        return (thrust_mean, angle_mean), std, (c_shield, c_boost)
 
 class PodCritic(nn.Module):
     """
@@ -124,7 +178,7 @@ class PodCritic(nn.Module):
         return self.value_head(features)
 
 class PodAgent(nn.Module):
-    def __init__(self, hidden_dim=160): # hidden_dim applies to Actors
+    def __init__(self, hidden_dim=128): # hidden_dim applies to Commander
         super().__init__()
         
         self.hidden_dim = hidden_dim # For export reference

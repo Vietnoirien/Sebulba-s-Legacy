@@ -5,115 +5,124 @@ import argparse
 import sys
 import numpy as np
 import os
-from models.deepsets import PodAgent, PodActor
+from models.deepsets import PodAgent
 from config import *
 
 # Constants
 MAX_CHARS = 100000
 
-def fuse_normalization_actor(model, rms_stats):
+def fuse_normalization_pilot(model, rms_stats):
     """
-    Fuses RunningMeanStd statistics into a PodActor.
-    model: PodActor
-    rms_stats: Dict {'self': state_dict, 'ent': state_dict, 'cp': state_dict}
+    Fuses RMS stats into PilotNet.
+    Input: Self(15) + CP(6) = 21
     """
-    print(f"Fusing Normalization Statistics into Actor...")
-    
-    def get_ms(sd):
-        mean = sd['mean'].cpu().numpy()
-        var = sd['var'].cpu().numpy()
-        std = np.sqrt(var + 1e-4) 
-        return mean, std
-        
+    print("Fusing Pilot Normalization...")
+    # Get Stats
     mean_s, std_s = get_ms(rms_stats['self'])
-    mean_e, std_e = get_ms(rms_stats['ent'])
     mean_c, std_c = get_ms(rms_stats['cp'])
     
-    # 1. Enemy Encoder [0]
-    layer = model.enemy_encoder[0]
-    W = layer.weight.data.cpu().numpy() 
-    b = layer.bias.data.cpu().numpy()
-
-    # Mask out zero-variance features to prevent weight explosion
-    # Std is approx 0.01 if var=0 due to epsilon.
-    # If std < 0.02, we treat it as constant.
-    # Contribution from constant feature X=Mean is: (Mean - Mean)/Std * W = 0.
-    # So we can just set W_new = 0.
-    
-    # We construct W_new safely
-    W_new = np.zeros_like(W)
-    safe_mask = std_e > 0.05 # Threshold above epsilon 0.01
-    W_new[:, safe_mask] = W[:, safe_mask] / std_e[None, safe_mask]
-    
-    # Bias shift: b_new = b - sum(W_new * mean)
-    # Since W_new is 0 for unsafe features, they don't contribute shift.
-    # And since Input matches Mean for those features, (Input-Mean)/Std is 0.
-    # So mathematical equivalence is preserved.
-    bias_shift = np.sum(W_new * mean_e[None, :], axis=1)
-    b_new = b - bias_shift
-    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
-    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
-    
-    # 2. Backbone [0]
-    layer = model.backbone[0]
-    W = layer.weight.data.cpu().numpy() 
+    # Layer 0: Linear(21 -> 32)
+    layer = model.net[0]
+    W = layer.weight.data.cpu().numpy()
     b = layer.bias.data.cpu().numpy()
     
-    # Input: Self(15) + TeammateLatent(16) + EnemyLatent(16) + CP(6) = 53
+    # Split W: [32, 21] -> [32, 15] (Self), [32, 6] (CP)
     W_self = W[:, 0:15]
-    W_tm   = W[:, 15:31] # 16 (Latent)
-    W_ctx  = W[:, 31:47] # 16 (Latent)
-    W_cp   = W[:, 47:53] # 6
+    W_cp   = W[:, 15:21]
     
-    # Safe Self
-    W_self_new = np.zeros_like(W_self)
-    safe_s = std_s > 0.05
-    W_self_new[:, safe_s] = W_self[:, safe_s] / std_s[None, safe_s]
-    shift_self = np.sum(W_self_new * mean_s[None, :], axis=1)
-
-    # W_tm and W_ctx take latent inputs from previous layer (ReLU output), 
-    # so they don't need input normalization.
+    # Fuse Self
+    W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
     
-    # Safe CP
-    W_cp_new = np.zeros_like(W_cp)
-    safe_c = std_c > 0.05
-    W_cp_new[:, safe_c] = W_cp[:, safe_c] / std_c[None, safe_c]
-    shift_cp = np.sum(W_cp_new * mean_c[None, :], axis=1)
+    # Fuse CP
+    W_cp_new, shift_cp = fuse_layer_section(W_cp, mean_c, std_c)
     
-    W_new = np.concatenate([W_self_new, W_tm, W_ctx, W_cp_new], axis=1)
+    # Reassemble
+    W_new = np.concatenate([W_self_new, W_cp_new], axis=1)
     b_new = b - shift_self - shift_cp
     
     layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
     layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
 
-def quantize_weights(model):
+def fuse_normalization_commander(model, rms_stats):
     """
-    Extracts weights from PodActor, returns quantized int8 list.
+    Fuses RMS stats into CommanderNet.
+    Encoder Input: Enemy/Team (13)
+    Backbone Input: Self(15) + Latents...
+    """
+    print("Fusing Commander Normalization...")
+    mean_s, std_s = get_ms(rms_stats['self'])
+    mean_e, std_e = get_ms(rms_stats['ent']) # Used for both Team and Enemy
+    
+    # 1. Encoder Layer 0: Linear(13 -> 32)
+    layer = model.encoder[0]
+    W = layer.weight.data.cpu().numpy()
+    b = layer.bias.data.cpu().numpy()
+    
+    W_new, shift = fuse_layer_section(W, mean_e, std_e)
+    b_new = b - shift
+    
+    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
+    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
+    
+    # 2. Backbone Layer 0: Linear(47 -> 64)
+    # Input: Self(15) + TM(16) + EN(16)
+    layer = model.backbone[0]
+    W = layer.weight.data.cpu().numpy()
+    b = layer.bias.data.cpu().numpy()
+    
+    W_self = W[:, 0:15]
+    W_rest = W[:, 15:] # Latents are normalized by activations, not input stats
+    
+    W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
+    
+    W_new = np.concatenate([W_self_new, W_rest], axis=1)
+    b_new = b - shift_self
+    
+    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
+    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
+
+def get_ms(sd):
+    mean = sd['mean'].cpu().numpy()
+    var = sd['var'].cpu().numpy()
+    std = np.sqrt(var + 1e-4)
+    return mean, std
+
+def fuse_layer_section(W, mean, std, threshold=0.05):
+    W_new = np.zeros_like(W)
+    safe_mask = std > threshold
+    
+    # If std is too small, feature is constant -> W_new=0 (ignore strictly)
+    # or we could keep it if we trust the small std, but 0.05 is safe.
+    W_new[:, safe_mask] = W[:, safe_mask] / std[None, safe_mask]
+    
+    shift = np.sum(W_new * mean[None, :], axis=1)
+    return W_new, shift
+
+def quantize_weights(pilot, commander):
+    """
+    Extracts and quantizes weights from Pilot and Commander.
     """
     weights = []
-    ordered_layers = [
-        model.enemy_encoder[0], 
-        model.enemy_encoder[2], 
-        model.backbone[0],       
-        model.backbone[2],       
-        model.actor_thrust_mean, 
-        model.actor_angle_mean,  
-        model.actor_shield,      
-        model.actor_boost        
-    ]
     
-    for layer in ordered_layers:
-        w = layer.weight.data.cpu().numpy().flatten()
-        if layer.bias is not None:
-            b = layer.bias.data.cpu().numpy().flatten()
-        else:
-            b = np.zeros(layer.out_features)
-        weights.extend(w)
-        weights.extend(b)
+    # Pilot (Hidden 32)
+    # net[0], net[2], head_thrust, head_angle
+    for layer in [pilot.net[0], pilot.net[2], pilot.head_thrust, pilot.head_angle]:
+        weights.extend(extract_layer(layer))
         
-    # Quantization
-    min_val = min(weights)
-    max_val = max(weights)
+    # Commander (Hidden 64)
+    # encoder[0], encoder[2], backbone[0], backbone[2]
+    # head_shield, head_boost, head_bias_thrust, head_bias_angle
+    c_layers = [
+        commander.encoder[0], commander.encoder[2],
+        commander.backbone[0], commander.backbone[2],
+        commander.head_shield, commander.head_boost,
+        commander.head_bias_thrust, commander.head_bias_angle
+    ]
+    for layer in c_layers:
+        weights.extend(extract_layer(layer))
+        
+    # Quantize
+    min_val, max_val = min(weights), max(weights)
     scale = max(abs(min_val), abs(max_val)) / 127.0
     
     quantized = []
@@ -124,7 +133,16 @@ def quantize_weights(model):
         
     return quantized, scale
 
+def extract_layer(layer):
+    w = layer.weight.data.cpu().numpy().flatten()
+    if layer.bias is not None:
+        b = layer.bias.data.cpu().numpy().flatten()
+    else:
+        b = np.zeros(layer.out_features)
+    return np.concatenate([w, b])
+
 def encode_data(quantized_data):
+    # Base85 Encoding as per existing logic
     byte_valid = []
     for q in quantized_data:
         if q < 0: byte_valid.append(q + 256)
@@ -147,12 +165,10 @@ DUAL_FILE_TEMPLATE = """import sys, math
 W,H = {WIDTH},{HEIGHT}
 SP = 1.0/{WIDTH}.0
 SV = 1.0/1000.0
-HD = {HIDDEN_DIM}
 
 class N:
     def __init__(self,d,s):
-        self.w = self.dec(d,s)
-        self.c = 0
+        self.w = self.dec(d,s); self.c = 0
     def dec(self,b,s):
         w,v,cnt=[],0,0
         for c in b:
@@ -163,9 +179,7 @@ class N:
                     w.append((x-256 if x>127 else x)*s)
                 v,cnt=0,0
         return w
-    def gw(self,n):
-        r=self.w[self.c:self.c+n]; self.c+=n
-        return r
+    def gw(self,n): r=self.w[self.c:self.c+n]; self.c+=n; return r
     def lin(self,x,i,o,r=False):
         w,b,out=self.gw(i*o),self.gw(o),[]
         for k in range(o):
@@ -174,11 +188,19 @@ class N:
             out.append(max(0.0,a) if r else a)
         return out
 
-class A(N):
+class B(N):
     def f(self,s,t,e,c):
         self.c=0
-        w1,b1,w2,b2=self.gw(416),self.gw(32),self.gw(512),self.gw(16)
+        # --- PILOT ---
+        # Input 21 -> HP -> HP
+        hp={HP}
+        x=s+c
+        x=self.lin(x,21,hp,True); x=self.lin(x,hp,hp,True)
+        th_p=self.lin(x,hp,1)[0]; an_p=self.lin(x,hp,1)[0]
         
+        # --- COMMANDER ---
+        # Encoder (13->32->16) - 32 and 16 are fixed latent dims
+        w1,b1,w2,b2=self.gw(416),self.gw(32),self.gw(512),self.gw(16)
         def enc(inp):
             h=[0.0]*32
             for r in range(32):
@@ -192,22 +214,25 @@ class A(N):
                 z[r]=a
             return z
             
-        encs=[]
-        for en in e: encs.append(enc(en))
-        g=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
+        tm=enc(t)
+        encs=[enc(en) for en in e]
+        ctx=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
         
-        tm = enc(t)
+        # Backbone (47 -> HC -> HC)
+        hc={HC}
+        x=s+tm+ctx
+        x=self.lin(x,47,hc,True); x=self.lin(x,hc,hc,True)
         
-        x=s+tm+g+c
-        x=self.lin(x,53,HD,True)
-        x=self.lin(x,HD,HD,True)
-        th=self.lin(x,HD,1)[0]
-        an=self.lin(x,HD,1)[0]
-        sh=self.lin(x,HD,2)
-        bo=self.lin(x,HD,2)
-        th=1.0/(1.0+math.exp(-th))
-        an=(math.exp(2*an)-1)/(math.exp(2*an)+1)
-        return [th,an,1 if sh[1]>sh[0] else 0,1 if bo[1]>bo[0] else 0]
+        # Heads
+        sh=self.lin(x,hc,2); bo=self.lin(x,hc,2)
+        b_th=self.lin(x,hc,1)[0]; b_an=self.lin(x,hc,1)[0]
+        
+        # --- COMBINE ---
+        ft = 1.0/(1.0+math.exp(-(th_p + b_th)))
+        sum_a = an_p + b_an
+        fa = (math.exp(2*sum_a)-1)/(math.exp(2*sum_a)+1)
+        
+        return [ft,fa,1 if sh[1]>sh[0] else 0,1 if bo[1]>bo[0] else 0]
 
 WR="{BLOB_RUNNER}"
 SC_R={SCALE_VAL_R}
@@ -221,8 +246,7 @@ def tl(vx,vy,a):
     return vx*c+vy*s, -vx*s+vy*c
 
 def solve():
-    mr=A(WR,SC_R); mb=A(WB,SC_B)
-
+    mr=B(WR,SC_R); mb=B(WB,SC_B)
 
     input(); C=int(input())
     cps=[list(map(int,input().split())) for _ in range(C)]
@@ -294,7 +318,6 @@ def solve():
             cf,cr=tl(cx,cy,p['a'])
             ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
             
-
             if run[i]: out=mr.f(oself,otm,oen,ocp)
             else: out=mb.f(oself,otm,oen,ocp)
             
@@ -310,8 +333,9 @@ if __name__=="__main__": solve()
 """
 
 def export_model(model_path, output_path="submission.py"):
-    # Load Model (Dual Architecture)
-    agent = PodAgent(hidden_dim=160) # Ensure hidden dim matches training
+    # Load Model
+    # Since we changed defaults to 64, this should be fine
+    agent = PodAgent() 
     try:
         agent.load_state_dict(torch.load(model_path, map_location='cpu'))
     except Exception as e:
@@ -329,25 +353,29 @@ def export_model(model_path, output_path="submission.py"):
     if os.path.exists(rms_path):
         print(f"Loading RMS stats from {rms_path}")
         rms_stats = torch.load(rms_path, map_location='cpu')
-        fuse_normalization_actor(agent.runner_actor, rms_stats)
-        fuse_normalization_actor(agent.blocker_actor, rms_stats)
+        
+        fuse_normalization_pilot(agent.runner_actor.pilot, rms_stats)
+        fuse_normalization_commander(agent.runner_actor.commander, rms_stats)
+        
+        fuse_normalization_pilot(agent.blocker_actor.pilot, rms_stats)
+        fuse_normalization_commander(agent.blocker_actor.commander, rms_stats)
     else:
         print("WARNING: No RMS stats found!")
             
-    # Quantize Both
-    q_run, scale_run = quantize_weights(agent.runner_actor)
-    q_blk, scale_blk = quantize_weights(agent.blocker_actor)
+    # Quantize Both (Pilot + Commander seq)
+    q_run, scale_run = quantize_weights(agent.runner_actor.pilot, agent.runner_actor.commander)
+    q_blk, scale_blk = quantize_weights(agent.blocker_actor.pilot, agent.blocker_actor.commander)
     
     enc_run = encode_data(q_run)
     enc_blk = encode_data(q_blk)
-    
-    print(f"Encoded Sizes: Runner {len(enc_run)}, Blocker {len(enc_blk)}")
     
     # Escape
     run_esc = enc_run.replace("\\", "\\\\").replace("\"", "\\\"")
     blk_esc = enc_blk.replace("\\", "\\\\").replace("\"", "\\\"")
     
-    hidden_dim = agent.hidden_dim
+    # Retrieve Hidden Dims
+    hp = agent.runner_actor.pilot.hidden_dim
+    hc = agent.runner_actor.commander.hidden_dim
     
     script = DUAL_FILE_TEMPLATE.replace("{BLOB_RUNNER}", run_esc)\
         .replace("{SCALE_VAL_R}", str(scale_run))\
@@ -355,13 +383,14 @@ def export_model(model_path, output_path="submission.py"):
         .replace("{SCALE_VAL_B}", str(scale_blk))\
         .replace("{WIDTH}", str(WIDTH))\
         .replace("{HEIGHT}", str(HEIGHT))\
-        .replace("{HIDDEN_DIM}", str(hidden_dim))
+        .replace("{HP}", str(hp))\
+        .replace("{HC}", str(hc))
     
     with open(output_path, 'w') as f:
         f.write(script)
         
-    print(f"Exported to {output_path} (Dual Heterogeneous Brain)")
-    print(f"Total Params: {len(q_run) + len(q_blk)}")
+    print(f"Exported to {output_path}")
+    print(f"Total Chars: {len(script)}")
     return output_path
 
 def main():

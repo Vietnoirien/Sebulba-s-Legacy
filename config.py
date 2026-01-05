@@ -68,7 +68,7 @@ class TrainingConfig:
     ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
-    div_coef: float = 0.05 # Role Regularization Coefficient
+    div_coef: float = 0.005 # Role Regularization Coefficient (Reduced from 0.05 to prevent apathy)
     proficiency_penalty_const: float = 50.0
     ema_alpha: float = 0.3
     

@@ -27,6 +27,12 @@ class RunningMeanStd(nn.Module):
         self.var = M2 / tot_count
         self.count = tot_count
 
+    def reset(self):
+        """Resets the normalization statistics (mean=0, var=1)."""
+        self.mean.zero_()
+        self.var.fill_(1.0)
+        self.count.fill_(self.epsilon)
+
     def forward(self, x, fixed=False):
         if self.training and not fixed:
             self.update(x)

@@ -30,6 +30,14 @@ class VectorizedAdam:
         for name, p in self.params.items():
             self.exp_avg[name] = torch.zeros_like(p)
             self.exp_avg_sq[name] = torch.zeros_like(p)
+
+    def reset_state(self):
+        """Resets the optimizer state (momentum, variance, step count)."""
+        self.step_count = 0
+        for name in self.params:
+            self.exp_avg[name].zero_()
+            self.exp_avg_sq[name].zero_()
+
             
     def step(self, grads_dict: dict):
         with torch.no_grad():
