@@ -80,8 +80,28 @@ class PPOTrainer:
         num_exploiters = int(self.config.pop_size * self.config.exploiter_ratio)
         split_index = self.config.pop_size - num_exploiters
         
+        # Performance Optimizations
+        self.use_amp = torch.cuda.is_available() and getattr(torch.cuda, 'amp', None) is not None
+        if self.use_amp:
+            self.scaler = torch.amp.GradScaler('cuda') if hasattr(torch.amp, 'GradScaler') else torch.cuda.amp.GradScaler()
+        else:
+            self.scaler = None
+        
+        self.compile_model = True if self.device.type == 'cuda' else False # Default to compile on CUDA
+        
         for i in range(self.config.pop_size):
             agent = PodAgent().to(self.device)
+            
+            # JIT Compilation (One-time cost at startup)
+            if self.compile_model and hasattr(torch, 'compile'):
+                 # Compile the agent! 
+                 # Note: efficient_compiler might be needed on some setups, but default is usually fine.
+                 # "reduce-overhead" is good for RL small batches, BUT "default" is safer for stability.
+                 try:
+                     agent = torch.compile(agent, mode="default") 
+                 except Exception as e:
+                     print(f"Warning: torch.compile failed for agent {i}: {e}")
+
             optimizer = optim.Adam(agent.parameters(), lr=self.config.lr, eps=1e-5)
             
             # Initial Reward Config (Clone Default)
@@ -674,7 +694,13 @@ class PPOTrainer:
         for p in self.population:
             agent_id = p['id']
             save_path = os.path.join(gen_dir, f"agent_{agent_id}.pt")
-            torch.save(p['agent'].state_dict(), save_path)
+            
+            # Clean state_dict (Remove torch.compile _orig_mod prefix)
+            state_dict = p['agent'].state_dict()
+            if state_dict and next(iter(state_dict.keys())).startswith("_orig_mod."):
+                state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+                
+            torch.save(state_dict, save_path)
             
             # Register Top Agents to League
             # START SOTA UPDATE: Enforce strict entry criteria
@@ -876,7 +902,7 @@ class PPOTrainer:
             self.check_curriculum()
             
             # If Stage Changed, we MUST reset the environment to spawn new pods/apply new logic immediately.
-             if self.env.curriculum_stage != prev_stage:
+            if self.env.curriculum_stage != prev_stage:
                  self.log(f"Config: Stage Transition {prev_stage} -> {self.env.curriculum_stage}. Resetting Environment...")
                  
                  # --- Mitosis Strategy (Transition to Team Mode) ---
@@ -1013,6 +1039,10 @@ class PPOTrainer:
             # obs_data is tuple (self, tm, en, cp) tensors [4, self.config.num_envs, ...]
             all_self, all_tm, all_en, all_cp = obs_data
             
+            # CRITICAL: Disable Autograd for entire collection phase to prevent graph growth
+            _prev_grad_state = torch.is_grad_enabled()
+            torch.set_grad_enabled(False)
+            
             for step in range(self.current_num_steps):
                 if stop_event and stop_event.is_set(): break
                 # --- Global Normalization ---
@@ -1070,6 +1100,8 @@ class PPOTrainer:
                 # across ALL active pods.
                 # So we slice dim 1.
                 
+                t_loop_start = time.time() # T1
+
                 for i in range(self.config.pop_size):
                     start_env = i * self.config.envs_per_agent
                     end_env = start_env + self.config.envs_per_agent
@@ -1120,6 +1152,9 @@ class PPOTrainer:
                      combined_act0 = torch.cat(full_actions, dim=0) # [4096 * 2, 4] (stacked)
                      chunks = torch.chunk(combined_act0, len(active_pods), dim=0)
                      act_map = { pid: c for pid, c in zip(active_pods, chunks) }
+                
+                # --- Timing Debug ---
+                t_infer_end = time.time() # T2
                 
                 # Check for League Mode Opponent Logic (Stage 2: 2v2)
                 if self.env.curriculum_stage >= STAGE_LEAGUE:
@@ -1265,7 +1300,13 @@ class PPOTrainer:
                 # info is dictionary now
                 # rewards is [self.config.num_envs, 2] (Team 0, Team 1)
                 # dones is [self.config.num_envs]
-                rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau, team_spirit=self.team_spirit)
+                
+                t_inf_end = time.time() # This is actually T2 (Infer End) in logic, but here it's before Step.
+                # Let's rename for clarity:
+                t_pre_step = time.time() # T3
+                with torch.no_grad():
+                     rewards_all, dones, infos = self.env.step(env_actions, reward_weights=self.reward_weights_tensor, tau=current_tau, team_spirit=self.team_spirit)
+                t_step_end = time.time() # T4
                 
                 # --- Reward Processing ---
                 # Blending is now handled in Env (Hybrid: Individual Dense + Shared Sparse)
@@ -1332,104 +1373,161 @@ class PPOTrainer:
                      self.nursery_metrics_buffer[:, 0] += agent_scores
                      self.nursery_metrics_buffer[:, 1] += agent_counts
 
-                # --- Per-Agent Stats Loop ---
+                t_post_reward = time.time() # T5
+                
+                # --- Per-Agent Stats Loop (VECTORIZED ACCUMULATION) ---
+                # CRITICAL OPTIMIZATION: Removed .item() calls from inner loop.
+                # We now accumulate tensors and reduce ONCE at the end of iteration.
+                
+                # Checkpoints
+                # Filter infos first
+                # infos[...] are [4096, 4] -> [Pop*Envs, 4]
+                
+                # We need to sum per agent for the whole batch.
+                # Since agents are contiguous in dim 0 (rows), we can reshape and sum.
+                # Shape: [Pop, EnvsPerAgent, 4]
+                
+                # Metrics to track:
+                # 0. Reward Sum (Raw)
+                # 1. Laps
+                # 2. Checkpoints
+                # 3. Runner Vel
+                # 4. Blocker Dmg
+                # 5. Max Streak (Max is tricky to vector-accumulate without expansive memory, let's keep max per step?)
+                # 6. Efficiency (Steps/Hits)
+                # 7. Wins
+                # 8. Matches
+                
+                # 0. Rewards Raw
+                # rewards_all: [TotalEnvs, 4]
+                # To get per-agent mean:
+                # Reshape [Pop, EnvsPerAgent, 4]
+                r_reshaped = rewards_all.view(self.config.pop_size, self.config.envs_per_agent, 4)
+                
+                # Filter by active pods
+                # active_pods is list. 
+                # r_active = r_reshaped[:, :, active_pods] -> [Pop, EnvsPerAgent, N_Active]
+                r_active = r_reshaped[:, :, active_pods]
+                
+                # Sum over Envs and Pods, then divide by Count later
+                # We accumulate SUM and COUNT in a tensor buffer on GPU.
+                # We need a buffer for this iteration.
+                # Let's use a temporary buffer dict initialized outside loop?
+                # Or just accumulate into a 'metrics_buffer' tensor on self used for this loop?
+                
+                if not hasattr(self, '_iter_metrics'):
+                     # Allocate ONCE
+                     # [Pop, 10]
+                     # 0: RewardSum, 1: RewardCount, 2: Laps, 3: CPs, 4: Vel, 5: Dmg, 
+                     # 6: CP_Steps, 7: CP_Hits, 8: Wins, 9: Matches
+                     self._iter_metrics = torch.zeros((self.config.pop_size, 10), device=self.device)
+                     self._iter_max_streak = torch.zeros((self.config.pop_size,), device=self.device) # Keep max separate
+                
+                # 0. Rewards
+                # Sum over (Envs, ActivePods)
+                r_sum = r_active.sum(dim=(1, 2)) # [Pop]
+                r_count = r_active.numel() / self.config.pop_size # Scalar constant (EnvsPerAgent * N_Active)
+                
+                self._iter_metrics[:, 0] += r_sum
+                self._iter_metrics[:, 1] += r_count
+                
+                # 1 & 2. Laps & CPs
+                # infos['laps_completed']: [TotalEnvs, 4]
+                i_laps = infos['laps_completed'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                i_cps = infos['checkpoints_passed'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                i_streak = infos['current_streak'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                
+                # Filter Active
+                l_active = i_laps[:, :, active_pods]
+                # CP Logic: passed > 0 AND streak > 0
+                c_passed = (i_cps[:, :, active_pods] > 0)
+                c_streak = (i_streak[:, :, active_pods] > 0)
+                c_valid = (c_passed & c_streak).float()
+                
+                self._iter_metrics[:, 2] += l_active.sum(dim=(1, 2))
+                self._iter_metrics[:, 3] += c_valid.sum(dim=(1, 2))
+                
+                # 3 & 4. Roles
+                i_vel = infos['runner_velocity'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                i_dmg = infos['blocker_damage'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                
+                self._iter_metrics[:, 4] += i_vel[:, :, active_pods].sum(dim=(1, 2))
+                self._iter_metrics[:, 5] += i_dmg[:, :, active_pods].sum(dim=(1, 2))
+                
+                # 5. Max Streak
+                # Max over (Envs, ActivePods)
+                # i_streak_active = i_streak[:, :, active_pods]
+                # current_iter_max = i_streak_active.flatten(1).max(dim=1).values # [Pop]
+                # self._iter_max_streak = torch.max(self._iter_max_streak, current_iter_max)
+                
+                # Optimized Max:
+                # Only check active pods
+                streak_active = i_streak[:, :, active_pods]
+                # Max across Envs and Pods per agent
+                batch_max = streak_active.amax(dim=(1, 2)) # [Pop]
+                self._iter_max_streak = torch.maximum(self._iter_max_streak, batch_max)
+
+                # 6. Efficiency
+                # Filter CP1 Farmers (streak > 0)
+                i_steps = infos['cp_steps'].view(self.config.pop_size, self.config.envs_per_agent, 4)[:, :, active_pods]
+                
+                # Mask: steps > 0 AND streak > 0
+                # We need corresponding streak for active pods
+                s_active = i_streak[:, :, active_pods]
+                
+                eff_mask = (i_steps > 0) & (s_active > 0)
+                
+                # Sum Steps where mask is true
+                # We can just multiply steps * mask.float()
+                eff_steps = (i_steps * eff_mask.float()).sum(dim=(1, 2))
+                eff_hits = eff_mask.float().sum(dim=(1, 2))
+                
+                self._iter_metrics[:, 6] += eff_steps
+                self._iter_metrics[:, 7] += eff_hits
+                
+                # 7 & 8. Wins & Matches
+                # Dones [TotalEnvs] -> [Pop, EnvsPerAgent]
+                d_reshaped = dones.view(self.config.pop_size, self.config.envs_per_agent)
+                
+                # Winners [TotalEnvs] -> [Pop, EnvsPerAgent]
+                w_reshaped = self.env.winners.view(self.config.pop_size, self.config.envs_per_agent)
+                
+                # Win if winner == 0 (Pod 0 check is specific to "Me vs Enemy" setup where Me is Team 0)
+                # env.winners is Team ID (0 or 1). 
+                # We assume Agent is always Team 0 in its Environment View?
+                # Yes, env.py usually sets up 'self' as Team 0 relative to camera/obs, 
+                # but 'winners' is absolute Team ID.
+                # In Solo/Duel, Agent controls local Team 0.
+                
+                # Mask where Done is True
+                done_mask = d_reshaped.bool()
+                
+                # Wins where done AND winner == 0
+                wins = (done_mask & (w_reshaped == 0)).float().sum(dim=1)
+                matches = done_mask.float().sum(dim=1)
+                
+                self._iter_metrics[:, 8] += wins
+                self._iter_metrics[:, 9] += matches
+                
+                
+                # --- Fill Batch Data (Vectorized) ---
                 for i in range(self.config.pop_size):
+                    # We still need to fill the batch buffers for PPO Update
                     start_env = i * self.config.envs_per_agent
                     end_env = start_env + self.config.envs_per_agent
                     
-                    r_chunks = []
-                    d_chunks = []
+                    # We can't fully vectorize this assignment without changing self.agent_batches structure to a big tensor.
+                    # But assignment slice is fast enough (metadata op).
+                    # The slow part was the scalar accumulation logic above.
                     
-                    raw_sum = 0
-                    raw_count = 0
+                    # Store Sliced Tensors (Already on GPU)
+                    r_slice = norm_rewards[start_env:end_env, active_pods].flatten()
+                    d_slice = dones[start_env:end_env].repeat_interleave(len(active_pods))
                     
-                    d_slice = dones[start_env:end_env]
+                    self.agent_batches[i]['rewards'][step] = r_slice
+                    self.agent_batches[i]['dones'][step] = d_slice
                     
-                    for p_idx, pid in enumerate(active_pods):
-                        r_slice = norm_rewards[start_env:end_env, pid]
-                        r_chunks.append(r_slice)
-                        d_chunks.append(d_slice)
-                        
-                        # Logging Raw
-                        raw_r = rewards_all[start_env:end_env, pid]
-                        raw_sum += raw_r.mean().item()
-                        raw_count += 1
-                        
-                    flat_r = torch.cat(r_chunks, dim=0)
-                    flat_d = torch.cat(d_chunks, dim=0)
-                        
-                    self.agent_batches[i]['rewards'][step] = flat_r.detach()
-                    self.agent_batches[i]['dones'][step] = flat_d.float().detach()
-                    
-                    # Track Score for Evolution (Use RAW rewards)
-                    if raw_count > 0:
-                        self.population[i]['reward_score'] += (raw_sum / raw_count)
-                    
-                    # Track Cumulative Metrics (Laps & Checkpoints)
-                    # infos['laps_completed'] is [4096, 4]
-                    
-                    # Checkpoints
-                    # Filter infos first
-                    agent_infos_laps = infos['laps_completed'][start_env:end_env] # [128, 4]
-                    agent_infos_cps = infos['checkpoints_passed'][start_env:end_env] # [128, 4]
-                    agent_start_streak = infos['current_streak'][start_env:end_env] # [128, 4]
-                    
-                    # Mask by active pods
-                    active_laps = 0
-                    active_cps = 0
-                    for pid in active_pods:
-                         active_laps += agent_infos_laps[:, pid].sum().item()
-                         passed_mask = (agent_infos_cps[:, pid] > 0)
-                         streak_mask = (agent_start_streak[:, pid] > 0)
-                         active_cps += (passed_mask & streak_mask).sum().item()
-                         
-                    self.population[i]['laps_score'] += active_laps
-                    self.population[i]['checkpoints_score'] += active_cps
-                    
-                    # Accumulate Role Metrics
-                    agent_infos_vel = infos['runner_velocity'][start_env:end_env] # [128, 4]
-                    agent_infos_dmg = infos['blocker_damage'][start_env:end_env] # [128, 4]
-                    
-                    active_vel_sum = 0.0
-                    active_dmg_sum = 0.0
-                    
-                    for pid in active_pods:
-                         active_vel_sum += agent_infos_vel[:, pid].sum().item()
-                         active_dmg_sum += agent_infos_dmg[:, pid].sum().item()
-                         
-                    self.population[i]['avg_runner_vel'] += active_vel_sum
-                    self.population[i]['avg_blocker_dmg'] += active_dmg_sum
-                    
-                    # Track New Metrics
-                    start_streak = agent_start_streak 
-                    start_steps = infos['cp_steps'][start_env:end_env] 
-                    
-                    # Max Streak
-                    current_max = start_streak.max().item()
-                    if current_max > self.population[i]['max_streak']:
-                        self.population[i]['max_streak'] = current_max
-                        
-                    # Efficiency
-                    # FILTER CP1 FARMERS: Only record efficiency for streak > 0
-                    mask = (start_steps > 0) & (start_streak > 0)
-                    if mask.any():
-                        self.population[i]['total_cp_steps'] += start_steps[mask].sum().item()
-                        self.population[i]['total_cp_hits'] += mask.sum().item()
-                    
-                    # Wins (Track from env.winners on Reset)
-                    agent_dones = d_slice.bool()
-                    if agent_dones.any():
-                        # Global indices
-                        idx_rel = torch.nonzero(agent_dones).flatten()
-                        idx_global = start_env + idx_rel
-                        
-                        current_winners = self.env.winners[idx_global]
-                        
-                        win_count = (current_winners == 0).sum().item()
-                        self.population[i]['wins'] += win_count
-                        
-                        match_count = agent_dones.sum().item()
-                        self.population[i]['matches'] += match_count
+                t_post_stats = time.time() # T6
                     
                 # Telemetry (Capture BEFORE Reset to see Finish Line state)
                 if telemetry_callback:
@@ -1484,6 +1582,8 @@ class PPOTrainer:
                                               selected_idx = random.choice(candidates)
                                          
                                          self.telemetry_env_indices[t_idx] = selected_idx
+                
+                t_post_telemetry = time.time() # T7
                 
                 # --- Behavior Characterization Tracking ---
                 # Track Avg Speed and Steering Variance per Agent
@@ -1552,12 +1652,63 @@ class PPOTrainer:
                     self.env.reset(reset_ids)
 
                 # Next Obs (New Start State)
-                obs_data = self.env.get_obs()
+                with torch.no_grad():
+                    obs_data = self.env.get_obs()
+                t_obs_end = time.time()
+                
+                if step % 100 == 0:
+                    # define t_infra if not defined (safe guard)
+                    if 't_infra' in locals() and 't_inf_end' in locals() and 't_step_end' in locals():
+                        t_post_behavior = time.time() # T8
+                        self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_post_behavior-t_post_telemetry)*1000:.1f} | H_Reset={(t_obs_end-t_post_behavior)*1000:.1f}")
+                    
                 all_self, all_tm, all_en, all_cp = obs_data
+
+            # Restore Grad
+            torch.set_grad_enabled(_prev_grad_state)
+
+            # --- POST-COLLECTION REDUCTION (SYNC CPU ONCE) ---
+            # Flush metrics from GPU to CPU
+            if hasattr(self, '_iter_metrics'):
+                # Copy to CPU
+                metrics_cpu = self._iter_metrics.cpu().numpy()
+                max_streak_cpu = self._iter_max_streak.cpu().numpy()
+                
+                # 0: RewardSum, 1: RewardCount, 2: Laps, 3: CPs, 4: Vel, 5: Dmg, 
+                # 6: CP_Steps, 7: CP_Hits, 8: Wins, 9: Matches
+                
+                for i in range(self.config.pop_size):
+                    m = metrics_cpu[i]
+                    
+                    if m[1] > 0:
+                        self.population[i]['reward_score'] += (m[0] / m[1])
+                    
+                    self.population[i]['laps_score'] += int(m[2])
+                    self.population[i]['checkpoints_score'] += int(m[3])
+                    self.population[i]['avg_runner_vel'] += m[4]
+                    self.population[i]['avg_blocker_dmg'] += m[5]
+                    
+                    # Logic needs to account for max streak being tracked per step? 
+                    # Yes, we did max over batch per step accumulator.
+                    cur_max = int(max_streak_cpu[i])
+                    if cur_max > self.population[i]['max_streak']:
+                        self.population[i]['max_streak'] = cur_max
+                        
+                    self.population[i]['total_cp_steps'] += int(m[6])
+                    self.population[i]['total_cp_hits'] += int(m[7])
+                    
+                    self.population[i]['wins'] += int(m[8])
+                    self.population[i]['matches'] += int(m[9])
+                
+                # Reset Buffers
+                self._iter_metrics.zero_()
+                self._iter_max_streak.zero_()
 
             # 3. Update Phase (Per Agent)
             # Bootstrapping & Training
             total_loss = 0
+            
+            t_gae_start = time.time()
             
             # Global Normalize Next Obs (Fixed=True)
             # Source: [4, self.config.num_envs, ...]
@@ -1641,6 +1792,7 @@ class PPOTrainer:
             g_returns = g_adv + g_values
 
             # 4. PPO Update Loop (Slicing back)
+            t_ppo_start = time.time()
             for i in range(self.config.pop_size):
                 batch = self.agent_batches[i]
                 agent = self.population[i]['agent']
@@ -1689,42 +1841,56 @@ class PPOTrainer:
                         # Get Values (for RND logging if needed, but mainly for PPO)
                         
                         
-                        # Role Regularization (Diversity)
-                        use_div = (self.env.curriculum_stage >= STAGE_TEAM)
-                        
-                        if use_div:
-                             _, newlog, ent, newval, divergence = agent.get_action_and_value(
-                                b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=True
-                             )
-                        else:
-                             divergence = torch.tensor(0.0, device=self.device)
-                             _, newlog, ent, newval = agent.get_action_and_value(
-                                b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=False
-                             )
-                        
-                        newval = newval.flatten()
-                        ratio = (newlog - b_logp[mb]).exp()
-                        
-                        mb_adv = b_adv[mb]
-                        mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
-                        
-                        pg1 = -mb_adv * ratio
-                        current_clip = self.population[i].get('clip_range', self.config.clip_range)
-                        pg2 = -mb_adv * torch.clamp(ratio, 1-current_clip, 1+current_clip)
-                        pg_loss = torch.max(pg1, pg2).mean()
-                        
-                        v_loss = 0.5 * ((newval - b_ret[mb])**2).mean()
-
-                        
-                        # Use Agent's Specific Entropy Coefficient
-                        current_ent_coef = self.population[i].get('ent_coef', self.config.ent_coef)
-                        div_loss = divergence.mean()
-                        loss = pg_loss - current_ent_coef * ent.mean() + self.config.vf_coef * v_loss - self.config.div_coef * div_loss
+                        # AMP Update
+                        with torch.amp.autocast('cuda', enabled=self.use_amp):
+                             # Role Regularization (Diversity)
+                             use_div = (self.env.curriculum_stage >= STAGE_TEAM)
+                             
+                             if use_div:
+                                  _, newlog, ent, newval, divergence = agent.get_action_and_value(
+                                     b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=True
+                                  )
+                             else:
+                                  divergence = torch.tensor(0.0, device=self.device)
+                                  _, newlog, ent, newval = agent.get_action_and_value(
+                                     b_s_norm, b_tm_norm, b_en_norm, b_c_norm, b_act[mb], compute_divergence=False
+                                  )
+                             
+                             newval = newval.flatten()
+                             ratio = (newlog - b_logp[mb]).exp()
+                             
+                             mb_adv = b_adv[mb]
+                             mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                             
+                             pg1 = -mb_adv * ratio
+                             current_clip = self.population[i].get('clip_range', self.config.clip_range)
+                             if torch.is_tensor(current_clip): current_clip = current_clip.detach()
+                             pg2 = -mb_adv * torch.clamp(ratio, 1-current_clip, 1+current_clip)
+                             pg_loss = torch.max(pg1, pg2).mean()
+                             
+                             v_loss = 0.5 * ((newval - b_ret[mb])**2).mean()
+     
+                             # Use Agent's Specific Entropy Coefficient
+                             current_ent_coef = self.population[i].get('ent_coef', self.config.ent_coef)
+                             if torch.is_tensor(current_ent_coef): current_ent_coef = current_ent_coef.detach()
+                             
+                             div_loss = divergence.mean()
+                             loss = pg_loss - current_ent_coef * ent.mean() + self.config.vf_coef * v_loss - self.config.div_coef * div_loss
                         
                         optimizer.zero_grad()
-                        loss.backward()
-                        nn.utils.clip_grad_norm_(agent.parameters(), self.config.max_grad_norm)
-                        optimizer.step()
+                        
+                        if self.scaler is not None:
+                            # Scalar Scaling for AMP
+                            self.scaler.scale(loss).backward()
+                            self.scaler.unscale_(optimizer) # Unscale for clip_grad
+                            nn.utils.clip_grad_norm_(agent.parameters(), self.config.max_grad_norm)
+                            self.scaler.step(optimizer)
+                            self.scaler.update()
+                        else:
+                            # Standard Update
+                            loss.backward()
+                            nn.utils.clip_grad_norm_(agent.parameters(), self.config.max_grad_norm)
+                            optimizer.step()
                         
                         # Update RND (Intrinsic Curiosity)
                         # We use the normalized observations of this batch to update the predictor
@@ -1734,6 +1900,11 @@ class PPOTrainer:
                 total_loss += loss.item()
 
             # Stats & Evolution
+            t_final = time.time()
+            gae_ms = (t_ppo_start - t_gae_start) * 1000
+            ppo_ms = (t_final - t_ppo_start) * 1000
+            self.log(f"Update Profile: GAE={gae_ms:.2f}ms | PPO={ppo_ms:.2f}ms")
+            
             global_step += self.config.num_envs * self.current_num_steps
             elapsed = time.time() - start_time
             sps = int((self.config.num_envs * self.current_num_steps) / (elapsed + 1e-6))

@@ -81,6 +81,40 @@ class PodRacerEnv:
         self.prev_ranks = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device)
         self.rank_range_cache = torch.arange(4, device=self.device).unsqueeze(0).expand(num_envs, 4)
         
+        # --- OPTIMIZATION: Cache Static Indices for get_obs ---
+        # 1. Batch Index [B, 4]
+        self.cache_batch_idx = torch.arange(num_envs, device=self.device).unsqueeze(1).expand(-1, 4)
+        
+        # 2. Team Indices [B, 4]
+        # Pods 0,1 -> Team 0. Pods 2,3 -> Team 1.
+        self.cache_team_idx = torch.tensor([0, 0, 1, 1], device=self.device).expand(num_envs, 4)
+        
+        # 3. Entity "Other" Indices [4, 3] -> [B, 4, 3] (Broadcast compatible)
+        # 0: 1, 2, 3
+        # 1: 0, 2, 3
+        # 2: 0, 1, 3
+        # 3: 0, 1, 2
+        self.cache_other_indices = torch.tensor([
+            [1, 2, 3],
+            [0, 2, 3],
+            [3, 0, 1],
+            [2, 0, 1]
+        ], device=self.device)
+        
+        # 4. Mate Team Check [B, 4, 3, 1]
+        # p_team [4, 1] -> [0, 0, 1, 1]
+        p_team = torch.tensor([0, 0, 1, 1], device=self.device).unsqueeze(1)
+        # o_team [4, 3]
+        o_team = self.cache_other_indices // 2
+        # Compare [4, 1] vs [4, 3] -> [4, 3]
+        # Expand to Batch [B, 4, 3, 1]
+        self.cache_is_mate = (o_team == p_team).float().unsqueeze(0).unsqueeze(-1).expand(num_envs, -1, -1, -1)
+        
+        # 5. Checkpoint Batch Index for Entity/NextCP gather
+        # self.checkpoints is [B, N, 2].
+        # We need [B, 4, 3] indices for batch dim.
+        self.cache_batch_idx_entity = torch.arange(num_envs, device=self.device).view(-1, 1, 1).expand(-1, 4, 3)
+
         self.reset()
         
     def _get_ranks(self, env_ids):
@@ -1062,8 +1096,8 @@ class PodRacerEnv:
         
         # Correct Gather:
         # We want [B, 4, 2]
-        # batch_idx [B, 1] broadcast to [B, 4]
-        batch_idx = torch.arange(B, device=device).unsqueeze(1).expand(-1, 4)
+        # Use Cached Batch Index
+        batch_idx = self.cache_batch_idx
         target_pos = self.checkpoints[batch_idx, self.next_cp_id.long()] # [B, 4, 2]
         
         t_vec_g = target_pos - pos
@@ -1083,9 +1117,8 @@ class PodRacerEnv:
         # team 0: pods 0,1. team 1: pods 2,3.
         # boost_available is [B, 2]
         # Expand to [B, 4]
-        team_idx = torch.tensor([0, 0, 1, 1], device=device).expand(B, 4)
-        boost = self.physics.boost_available.gather(1, team_idx).float().unsqueeze(-1) # [B, 4, 1]
-        
+        # Use Cached Team Index
+        boost = self.physics.boost_available.gather(1, self.cache_team_idx).float().unsqueeze(-1) # [B, 4, 1]        
         timeout = (self.timeouts.float() / 100.0).unsqueeze(-1)
         lap = (self.laps.float() / 3.0).unsqueeze(-1)
         leader = self.is_runner.float().unsqueeze(-1)
@@ -1123,17 +1156,8 @@ class PodRacerEnv:
         
         # --- Entity Features (3 x 13) ---
         # We need "Others" for each Pod.
-        # Indices map:
-        # 0 -> 1, 2, 3
-        # 1 -> 0, 2, 3
-        # 2 -> 0, 1, 3
-        # 3 -> 0, 1, 2
-        other_indices = torch.tensor([
-            [1, 2, 3], # 0: Mate, E, E
-            [0, 2, 3], # 1: Mate, E, E
-            [3, 0, 1], # 2: Mate, E, E
-            [2, 0, 1]  # 3: Mate, E, E
-        ], device=device) # [4, 3]
+        # Use Cached Indices
+        other_indices = self.cache_other_indices
         
         # Broadcast to [B, 4, 3]
         # We can gather from pos [B, 4, 2]
@@ -1203,12 +1227,8 @@ class PodRacerEnv:
         dist = torch.norm(d_pos_g, dim=-1, keepdim=True) * S_POS # [B, 4, 3, 1]
         
         # Mate
-        # o_idx: [B, 4, 3] (0..3)
-        # team = idx // 2
-        # Use other_indices [4, 3]
-        o_team = other_indices // 2
-        p_team = torch.arange(4, device=device).unsqueeze(1) // 2 # [4, 1]
-        is_mate = (o_team == p_team).float().unsqueeze(0).unsqueeze(-1).expand(B, -1, -1, -1) # [B, 4, 3, 1]
+        # Use Cached Mate Tensor
+        is_mate = self.cache_is_mate
         
         # Shield
         o_shield_f = o_shield.float().unsqueeze(-1) # [B, 4, 3, 1]
@@ -1218,7 +1238,8 @@ class PodRacerEnv:
         # next_cp_id [B, 4]
         # Gather for others
         o_nid = self.next_cp_id[:, other_indices] # [B, 4, 3]
-        o_target = self.checkpoints[batch_idx.unsqueeze(2).expand(-1,-1,3), o_nid] # [B, 4, 3, 2]
+        # Use cached batch index for entity gather
+        o_target = self.checkpoints[self.cache_batch_idx_entity, o_nid] # [B, 4, 3, 2]
         
         # p_pos is [B, 4, 1, 2]. Broadcasts fine against [B, 4, 3, 2]
         ot_vec_g = o_target - p_pos 

@@ -28,6 +28,47 @@ class TrainingSession:
         self.telemetry_process = None
         self.consumer_thread = None
 
+    def _safe_load_state_dict(self, model, state_dict):
+        """
+         robustly loads state_dict handling the '_orig_mod.' prefix mismatch
+        caused by torch.compile wrapping.
+        """
+        # Detect if model is compiled (OptimizedModule)
+        # Note: OptimizedModule is not directly importable easily, check class name or structure
+        is_compiled = model.__class__.__name__ == "OptimizedModule"
+        
+        # Check first key of state dict
+        if not state_dict:
+            return # Empty
+            
+        k0 = next(iter(state_dict.keys()))
+        is_checkpoint_compiled = k0.startswith("_orig_mod.")
+        
+        new_state_dict = {}
+        
+        if is_compiled and not is_checkpoint_compiled:
+            # Model needs prefix, Checkpoint lacks it -> Add prefix
+            for k, v in state_dict.items():
+                new_state_dict[f"_orig_mod.{k}"] = v
+        elif not is_compiled and is_checkpoint_compiled:
+            # Model lacks prefix, Checkpoint has it -> Remove prefix
+            for k, v in state_dict.items():
+                if k.startswith("_orig_mod."):
+                    new_state_dict[k.replace("_orig_mod.", "")] = v
+                else:
+                    new_state_dict[k] = v
+        else:
+            # Match (Both compiled or both raw)
+            new_state_dict = state_dict
+
+        # Load
+        try:
+            model.load_state_dict(new_state_dict)
+        except RuntimeError as e:
+            # Fallback: Try strict=False if keys are still wonky, but log it
+            print(f"Warning: Strict loading failed, trying strict=False. Error: {e}")
+            model.load_state_dict(new_state_dict, strict=False)
+
     def set_loop(self, loop):
         self.loop = loop
 
@@ -126,7 +167,7 @@ class TrainingSession:
                                  if 0 <= agent_id < len(self.trainer.population):
                                      agent_path = os.path.join(path, fname)
                                      state = torch.load(agent_path, map_location=self.trainer.device)
-                                     self.trainer.population[agent_id]['agent'].load_state_dict(state)
+                                     self._safe_load_state_dict(self.trainer.population[agent_id]['agent'], state)
                                      loaded_count += 1
                              except Exception as e:
                                  self.trainer.log(f"Skipped {fname}: {e}")
@@ -154,7 +195,7 @@ class TrainingSession:
                  self.trainer.log(f"Loading initial model: {model_name} from {path}")
                  try:
                     state = torch.load(path, map_location=self.trainer.device)
-                    self.trainer.agent.load_state_dict(state)
+                    self._safe_load_state_dict(self.trainer.agent, state)
                     self.trainer.active_model_name = model_name
                     import re
                     match = re.search(r"gen_(\d+)", model_name)

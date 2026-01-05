@@ -36,7 +36,7 @@ export const ConfigPanel: React.FC = () => {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
-            [RW.CHECKPOINT]: 2000.0,
+            [RW.CHECKPOINT]: 500.0,
             [RW.CHECKPOINT_SCALE]: 50.0,
             [RW.PROGRESS]: 0.2,
             [RW.MAGNET]: 10.0,
