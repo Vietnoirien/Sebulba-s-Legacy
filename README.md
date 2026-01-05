@@ -7,7 +7,7 @@
 
 **Sebulba's Legacy** is an advanced Reinforcement Learning (RL) system designed to train super-human autonomous racers for the *Mad Pod Racing* environment. This project replaces the original Sebulba pod trainer, introducing a fully **vectorized environment**, enhanced **model infrastructure**, and refined **Genetic Algorithm** techniques. 
 
-Unlike traditional RL implementations that run a handful of environments, this project leverages a custom **GPU-Accelerated Physics Engine** to simulate up to **32,768 environments in parallel** on a single consumer GPU (achieving **~16,000 Steps Per Second** on an RTX 5070). This massive throughput allows for the training of robust agents using **Population-Based Training (PBT)** within hours rather than days.
+Unlike traditional RL implementations that run a handful of environments, this project leverages a custom **GPU-Accelerated Physics Engine** to simulate **8,192 environments in parallel** on a single consumer GPU (achieving **~66,000 Steps Per Second** on an RTX 5070). This massive throughput allows for the training of robust agents using **Population-Based Training (PBT)** within hours rather than days.
 
 > [!WARNING]
 > **Hardware Limits**: 
@@ -248,10 +248,13 @@ Key configurations can be found in `config.py` and `simulation/env.py`.
 *   **Map Size**: 16000 x 9000
 *   **Physics**: Large Pod Radius (400), High Friction (0.85).
 *   **Reward Function**: 
-    *   **Velocity**: Scaled down (weight 0.1) and uses a **Dot Product Projection** ($$\vec{v} \cdot \hat{d}$$) where we reward the component of velocity that is aligned with the direction to the next checkpoint. This explicitly encourages moving *towards* the objective while ignoring perpendicular movement.
+*   **Reward Function**: 
+    *   **Velocity**: Adjusted (weight 0.2) and uses a **Dot Product Projection** ($$\vec{v} \cdot \hat{d}$$) where we reward the component of velocity that is aligned with the direction to the next checkpoint.
+    *   **Lap Completion**: A massive bonus (Weight 2000.0) which scales per lap, incentivizing long-term progression.
+    *   **Rank Improvement**: Explicit reward (Weight 500.0) for overtaking opponents, calculated dynamically based on race scores.
+    *   **Collisions**: Tuned emphasis on Blocker collisions (Weight 5.0) which scales with impact force to effectively disrupt opponents.
     *   **Orientation**: Uses a cosine alignment metric with specific penalties for driving the wrong way.
-    *   **Proximity**: A dense reward for Blockers proportional to their closeness to enemy Runners (within 3000 units), encouraging interception.
-    *   **Collisions**: High emphasis on Blocker collisions (Weight 1000.0) compared to Race objectives.
+    *   **Proximity**: A dense reward for Blockers proportional to their closeness to enemy Runners.
     
 ## 🏆 Credits
 
