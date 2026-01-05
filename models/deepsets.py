@@ -218,15 +218,26 @@ class PodAgent(nn.Module):
             
             # KL(P || Q) + KL(Q || P) (Symmetric)
             # Continuous (Sum over dims)
+            # Normal distribution KL is closed form and vmap-safe usually.
             kl_cont = torch.distributions.kl.kl_divergence(d_r_cont, d_b_cont).sum(1) + \
                       torch.distributions.kl.kl_divergence(d_b_cont, d_r_cont).sum(1)
                       
-            # Discrete
-            kl_s = torch.distributions.kl.kl_divergence(d_r_s, d_b_s) + \
-                   torch.distributions.kl.kl_divergence(d_b_s, d_r_s)
+            # Discrete - SAFE IMPLEMENTATION for vmap
+            # Avoid torch.distributions.kl due to boolean masking (vmap limitation)
+            # KL(P||Q) = sum(p * (log_p - log_q))
+            # d_x_s.logits are stored in distribution
+            
+            def safe_cat_kl(logits_p, logits_q):
+                p = torch.softmax(logits_p, dim=-1)
+                log_p = torch.log_softmax(logits_p, dim=-1)
+                log_q = torch.log_softmax(logits_q, dim=-1)
+                return (p * (log_p - log_q)).sum(-1)
+
+            kl_s = safe_cat_kl(r_logits[0], b_logits[0]) + \
+                   safe_cat_kl(b_logits[0], r_logits[0])
                    
-            kl_b = torch.distributions.kl.kl_divergence(d_r_b, d_b_b) + \
-                   torch.distributions.kl.kl_divergence(d_b_b, d_r_b)
+            kl_b = safe_cat_kl(r_logits[1], b_logits[1]) + \
+                   safe_cat_kl(b_logits[1], r_logits[1])
                    
             divergence = (kl_cont + kl_s + kl_b)
         

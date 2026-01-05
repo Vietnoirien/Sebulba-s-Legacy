@@ -1191,6 +1191,49 @@ class PodRacerEnv:
         o_angle = angle[:, other_indices] # [B, 4, 3]
         o_shield = self.physics.shield_cd[:, other_indices] > 0 # [B, 4, 3]
         
+        # --- Ghost Injection (Robustness) ---
+        # If teammate is inactive (Stage < Team), their pos is Infinity.
+        # We replace it with Ghost Data (Random nearby) to avoid "Zero Collapse" in the model.
+        # This ensures the model learns to handle "Valid but Random" teammate inputs during Solo/Duel.
+        
+        # 1. Identify Inactive Teammates
+        # Mate is index 0 in 'other_indices' (See init: 0->1, 1->0, 2->3, 3->2)
+        
+        # Convert config.active_pods to boolean mask for fast lookup
+        is_pod_active_mask = torch.zeros(4, dtype=torch.bool, device=device)
+        # Handle list vs tensor config
+        active_pods_list = self.config.active_pods
+        is_pod_active_mask[active_pods_list] = True
+        
+        mate_ids = self.cache_other_indices[:, 0] # [4]
+        mate_active_mask = is_pod_active_mask[mate_ids] # [4]
+        mate_inactive = ~mate_active_mask # [4]
+        
+        if mate_inactive.any():
+             # Broadcast to Batch
+             mask_b = mate_inactive.unsqueeze(0).expand(B, 4) # [B, 4]
+             mask_coord = mask_b.unsqueeze(-1) # [B, 4, 1]
+             
+             # Generate Ghosts relative to Player (so they are "seen" in local frame)
+             # Range: +/- 4000
+             offsets = (torch.rand((B, 4, 2), device=device) * 8000.0) - 4000.0
+             ghost_pos = pos + offsets
+             
+             # Overwrite Position (Index 0 of dim 2 is Teammate)
+             # o_pos is [B, 4, 3, 2]
+             o_pos[:, :, 0, :] = torch.where(mask_coord, ghost_pos, o_pos[:, :, 0, :])
+             
+             # Ghost Velocity
+             ghost_vel = (torch.rand((B, 4, 2), device=device) * 2000.0) - 1000.0
+             o_vel[:, :, 0, :] = torch.where(mask_coord, ghost_vel, o_vel[:, :, 0, :])
+             
+             # Ghost Angle
+             ghost_angle = (torch.rand((B, 4), device=device) * 360.0) - 180.0
+             o_angle[:, :, 0] = torch.where(mask_b, ghost_angle, o_angle[:, :, 0])
+             
+             # Ghost Shield (Always False)
+             o_shield[:, :, 0] = torch.where(mask_b, torch.tensor(False, device=device), o_shield[:, :, 0])
+        
         # Current Pod State, Expanded
         # p_pos: [B, 4, 1, 2]
         p_pos = pos.unsqueeze(2) 
