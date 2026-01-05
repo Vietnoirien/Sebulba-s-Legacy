@@ -115,18 +115,18 @@ graph TD
         mitosis_mgr["Mitosis Manager"]
     end
     
-    sim_vec -->| "States (Batch)" | obs_input
-    obs_input -->| "Self + Team + Map" | backbone_net
-    obs_input -->| "Enemies" | enemy_encoder 
+    sim_vec -- "States (Batch)" --> obs_input
+    obs_input -- "Self + Team + Map" --> backbone_net
+    obs_input -- "Enemies" --> enemy_encoder 
     enemy_encoder --> backbone_net
     backbone_net --> actor_runner
     backbone_net --> actor_blocker
-    actor_runner -->| "Role Mux" | sim_vec
-    actor_blocker -->| "Role Mux" | sim_vec
+    actor_runner -- "Role Mux" --> sim_vec
+    actor_blocker -- "Role Mux" --> sim_vec
     
-    ppo_trainer -->| "Gradients" | backbone_net
-    ga_ctrl -->| "Mutations" | ppo_trainer
-    mitosis_mgr -->| "Cloning" | ppo_trainer
+    ppo_trainer -- "Gradients" --> backbone_net
+    ga_ctrl -- "Mutations" --> ppo_trainer
+    mitosis_mgr -- "Cloning" --> ppo_trainer
 ```
 
 ## 📦 Installation
