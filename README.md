@@ -91,42 +91,42 @@ The training process is automated through distinct stages of difficulty:
 
 ```mermaid
 graph TD
-    subgraph GPU ["GPU Acceleration (66k SPS)"]
-        Sim["Vectorized Simulation (8192 Envs)"]
-        Physics["Custom Physics Engine & Rewards"]
+    subgraph GPU_ACC ["GPU Acceleration (66k SPS)"]
+        sim_vec["Vectorized Simulation (8192 Envs)"]
+        physics_eng["Custom Physics Engine & Rewards"]
         
-        subgraph AgentModel ["Split DeepSets Agent"]
-            Input["Observation (52-dim)"]
-            Backbone["Shared Backbone"]
+        subgraph agent_model ["Split DeepSets Agent"]
+            obs_input["Observation (52-dim)"]
+            backbone_net["Shared Backbone"]
             
-            subgraph DualHeads ["Heterogeneous Heads"]
-                Runner["Runner Actor"]
-                Blocker["Blocker Actor"]
+            subgraph dual_heads ["Heterogeneous Heads"]
+                actor_runner["Runner Actor"]
+                actor_blocker["Blocker Actor"]
             end
             
-            Encoder["DeepSets Enemy Encoder"]
+            enemy_encoder["DeepSets Enemy Encoder"]
         end
     end
     
-    subgraph CPU ["CPU Orchestration"]
-        PPO["PPO Trainer + VectorizedAdam"]
-        GA["Evolutionary Controller (NSGA-II)"]
-        League["League Manager (PFSP)"]
-        Mitosis["Mitosis Manager"]
+    subgraph CPU_ORCH ["CPU Orchestration"]
+        ppo_trainer["PPO Trainer + VectorizedAdam"]
+        ga_ctrl["Evolutionary Controller (NSGA-II)"]
+        league_mgr["League Manager (PFSP)"]
+        mitosis_mgr["Mitosis Manager"]
     end
     
-    Sim -->|States (Batch)| Input
-    Input -->|"Self + Team + Map"| Backbone
-    Input -->|Enemies| Encoder 
-    Encoder --> Backbone
-    Backbone --> Runner
-    Backbone --> Blocker
-    Runner -->|Role Mux| Sim
-    Blocker -->|Role Mux| Sim
+    sim_vec -->| "States (Batch)" | obs_input
+    obs_input -->| "Self + Team + Map" | backbone_net
+    obs_input -->| "Enemies" | enemy_encoder 
+    enemy_encoder --> backbone_net
+    backbone_net --> actor_runner
+    backbone_net --> actor_blocker
+    actor_runner -->| "Role Mux" | sim_vec
+    actor_blocker -->| "Role Mux" | sim_vec
     
-    PPO -->|Gradients| Backbone
-    GA -->|Mutations| PPO
-    Mitosis -->|Cloning| PPO
+    ppo_trainer -->| "Gradients" | backbone_net
+    ga_ctrl -->| "Mutations" | ppo_trainer
+    mitosis_mgr -->| "Cloning" | ppo_trainer
 ```
 
 ## 📦 Installation
