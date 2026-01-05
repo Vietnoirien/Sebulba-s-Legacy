@@ -239,9 +239,14 @@ class PPOTrainer:
                  'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
              })
 
-        # Resize Nursery Buffer if pop size changed (unlikely but safe)
         if self.nursery_metrics_buffer.shape[0] != self.config.pop_size:
              self.nursery_metrics_buffer = torch.zeros((self.config.pop_size, 2), device=self.device)
+             
+        # Behavior Stats Tensor [Pop, 4] (Speed, Steer, Dist, Count)
+        if not hasattr(self, 'behavior_stats_tensor') or self.behavior_stats_tensor.shape[0] != self.config.pop_size:
+             self.behavior_stats_tensor = torch.zeros((self.config.pop_size, 4), device=self.device)
+        else:
+             self.behavior_stats_tensor.zero_()
     
     def log(self, msg):
         print(msg)
@@ -347,7 +352,13 @@ class PPOTrainer:
             p['accum_dist_fraction'] = nursery_data[i, 0]
             p['accum_dist_count'] = nursery_data[i, 1]
         
-        for p in self.population:
+        # Prepare Behavior Stats (Bulk Copy to CPU)
+        if hasattr(self, 'behavior_stats_tensor'):
+             beh_cpu = self.behavior_stats_tensor.cpu().numpy()
+        else:
+             beh_cpu = None
+
+        for idx, p in enumerate(self.population):
             # Nursery Score Calculation
             if p['accum_dist_count'] > 0:
                 avg_dist_frac = p['accum_dist_fraction'] / p['accum_dist_count']
@@ -368,7 +379,7 @@ class PPOTrainer:
             
             # Proficiency Score (Raw)
             prof_score = raw_avg + (PENALTY_CONST / (np.sqrt(p['total_cp_hits'] + 1)))
-            if i < 5: # Debug first 5 agents
+            if idx < 5: # Debug first 5 agents
                  self.log(f"DEBUG EFFICIENCY: Agent {p['id']} | Steps {p['total_cp_steps']} | Hits {p['total_cp_hits']} | RawAvg {raw_avg:.1f} | Score {prof_score:.1f}")
             p['efficiency_score'] = prof_score # Store raw for logs
             
@@ -386,16 +397,29 @@ class PPOTrainer:
             checkpoints = p['checkpoints_score']
             
             # Calculate Behavior Vector [Speed, Steer, MateDist]
-            buf = p['behavior_buffer']
-            count = buf[3].item()
-            if count > 0:
-                avg_speed = buf[0].item() / count
-                avg_steer = buf[1].item() / count
-                avg_dist = buf[2].item() / count
+            if beh_cpu is not None:
+                 b_row = beh_cpu[idx]
+                 count = b_row[3]
+                 if count > 0:
+                     avg_speed = b_row[0] / count
+                     avg_steer = b_row[1] / count
+                     avg_dist = b_row[2] / count
+                 else:
+                     avg_speed = 0.0
+                     avg_steer = 0.0
+                     avg_dist = 0.0
             else:
-                avg_speed = 0.0
-                avg_steer = 0.0
-                avg_dist = 0.0
+                # Fallback to legacy buffer (should not be reached if tensor exists)
+                buf = p['behavior_buffer']
+                count = buf[3].item()
+                if count > 0:
+                    avg_speed = buf[0].item() / count
+                    avg_steer = buf[1].item() / count
+                    avg_dist = buf[2].item() / count
+                else:
+                    avg_speed = 0.0
+                    avg_steer = 0.0
+                    avg_dist = 0.0
             
             # Update Behavior Vector
             # We treat this as EMA too for smoothness
@@ -1621,30 +1645,29 @@ class PPOTrainer:
                 else:
                     sum_dist = torch.zeros_like(sum_speed)
                 
-                for i in range(self.config.pop_size):
-                    start_env = i * self.config.envs_per_agent
-                    end_env = start_env + self.config.envs_per_agent
-                    
-                    # Sum for this agent across its envs
-                    agent_speed = sum_speed[start_env:end_env].sum()
-                    agent_steer = sum_steer[start_env:end_env].sum()
-                    agent_dist = sum_dist[start_env:end_env].sum()
-                    # Count relates to "Pod Steps" or "Env Steps"?
-                    # Previous logic: count = ENVS * len(active_pods).
-                    # This implies we average per Pod Step.
-                    # But Dist is per "Team Step" (defined by Env Step).
-                    # If we divide agent_dist by (Envs * 2), we get Avg Dist / 2.
-                    # We should probably normalize properly.
-                    # Let's accumulate, and later divide by "Env Steps" for Dist?
-                    # Or just divide by same count and accept factor of 1/N.
-                    # As long as it's consistent across agents, it's fine for Novelty.
-                    
-                    count = self.config.envs_per_agent * len(active_pods)
-                    
-                    self.population[i]['behavior_buffer'][0] += agent_speed
-                    self.population[i]['behavior_buffer'][1] += agent_steer
-                    self.population[i]['behavior_buffer'][2] += agent_dist
-                    self.population[i]['behavior_buffer'][3] += count
+                # Vectorized Accumulation to avoid 128x Python Loop Syncs
+                # sum_speed: [Pop * EnvsPerAgent]
+                # sum_steer: [Pop * EnvsPerAgent]
+                # sum_dist:  [Pop * EnvsPerAgent]
+                
+                # Reshape and Sum per Agent
+                # [Pop, EnvsPerAgent] -> [Pop]
+                ag_speed = sum_speed.view(self.config.pop_size, self.config.envs_per_agent).sum(dim=1)
+                ag_steer = sum_steer.view(self.config.pop_size, self.config.envs_per_agent).sum(dim=1)
+                ag_dist  = sum_dist.view( self.config.pop_size, self.config.envs_per_agent).sum(dim=1)
+                
+                # Count: EnvsPerAgent * NumActivePods
+                count_val = self.config.envs_per_agent * len(active_pods)
+                
+                if hasattr(self, 'behavior_stats_tensor'):
+                     self.behavior_stats_tensor[:, 0] += ag_speed
+                     self.behavior_stats_tensor[:, 1] += ag_steer
+                     self.behavior_stats_tensor[:, 2] += ag_dist
+                     self.behavior_stats_tensor[:, 3] += count_val
+                
+                # Legacy support: If we still rely on population dict buffer for something, we update it at END of loop.
+                # But 'behavior_buffer' in dict was only used for EMA update.
+                # We can update the dicts ONCE after collection.
 
                 # Manual Reset
                 if dones.any():
@@ -1657,10 +1680,8 @@ class PPOTrainer:
                 t_obs_end = time.time()
                 
                 if step % 100 == 0:
-                    # define t_infra if not defined (safe guard)
-                    if 't_infra' in locals() and 't_inf_end' in locals() and 't_step_end' in locals():
-                        t_post_behavior = time.time() # T8
-                        self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_post_behavior-t_post_telemetry)*1000:.1f} | H_Reset={(t_obs_end-t_post_behavior)*1000:.1f}")
+                     t_post_behavior = time.time() # T8
+                     self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_post_behavior-t_post_telemetry)*1000:.1f} | H_Reset={(t_obs_end-t_post_behavior)*1000:.1f}")
                     
                 all_self, all_tm, all_en, all_cp = obs_data
 
