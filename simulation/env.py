@@ -1,7 +1,7 @@
 import torch
 import math
 from simulation.gpu_physics import GPUPhysics
-from simulation.tracks import TrackGenerator
+from simulation.tracks import TrackGenerator, START_POINT_MULT
 from config import *
 
 # Reward Indices and Weights imported from config
@@ -32,6 +32,9 @@ class PodRacerEnv:
         # Map Mode Cache
         self.using_nursery_map = False
         self._update_map_mode()
+        
+        # Predefined Map State
+        self.is_predefined_map = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
         
         # Game State
         self.next_cp_id = torch.ones((num_envs, 4), dtype=torch.long, device=self.device) # Start at 1 (0 is start)
@@ -205,15 +208,34 @@ class PodRacerEnv:
                  
                  # Generate for MAX_CHECKPOINTS but only use first n_cps
                  cps = TrackGenerator.generate_nursery_tracks(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-                 # if num_reset > 0:
-                 #     print(f"DEBUG: Generated NURSERY tracks for {num_curr} envs.")
                  self.checkpoints[curr_env_ids] = cps
+                 
+                 # Nursery is never predefined in the "Mad Pod Racing" sense
+                 self.is_predefined_map[curr_env_ids] = False
+                 
             else:
                 # Standard
-                cps = TrackGenerator.generate_max_entropy(num_curr, MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
-                # if num_reset > 0:
-                #      print(f"DEBUG: Generated MAX ENTROPY tracks for {num_curr} envs (CPs: {MIN_CHECKPOINTS}-{MAX_CHECKPOINTS}).")
-                self.checkpoints[curr_env_ids] = cps
+                # 20% Chance for Predefined Map
+                # Create mask
+                rand_val = torch.rand(num_curr, device=self.device)
+                pred_mask = rand_val < 0.2
+                
+                # Split indices
+                ids_pred = curr_env_ids[pred_mask]
+                ids_rand = curr_env_ids[~pred_mask]
+                
+                # 1. Predefined
+                if len(ids_pred) > 0:
+                     cps_pred, num_pred = TrackGenerator.generate_predefined(len(ids_pred), MAX_CHECKPOINTS, self.device)
+                     self.checkpoints[ids_pred] = cps_pred
+                     self.num_checkpoints[ids_pred] = num_pred
+                     self.is_predefined_map[ids_pred] = True
+                     
+                # 2. Random (Max Entropy)
+                if len(ids_rand) > 0:
+                    cps_rand = TrackGenerator.generate_max_entropy(len(ids_rand), MAX_CHECKPOINTS, WIDTH, HEIGHT, self.device)
+                    self.checkpoints[ids_rand] = cps_rand
+                    self.is_predefined_map[ids_rand] = False
             
         # 2. Reset Pods
         # Start at CP0
@@ -242,11 +264,48 @@ class PodRacerEnv:
         # Simple Line Arrangement
         offsets = torch.tensor(self.spawn_config.offsets, device=self.device)
         
+        # Special Offsets for Predefined Maps
+        # START_POINT_MULT = [[500, -500], [-500, 500], ... ]
+        # Converted to tensor
+        predefined_offsets = torch.tensor(START_POINT_MULT, device=self.device) # [4, 2]
+        
+        # Determine masks for logic
+        # env_ids is the batch being reset
+        # is_predefined_map[env_ids] tells us which logic to use
+        is_pred_batch = self.is_predefined_map[env_ids]
+        
         for i in range(4):
-            # Reset Physics State
-            self.physics.pos[env_ids, i, 0] = start_pos[:, 0] - nx * offsets[i] # Slightly behind/displaced
-            self.physics.pos[env_ids, i, 1] = start_pos[:, 1] - ny * offsets[i]
+            # Standard Logic Position
+            # pos = cp0 - offset * perp_vec
+            std_pos_x = start_pos[:, 0] - nx * offsets[i] 
+            std_pos_y = start_pos[:, 1] - ny * offsets[i]
+            
+            # Predefined Logic Position
+            # pos = cp0 + explicit_offset
+            # predefined_offsets[i] is [2]
+            # No rotation applied to offset (as per "original mad pod racing" assumption? or aligned?)
+            # Usually strict coordinate offsets.
+            # "START_POINT_MULT" implies offsets from origin? No, "Start Point".
+            # We assume: pos = cp0 + offset
+            
+            pred_pos_x = start_pos[:, 0] + predefined_offsets[i, 0]
+            pred_pos_y = start_pos[:, 1] + predefined_offsets[i, 1]
+            
+            # Combine based on mask
+            # use torch.where
+            final_pos_x = torch.where(is_pred_batch, pred_pos_x, std_pos_x)
+            final_pos_y = torch.where(is_pred_batch, pred_pos_y, std_pos_y)
+            
+            # Assign
+            self.physics.pos[env_ids, i, 0] = final_pos_x
+            self.physics.pos[env_ids, i, 1] = final_pos_y
+            
             self.physics.vel[env_ids, i] = 0
+            
+            # Angle: Standard uses 'angle_deg'. 
+            # Predefined? Assuming 'angle_deg' (Face next CP) is also correct for predefined maps unless specified otherwise.
+            # User said "placement", likely meaning position.
+            
             self.physics.angle[env_ids, i] = angle_deg
             self.physics.mass[env_ids, i] = 1.0
             self.physics.shield_cd[env_ids, i] = 0
