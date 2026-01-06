@@ -1801,7 +1801,8 @@ class PPOTrainer:
                 t_obs_end = time.time() # T10 Ends Obs
                 
                 if step % 100 == 0:
-                     self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_behavior_end-t_post_telemetry)*1000:.1f} | H_Res={(t_reset_end-t_behavior_end)*1000:.1f} | I_Obs={(t_obs_end-t_reset_end)*1000:.1f}")
+                     if os.environ.get("ENABLE_PROFILING"):
+                        self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_behavior_end-t_post_telemetry)*1000:.1f} | H_Res={(t_reset_end-t_behavior_end)*1000:.1f} | I_Obs={(t_obs_end-t_reset_end)*1000:.1f}")
                     
                 all_self, all_tm, all_en, all_cp = obs_data
 

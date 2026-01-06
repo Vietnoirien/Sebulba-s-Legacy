@@ -26,13 +26,11 @@ The system combines state-of-the-art techniques from Deep Learning and Evolution
     *   **Sim-to-Tensor**: Simulation states are kept on GPU, never copying to CPU.
     *   **`torch.vmap` Training**: Leverages PyTorch's `vmap` (Vectorizing Map) to compute gradients for the **entire population of 128 agents** in a single kernel call.
     *   **Vectorized Adam**: A custom optimizer implementation that applies updates to stacked parameters in parallel, supporting per-agent learning rates for PBT without the overhead of 128 separate optimizer instances.
-*   **Split Backbone Architecture (~141k Params)**:  
-    *   **Teammate Awareness**: Explicitly feeds teammate observations (Position, Velocity, Shield) directly to the backbone, enabling precise cooperative strategies (e.g., blocking, drafting).
-    *   **Heterogeneous Dual-Brain**: We deploy two specialized networks within the same agent (Inference size: ~60.2k Params):
-        *   **PilotNet** (Hidden 64): Dedicated to robust driving (Input: Self + CP).
-        *   **CommanderNet** (Hidden 128): Dedicated to tactics (Input: Self + Team + Enemies).
-    *   **Shared Enemy Encoder**: Processes enemy observations via a **DeepSets Encoders** (Permutation Invariant) to handle varying numbers of opponents (Solo, Duel, League) without architecture changes.
-    *   **Observation Space**: Flattened structure: `[Self Params, Teammate Params, Enemy Context (DeepSets), Checkpoint Vector]`.
+*   **Universal Actor (True Parameter Sharing)**:  
+    *   **Single Backbone**: We use a unified `PodActor` that drives both Runner and Blocker pods, sharing 100% of the driving weights (`PilotNet`).
+    *   **Role Embeddings**: A learned embedding vector (`Size 16`) is injected into the network to indicate the agent's role (0=Blocker, 1=Runner), allowing the shared "Brain" to switch tactics dynamically while retaining shared driving skills.
+    *   **Efficiency**: This approach reduces the exported model size by ~50%, allowing for deeper networks within the 100k char limit.
+    *   **DeepSets Enemy Encoder**: Permutation invariant processing of enemies, handling any number of opponents.
 *   **Intrinsic Curiosity (RND)**: Incorporates **Random Network Distillation** to encourage exploration in sparse reward scenarios, preventing premature convergence.
 *   **Role Regularization**: implements a custom **Diversity Loss** (KL Divergence) between the Runner and Blocker heads during the Team stage. This forces the two efficient policy heads to specialize and behave differently in identical situations, preventing mode collapse.
 *   **Prioritized Fictitious Self-Play (PFSP)**: The system maintains a "League" of historical checkpoints. Using a **Payoff Matrix**, it prioritizes opponents with whom the current agent has a ~50% win rate (High Regret), maximizing the learning signal.
@@ -95,11 +93,12 @@ graph TD
         sim_vec["Vectorized Simulation (8192 Envs)"]
         physics_eng["Custom Physics Engine & Rewards"]
         
-        subgraph agent_model ["Split Backbone Agent"]
+        subgraph agent_model ["Universal Agent"]
             obs_input["Observation"]
+            role_emb["Role Embedding"]
             
-            subgraph split_brains ["Split Computation"]
-                pilot_net["PilotNet (Driving)"]
+            subgraph unified_brain ["Universal Actor"]
+                pilot_net["PilotNet (Shared Driving)"]
                 commander_net["CommanderNet (Tactics)"]
             end
             
@@ -178,6 +177,8 @@ The project includes a unified launcher to start the Training Loop, Backend API,
 **Start the System:**
 ```bash
 python launcher.py
+# Optional: Enable performance profiling logs
+python launcher.py --profile
 ```
 
 *   **Dashboard**: Open `http://localhost:5173`

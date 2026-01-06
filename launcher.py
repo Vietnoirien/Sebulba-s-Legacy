@@ -48,7 +48,13 @@ def cleanup(backend_proc, frontend_proc):
     print("Services stopped.")
     sys.exit(0)
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser(description="Sebulba's Legacy Launcher")
+    parser.add_argument("--profile", action="store_true", help="Enable performance profiling logs")
+    args = parser.parse_args()
+
     print("Starting Sebulba's Legacy System...")
     
     project_root = Path(__file__).parent.absolute()
@@ -57,6 +63,10 @@ def main():
     print("Launching Backend...")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(project_root)
+    
+    if args.profile:
+        print("-> Profiling Enabled")
+        env["ENABLE_PROFILING"] = "1"
     
     backend_cmd = [
         ".venv/bin/python",
