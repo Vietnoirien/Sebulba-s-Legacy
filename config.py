@@ -22,8 +22,9 @@ MIN_CHECKPOINTS = 3
 STAGE_NURSERY = 0 # Learn to drive (No penalties)
 STAGE_SOLO = 1    # Time Trial (Speed focus)
 STAGE_DUEL = 2    # 1v1
-STAGE_TEAM = 3    # 2v2
-STAGE_LEAGUE = 4  # Competitive
+STAGE_INTERCEPT = 3 # Blocker Academy (PvE Blocking)
+STAGE_TEAM = 4    # 2v2
+STAGE_LEAGUE = 5  # Competitive
 
 # Graduation Thresholds
 # Stage 0 (Nursery) -> 1 (Solo)
@@ -40,7 +41,7 @@ STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD = 65.0
 STAGE_SOLO_DYNAMIC_STEP_PENALTY = 20.0
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 @dataclass
 class BotConfig:
@@ -215,5 +216,6 @@ class EnvConfig:
     # Rewards
     # dynamic_reward_base Removed (Legacy)
     step_penalty_active_pods: List[int] = field(default_factory=list)
-    orientation_active_pods: List[int] = field(default_factory=list)
-
+    orientation_active_pods: List[int] = field(default_factory=lambda: [0])
+    # Optional map for Fixed Roles (PodID -> RoleID). e.g. {0: 0, 1: 1} to force Pod0=Blocker, Pod1=Runner
+    fixed_roles: Optional[Dict[int, int]] = None

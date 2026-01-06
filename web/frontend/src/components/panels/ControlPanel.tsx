@@ -11,8 +11,10 @@ export const ControlPanel: React.FC = () => {
     // const [selectedModel, setSelectedModel] = useState<string>("scratch") // Moved to Context
     // const [selectedModel, setSelectedModel] = useState<string>("scratch") // Moved to Context
     const [curriculumMode, setCurriculumMode] = useLocalStorage("spt2_control_curriculumMode", "auto")
-    const [curriculumStage, setCurriculumStage] = useLocalStorage("spt2_control_curriculumStage", 0)
+    const [curriculumStage, setCurriculumStage] = useLocalStorage<number>("spt2_control_stage_v2", 0)
     const [maxCheckpoints, setMaxCheckpoints] = useLocalStorage("spt2_control_maxCheckpoints", 5)
+    // New: Mitosis Flag (Default true for safety)
+    const [performMitosis, setPerformMitosis] = useState<boolean>(true)
 
     const [generations, setGenerations] = useState<any[]>([])
 
@@ -47,7 +49,7 @@ export const ControlPanel: React.FC = () => {
                         model: selectedModel,
                         curriculum_mode: curriculumMode,
                         curriculum_stage: curriculumStage,
-                        max_checkpoints: maxCheckpoints
+                        max_checkpoints: maxCheckpoints,
                     })
                 })
             } else {
@@ -176,8 +178,9 @@ export const ControlPanel: React.FC = () => {
                         <option value={0}>Stage 0: Nursery (Safe Mode)</option>
                         <option value={1}>Stage 1: Solo Time Trial</option>
                         <option value={2}>Stage 2: 1v1 Duel</option>
-                        <option value={3}>Stage 3: 2v2 Team</option>
-                        <option value={4}>Stage 4: League</option>
+                        <option value={3}>Stage 3: Blocker Academy (PvE)</option>
+                        <option value={4}>Stage 4: 2v2 Team</option>
+                        <option value={5}>Stage 5: League</option>
                     </select>
                 </div>
             </div>
@@ -249,7 +252,7 @@ export const ControlPanel: React.FC = () => {
                     WIPE ALL CHECKPOINTS
                 </Button>
             </div>
-        </div>
+        </div >
     )
 
 }

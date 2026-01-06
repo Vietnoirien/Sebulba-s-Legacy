@@ -308,6 +308,16 @@ class PodRacerEnv:
                 print(f"WARNING: Nursery Map requested but Mode is '{self.config.mode_name}'. Enforcing policy: FALLBACK TO MAX ENTROPY.")
 
     def _update_roles(self, env_ids):
+        # --- FIXED ROLES OVERRIDE ---
+        if self.config.fixed_roles:
+            # Force roles based on config
+            for pod_idx, role_id in self.config.fixed_roles.items():
+                if pod_idx >= 4: continue
+                # Role 1 = Runner, Role 0 = Blocker
+                is_run = (role_id == 1)
+                self.is_runner[env_ids, pod_idx] = is_run
+            return
+
         # Calculate Progress Score
         # Score = Laps * 1000 + NextCP * 10 + (1 - Dist/20000)
         # Higher is better

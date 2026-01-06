@@ -55,7 +55,7 @@ export const ConfigPanel: React.FC = () => {
         team_spirit: 0.0
     })
 
-    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v2', {
+    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v3', {
         stage: 0,
         difficulty: 0.0
     })
@@ -222,15 +222,17 @@ export const ConfigPanel: React.FC = () => {
                         {st === 0 && "Stage 0: Nursery"}
                         {st === 1 && "Stage 1: Solo Time Trial"}
                         {st === 2 && "Stage 2: Duel (1v1)"}
-                        {st === 3 && "Stage 3: Team (2v2)"}
-                        {st === 4 && "Stage 4: League"}
+                        {st === 3 && "Stage 3: Blocker Academy"}
+                        {st === 4 && "Stage 4: Team (2v2)"}
+                        {st === 5 && "Stage 5: League"}
                     </h4>
                     <p className="text-gray-400 text-[10px]">
                         {st === 0 && "Goal: Learn basic navigation. Simple tracks, no bots. Graduate by reaching Consistency threshold."}
                         {st === 1 && "Goal: Speed & Efficiency. Complex tracks, no bots. Penalties for slow transitions."}
                         {st === 2 && "Goal: Beating a Rival. 1v1 against a bot. Win Rate matters."}
-                        {st === 3 && "Goal: Team Coordination. 2v2. Work with teammate to win."}
-                        {st === 4 && "Goal: Self-Play Supremacy. No explicit graduation."}
+                        {st === 3 && "Goal: Denial of Service. 1v1 (Blocker Only) vs Runner Bot. Focus on Collision & Blocking."}
+                        {st === 4 && "Goal: Team Coordination. 2v2. Work with teammate to win."}
+                        {st === 5 && "Goal: Self-Play Supremacy. No explicit graduation."}
                     </p>
                 </div>
 
@@ -274,6 +276,16 @@ export const ConfigPanel: React.FC = () => {
                     )}
 
                     {st === 3 && (
+                        <div className="p-2 border border-yellow-700/50 rounded bg-yellow-900/10">
+                            <h4 className="text-[10px] text-yellow-500 mb-1">EXPERIMENTAL CURRICULUM</h4>
+                            <p className="text-[10px] text-gray-400">
+                                This stage focuses on training the Blocker role.
+                                Graduation is currently <strong>MANUAL</strong> based on observed behavior (Ramming/Camping).
+                            </p>
+                        </div>
+                    )}
+
+                    {st === 4 && (
                         <>
                             <div className="p-2 border border-gray-700 rounded bg-gray-900/50 space-y-3">
                                 <h4 className="text-[10px] text-neon-cyan mb-2">COMPETENCE STANDARD</h4>
@@ -318,8 +330,9 @@ export const ConfigPanel: React.FC = () => {
                                 <option value={0}>0: NURSERY</option>
                                 <option value={1}>1: SOLO TRIAL</option>
                                 <option value={2}>2: DUEL (1v1)</option>
-                                <option value={3}>3: TEAM (2v2)</option>
-                                <option value={4}>4: LEAGUE</option>
+                                <option value={3}>3: BLOCKER ACADEMY</option>
+                                <option value={4}>4: TEAM (2v2)</option>
+                                <option value={5}>5: LEAGUE</option>
                             </select>
                         </div>
 

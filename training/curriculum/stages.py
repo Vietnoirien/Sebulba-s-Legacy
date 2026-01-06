@@ -6,7 +6,7 @@ from simulation.env import (
     RW_WIN, RW_LOSS, RW_CHECKPOINT, RW_CHECKPOINT_SCALE, 
     RW_PROGRESS, RW_MAGNET, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
     RW_STEP_PENALTY, RW_ORIENTATION, RW_WRONG_WAY, RW_COLLISION_MATE,
-    STAGE_NURSERY, STAGE_SOLO, STAGE_DUEL, STAGE_TEAM, STAGE_LEAGUE
+    STAGE_NURSERY, STAGE_SOLO, STAGE_DUEL, STAGE_INTERCEPT, STAGE_TEAM, STAGE_LEAGUE
 )
 
 class NurseryStage(Stage):
@@ -261,13 +261,13 @@ class DuelStage(Stage):
                     reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} (Diff {trainer.env.bot_difficulty:.2f}) for {checks} checks"
                     
                 if should_graduate:
-                     trainer.log(f">>> UPGRADING TO STAGE 3: TEAM ({reason}) <<<")
+                     trainer.log(f">>> UPGRADING TO STAGE 3: INTERCEPT (BLOCKER ACADEMY) ({reason}) <<<")
                      if auto:
-                         trainer.env.bot_difficulty = 0.0 # Reset
+                         trainer.env.bot_difficulty = 0.8 # Fixed difficulty for Academy
                          trainer.env.stage_metrics["recent_games"] = 0
                          trainer.env.stage_metrics["recent_wins"] = 0
                          trainer.env.stage_metrics["recent_episodes"] = 0
-                         return STAGE_TEAM, reason
+                         return STAGE_INTERCEPT, reason
 
         return None, ""
 
@@ -278,6 +278,92 @@ class DuelStage(Stage):
     @property
     def target_evolve_interval(self) -> int:
         return 5 # Slow Evolution for Duel
+
+
+class InterceptStage(Stage):
+    def __init__(self, config: CurriculumConfig):
+        super().__init__("Intercept", config)
+        self.grad_consistency_counter = 0
+
+    def get_active_pods(self) -> List[int]:
+        # Agent: 0 (Blocker)
+        # Bot: 2 (Runner)
+        return [0, 2]
+
+    def get_env_config(self) -> EnvConfig:
+        return EnvConfig(
+            mode_name="intercept",
+            track_gen_type="max_entropy",
+            active_pods=[0, 2],
+            use_bots=True, 
+            bot_pods=[2],
+            step_penalty_active_pods=[0], # Penalty only for agent
+            # No orientation penalty for blocker?
+            # Actually, let's keep it to encourage basic driving competence
+            orientation_active_pods=[0],
+            fixed_roles={0: 0, 2: 1} # 0=Blocker, 1=Runner
+        )
+
+    def get_objectives(self, p: Dict[str, Any]) -> List[float]:
+        # Objectives: Damage (Primary), Proximity (Secondary), Novelty
+        # We assume ema_blocker_dmg is tracked.
+        # We also want to MINIMIZE Runner Progress? Hard to track per agent.
+        return [
+            p.get('ema_blocker_dmg', 0.0), # Maximize Collision Damage
+            p.get('ema_wins', 0.0), # If we can win?
+            p.get('novelty_score', 0.0)
+        ]
+        
+    def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
+        return False, ""
+
+    def update(self, trainer) -> Tuple[Optional[int], str]:
+        # --- Enforce Difficulty ---
+        # We want a competent runner (0.8 ~ 0.9) to practice against.
+        TARGET_DIFFICULTY = 0.85
+        if trainer.env.bot_difficulty != TARGET_DIFFICULTY:
+            trainer.env.bot_difficulty = TARGET_DIFFICULTY
+        
+        # --- Graduation Logic ---
+        # Goal: DENIAL. The Blocker wins if the Runner fails to finish (Timeout).
+        # We track "Timeouts" as a proxy for Blocker Success.
+        
+        metrics = trainer.env.stage_metrics
+        rec_episodes = metrics.get("recent_episodes", 0)
+        
+        if rec_episodes > 500:
+            rec_games = metrics["recent_games"] # Finished by someone
+            rec_wins = metrics["recent_wins"]   # Agent (Blocker) Wins (Rare)
+            
+            # Timeouts = Episodes - Games
+            # (Note: In some env logic, Timeout counts as game? No, typically 'dones' are set on timeout. 
+            # But 'recent_games' usually counts 'winners != -1'. Timeout has winner=-1.)
+            rec_timeouts = rec_episodes - rec_games
+            
+            denial_rate = rec_timeouts / rec_episodes
+            
+            # Reset Metrics
+            metrics["recent_games"] = 0
+            metrics["recent_wins"] = 0
+            metrics["recent_episodes"] = 0
+            
+            trainer.log(f"Stage 3 (Academy) Status: Denial Rate {denial_rate*100:.1f}% | Timeouts: {rec_timeouts} / {rec_episodes}")
+            
+            # Graduation Threshold: > 50% Denial? (Subject to tuning)
+            # User suggested manual, but let's provide a hint.
+            if denial_rate > 0.60:
+                 trainer.log(">>> Blocker Academy: HIGH PROFIENCY DETECTED (Denial > 60%) <<<")
+                 # We can auto-graduate or just log. STAGE_TEAM is next.
+                 # return STAGE_TEAM, f"Denial Rate {denial_rate:.2f} > 0.60"
+
+        return None, ""
+
+    def update_step_penalty(self, base_penalty: float) -> float:
+        return base_penalty
+
+    @property
+    def target_evolve_interval(self) -> int:
+        return 5
 
 
 class TeamStage(Stage):

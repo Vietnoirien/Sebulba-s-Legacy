@@ -2,10 +2,10 @@ from typing import Dict, Any, List
 from config import CurriculumConfig
 from training.curriculum.base import Stage
 from training.curriculum.stages import (
-    NurseryStage, SoloStage, DuelStage, TeamStage, LeagueStage
+    NurseryStage, SoloStage, DuelStage, InterceptStage, TeamStage, LeagueStage
 )
 from simulation.env import (
-    STAGE_NURSERY, STAGE_SOLO, STAGE_DUEL, STAGE_TEAM, STAGE_LEAGUE
+    STAGE_NURSERY, STAGE_SOLO, STAGE_DUEL, STAGE_INTERCEPT, STAGE_TEAM, STAGE_LEAGUE
 )
 
 class CurriculumManager:
@@ -18,6 +18,7 @@ class CurriculumManager:
             STAGE_NURSERY: NurseryStage(config),
             STAGE_SOLO: SoloStage(config),
             STAGE_DUEL: DuelStage(config),
+            STAGE_INTERCEPT: InterceptStage(config),
             STAGE_TEAM: TeamStage(config),
             STAGE_LEAGUE: LeagueStage(config)
         }
