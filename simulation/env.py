@@ -1191,6 +1191,9 @@ class PodRacerEnv:
         o_angle = angle[:, other_indices] # [B, 4, 3]
         o_shield = self.physics.shield_cd[:, other_indices] > 0 # [B, 4, 3]
         
+        # New: Runner Flag for entities
+        o_is_runner = self.is_runner[:, other_indices].float().unsqueeze(-1) # [B, 4, 3, 1]
+        
         # --- Ghost Injection (Robustness) ---
         # If teammate is inactive (Stage < Team), their pos is Infinity.
         # We replace it with Ghost Data (Random nearby) to avoid "Zero Collapse" in the model.
@@ -1233,6 +1236,12 @@ class PodRacerEnv:
              
              # Ghost Shield (Always False)
              o_shield[:, :, 0] = torch.where(mask_b, torch.tensor(False, device=device), o_shield[:, :, 0])
+
+             # Ghost Runner Flag (Random?)
+             # Let's say Ghost is a Runner 50% of time? Or Blocker?
+             # For robustness, random is fine.
+             random_runner = (torch.rand((B, 4), device=device) > 0.5).float().unsqueeze(-1)
+             o_is_runner[:, :, 0, :] = torch.where(mask_coord, random_runner, o_is_runner[:, :, 0, :])
         
         # Current Pod State, Expanded
         # p_pos: [B, 4, 1, 2]
@@ -1284,13 +1293,13 @@ class PodRacerEnv:
         # Rotate using expanded p_angle
         ot_vec_l = rotate_vec(ot_vec_g, p_angle_exp) * S_POS
         
-        # Padding [B, 4, 3, 2]
-        pad2 = torch.zeros_like(ot_vec_l)
+        # Padding [B, 4, 3, 2] -> Now [B, 4, 3, 1] for last pad
+        pad_scalar = torch.zeros_like(o_shield_f)
         
         # Concat Entity
-        # dp(2), dv(2), cos(1), sin(1), dist(1), mate(1), shield(1), ot(2), pad(2) -> 13
+        # dp(2), dv(2), cos(1), sin(1), dist(1), mate(1), shield(1), ot(2), is_runner(1), pad(1) -> 13
         entity_obs = torch.cat([
-            dp_local, dv_local, rel_cos, rel_sin, dist, is_mate, o_shield_f, ot_vec_l, pad2
+            dp_local, dv_local, rel_cos, rel_sin, dist, is_mate, o_shield_f, ot_vec_l, o_is_runner, pad_scalar
         ], dim=-1) # [B, 4, 3, 13]
         
         # --- CP Features (6) ---

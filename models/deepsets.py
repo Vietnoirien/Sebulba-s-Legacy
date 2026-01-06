@@ -24,6 +24,8 @@ class PilotNet(nn.Module):
             layer_init(nn.Linear(self.input_dim, self.hidden_dim)),
             nn.ReLU(),
             layer_init(nn.Linear(self.hidden_dim, self.hidden_dim)),
+            nn.ReLU(),
+            layer_init(nn.Linear(self.hidden_dim, self.hidden_dim)),
             nn.ReLU()
         )
         
@@ -43,13 +45,14 @@ class CommanderNet(nn.Module):
     Input: Self(15) + Team(13) + Enemy(13xN)
     Output: Shield(2), Boost(2), Bias_Thrust(1), Bias_Angle(1)
     """
-    def __init__(self, hidden_dim=128):
+    def __init__(self, hidden_dim=128, extra_input_dim=0):
         super().__init__()
         self.self_obs_dim = 15
         self.teammate_obs_dim = 13
         self.enemy_obs_dim = 13
         self.latent_dim = 16
         self.hidden_dim = hidden_dim
+        self.extra_input_dim = extra_input_dim
         
         # Shared Encoder for Enemies/Teammate
         self.encoder = nn.Sequential(
@@ -58,9 +61,11 @@ class CommanderNet(nn.Module):
             layer_init(nn.Linear(32, self.latent_dim)),
         )
         
-        # Backbone Input: Self(15) + Team(16) + Enemy(16) = 47
+        # Backbone Input: Self(15) + Team(16) + Enemy(16) + Extra(N)
         self.backbone = nn.Sequential(
-            layer_init(nn.Linear(self.self_obs_dim + self.latent_dim * 2, self.hidden_dim)),
+            layer_init(nn.Linear(self.self_obs_dim + self.latent_dim * 2 + extra_input_dim, self.hidden_dim)),
+            nn.ReLU(),
+            layer_init(nn.Linear(self.hidden_dim, self.hidden_dim)),
             nn.ReLU(),
             layer_init(nn.Linear(self.hidden_dim, self.hidden_dim)),
             nn.ReLU(),
@@ -72,7 +77,7 @@ class CommanderNet(nn.Module):
         self.head_bias_thrust = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
         self.head_bias_angle = layer_init(nn.Linear(self.hidden_dim, 1), std=0.01)
         
-    def forward(self, self_obs, teammate_obs, enemy_obs):
+    def forward(self, self_obs, teammate_obs, enemy_obs, extra_emb=None):
         # 1. Encode Teammate [B, 13] -> [B, 16]
         tm_latent = self.encoder(teammate_obs)
         
@@ -83,7 +88,11 @@ class CommanderNet(nn.Module):
         env_ctx, _ = torch.max(enc_en, dim=1)
         
         # 3. Backbone
-        x = torch.cat([self_obs, tm_latent, env_ctx], dim=1)
+        if extra_emb is not None:
+            x = torch.cat([self_obs, tm_latent, env_ctx, extra_emb], dim=1)
+        else:
+            x = torch.cat([self_obs, tm_latent, env_ctx], dim=1)
+            
         h = self.backbone(x)
         
         return (
@@ -102,17 +111,25 @@ class PodActor(nn.Module):
         super().__init__()
         
         self.pilot = PilotNet(hidden_dim=64)
-        self.commander = CommanderNet(hidden_dim=hidden_dim)
+        
+        # New: Role Embedding (0=Blocker, 1=Runner) -> 16 dim
+        self.role_embedding = nn.Embedding(2, 16)
+        
+        # Commander takes extra 16 dims
+        self.commander = CommanderNet(hidden_dim=hidden_dim, extra_input_dim=16)
         
         # LogStd (Learnable)
         self.actor_logstd = nn.Parameter(torch.zeros(2))
         
-    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs):
-        # Pilot
+    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, role_ids):
+        # role_ids: [B] LongTensor (0 or 1)
+        
+        # Pilot (Universal Driving)
         p_thrust, p_angle = self.pilot(self_obs, next_cp_obs)
         
-        # Commander
-        c_shield, c_boost, c_bias_thrust, c_bias_angle = self.commander(self_obs, teammate_obs, enemy_obs)
+        # Commander (Tactics + Role)
+        r_emb = self.role_embedding(role_ids) # [B, 16]
+        c_shield, c_boost, c_bias_thrust, c_bias_angle = self.commander(self_obs, teammate_obs, enemy_obs, extra_emb=r_emb)
         
         # Combine
         # Thrust = Sigmoid(Pilot + CommanderBias)
@@ -127,6 +144,12 @@ class PodActor(nn.Module):
         # Clamp std
         std = torch.exp(self.actor_logstd).expand_as(torch.cat([thrust_mean, angle_mean], 1))
         std = torch.clamp(std, min=0.05)
+        
+        return (thrust_mean, angle_mean), std, (c_shield, c_boost)
+        # Combined Logits for Shield/Boost are returned directly from Commander
+        # We need to construct logits for categorical?
+        # Commander returns raw outputs of Linear layer.
+        # Yes, c_shield is [B, 2] logits.
         
         return (thrust_mean, angle_mean), std, (c_shield, c_boost)
 
@@ -183,9 +206,8 @@ class PodAgent(nn.Module):
         
         self.hidden_dim = hidden_dim # For export reference
         
-        # Dual Actors
-        self.runner_actor = PodActor(hidden_dim=hidden_dim)
-        self.blocker_actor = PodActor(hidden_dim=hidden_dim)
+        # Universal Actor
+        self.actor = PodActor(hidden_dim=hidden_dim)
         
         # Central Critic
         self.critic_net = PodCritic(hidden_dim=256)
@@ -197,41 +219,21 @@ class PodAgent(nn.Module):
         # 1. Critic
         value = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs)
         
-        # 2. Actors - Heterogeneous Routing
-        # Determine Role: self_obs[..., 8] is 'leader' (Runner) flag in env.py (index 8 in assembled cat?)
-        # Let's verify env.py self_obs assembly indices.
-        # cat([v_local(2), t_vec_l(2), dest(1), align(2), shield(1), boost(1), timeout(1), lap(1), leader(1), v_mag(1), pad(1)])
-        # 0,1 | 2,3 | 4 | 5,6 | 7 | 8 | 9 | 10 | 11 | 12 | 13
-        # Leader is index 11.
+        # 2. Actors - Universal Routing
+        # Determine Role: self_obs[..., 11] is 'leader' (Runner) flag
         
-        is_runner = self_obs[:, 11] > 0.5 # [B]
+        # Extract Role ID [B]
+        # is_runner > 0.5 -> 1, else 0
+        role_ids = (self_obs[:, 11] > 0.5).long()
         
-        # Efficiency:
-        # We could run both actors on all inputs and mask results.
-        # Since B=4096 and GPU is fast, this avoids branch divergence/scatter-gather overhead in Python.
+        # Single Forward Pass
+        (means_pair, std, logits_pair) = self.actor(self_obs, teammate_obs, enemy_obs, next_cp_obs, role_ids)
         
-        (r_means, r_std, r_logits) = self.runner_actor(self_obs, teammate_obs, enemy_obs, next_cp_obs)
-        (b_means, b_std, b_logits) = self.blocker_actor(self_obs, teammate_obs, enemy_obs, next_cp_obs)
+        # Unpack
+        thrust_mean, angle_mean = means_pair
+        shield_logits, boost_logits = logits_pair
         
-        # Masking
-        # r_means tuple (thrust, angle)
-        # expand mask
-        mask = is_runner.unsqueeze(-1).float() # [B, 1]
-        inv_mask = 1.0 - mask
-        
-        # Continuous
-        thrust_mean = r_means[0] * mask + b_means[0] * inv_mask
-        angle_mean = r_means[1] * mask + b_means[1] * inv_mask
-        
-        # Std (Mixed)
-        std = r_std * mask.expand_as(r_std) + b_std * inv_mask.expand_as(b_std)
-        
-        # Discrete Logits
-        # [B, 2]
-        shield_logits = r_logits[0] * mask + b_logits[0] * inv_mask
-        boost_logits = r_logits[1] * mask + b_logits[1] * inv_mask
-        
-        # Distribution Construction (Same as before)
+        # Distribution Construction
         means = torch.cat([thrust_mean, angle_mean], dim=1)
         dist_cont = torch.distributions.Normal(means, std)
         
@@ -259,41 +261,11 @@ class PodAgent(nn.Module):
         divergence = torch.tensor(0.0, device=self_obs.device)
         
         if compute_divergence:
-            # Construct Distributions for both heads
-            # Runner
-            d_r_cont = torch.distributions.Normal(torch.cat(r_means, 1), r_std)
-            d_r_s = torch.distributions.Categorical(logits=r_logits[0])
-            d_r_b = torch.distributions.Categorical(logits=r_logits[1])
-            
-            # Blocker
-            d_b_cont = torch.distributions.Normal(torch.cat(b_means, 1), b_std)
-            d_b_s = torch.distributions.Categorical(logits=b_logits[0])
-            d_b_b = torch.distributions.Categorical(logits=b_logits[1])
-            
-            # KL(P || Q) + KL(Q || P) (Symmetric)
-            # Continuous (Sum over dims)
-            # Normal distribution KL is closed form and vmap-safe usually.
-            kl_cont = torch.distributions.kl.kl_divergence(d_r_cont, d_b_cont).sum(1) + \
-                      torch.distributions.kl.kl_divergence(d_b_cont, d_r_cont).sum(1)
-                      
-            # Discrete - SAFE IMPLEMENTATION for vmap
-            # Avoid torch.distributions.kl due to boolean masking (vmap limitation)
-            # KL(P||Q) = sum(p * (log_p - log_q))
-            # d_x_s.logits are stored in distribution
-            
-            def safe_cat_kl(logits_p, logits_q):
-                p = torch.softmax(logits_p, dim=-1)
-                log_p = torch.log_softmax(logits_p, dim=-1)
-                log_q = torch.log_softmax(logits_q, dim=-1)
-                return (p * (log_p - log_q)).sum(-1)
-
-            kl_s = safe_cat_kl(r_logits[0], b_logits[0]) + \
-                   safe_cat_kl(b_logits[0], r_logits[0])
-                   
-            kl_b = safe_cat_kl(r_logits[1], b_logits[1]) + \
-                   safe_cat_kl(b_logits[1], r_logits[1])
-                   
-            divergence = (kl_cont + kl_s + kl_b)
+             # For PBT Div, we want to know "How different is this policy from a reference?"
+             # Since it's one actor, we just return 0.0 or implement KL against old_params using functional call?
+             # For now, disable divergence optimization logic as it was designed for split actors cross-play?
+             # Re-implementing divergence for single actor is standard PPO (KL penalty).
+             pass
         
         if compute_divergence:
              return action, log_prob, entropy, value, divergence

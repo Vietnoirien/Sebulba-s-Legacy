@@ -98,25 +98,29 @@ def fuse_layer_section(W, mean, std, threshold=0.05):
     shift = np.sum(W_new * mean[None, :], axis=1)
     return W_new, shift
 
-def quantize_weights(pilot, commander):
+def quantize_weights(actor):
     """
-    Extracts and quantizes weights from Pilot and Commander.
+    Extracts and quantizes weights from Universal Actor.
     """
     weights = []
     
-    # Pilot (Hidden 32)
-    # net[0], net[2], head_thrust, head_angle
-    for layer in [pilot.net[0], pilot.net[2], pilot.head_thrust, pilot.head_angle]:
+    # Pilot (Hidden 64)
+    # pilot.net[0], pilot.net[2], pilot.net[4] (NEW), heads
+    for layer in [actor.pilot.net[0], actor.pilot.net[2], actor.pilot.net[4], actor.pilot.head_thrust, actor.pilot.head_angle]:
         weights.extend(extract_layer(layer))
         
-    # Commander (Hidden 64)
+    # Extra: Role Embedding (No Bias)
+    # [2, 16]
+    weights.extend(actor.role_embedding.weight.data.cpu().numpy().flatten())
+        
+    # Commander (Hidden 128)
     # encoder[0], encoder[2], backbone[0], backbone[2]
     # head_shield, head_boost, head_bias_thrust, head_bias_angle
     c_layers = [
-        commander.encoder[0], commander.encoder[2],
-        commander.backbone[0], commander.backbone[2],
-        commander.head_shield, commander.head_boost,
-        commander.head_bias_thrust, commander.head_bias_angle
+        actor.commander.encoder[0], actor.commander.encoder[2],
+        actor.commander.backbone[0], actor.commander.backbone[2], actor.commander.backbone[4],
+        actor.commander.head_shield, actor.commander.head_boost,
+        actor.commander.head_bias_thrust, actor.commander.head_bias_angle
     ]
     for layer in c_layers:
         weights.extend(extract_layer(layer))
@@ -223,7 +227,7 @@ def sim(pods, cps, acts):
     return pods
 """
 
-DUAL_FILE_TEMPLATE = """import sys, math
+SINGLE_FILE_TEMPLATE = """import sys, math
 W,H = {WIDTH},{HEIGHT}
 SP = 1.0/{WIDTH}.0
 SV = 1.0/1000.0
@@ -253,13 +257,21 @@ class N:
             for j in range(i): a+=x[j]*w[k*i+j]
             out.append(max(0.0,a) if r else a)
         return out
+    def emb(self, idx, dim):
+        # Embedding: [2, dim] flattened. No bias.
+        w = self.gw(2 * dim)
+        start = int(idx) * dim
+        return w[start : start+dim]
 
 class B(N):
-    def f(self,s,t,e,c):
+    def f(self,s,t,e,c,role):
         self.c=0
         hp={HP}
-        x=s+c; x=self.lin(x,21,hp,True); x=self.lin(x,hp,hp,True)
+        x=s+c; x=self.lin(x,21,hp,True); x=self.lin(x,hp,hp,True); x=self.lin(x,hp,hp,True)
         th_p=self.lin(x,hp,1)[0]; an_p=self.lin(x,hp,1)[0]
+        
+        # Read Role Emb
+        r_emb=self.emb(role, 16)
         
         w1,b1,w2,b2=self.gw(416),self.gw(32),self.gw(512),self.gw(16)
         def enc(inp):
@@ -278,7 +290,9 @@ class B(N):
         ctx=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
         
         hc={HC}
-        x=s+tm+ctx; x=self.lin(x,47,hc,True); x=self.lin(x,hc,hc,True)
+        # Input to Backbone: Self(15) + Team(16) + Enf(16) + Role(16) = 63
+        x=s+tm+ctx+r_emb
+        x=self.lin(x,63,hc,True); x=self.lin(x,hc,hc,True); x=self.lin(x,hc,hc,True)
         sh=self.lin(x,hc,2); bo=self.lin(x,hc,2)
         b_th=self.lin(x,hc,1)[0]; b_an=self.lin(x,hc,1)[0]
         
@@ -288,8 +302,7 @@ class B(N):
         
         return [ft, fa, 1 if sh[1]>sh[0] else 0, 1 if bo[1]>bo[0] else 0]
 
-WR="{BLOB_RUNNER}"; SC_R={SCALE_VAL_R}
-WB="{BLOB_BLOCKER}"; SC_B={SCALE_VAL_B}
+blob="{BLOB_UNIV}"; scale={SCALE_VAL}
 
 def tl(vx,vy,a):
     r=math.radians(a)
@@ -297,7 +310,7 @@ def tl(vx,vy,a):
     return vx*c+vy*s, -vx*s+vy*c
 
 def solve():
-    mr=B(WR,SC_R); mb=B(WB,SC_B)
+    mr=B(blob,scale)
 
     if sys.version_info.minor >= 0: 
         try: input() 
@@ -307,13 +320,10 @@ def solve():
     cps=[list(map(int,input().split())) for _ in range(C)]
     laps,p_ncp,to,scd,bavl=[0]*4,[1]*4,[100]*4,[0]*4,[True,True]
     
-    first_turn = True
-    
     while True:
         pods=[]
         try:
             line = input()
-            # If EOF
             if not line: break
             parts = list(map(int,line.split()))
             x,y,vx,vy,a,n = parts
@@ -339,13 +349,14 @@ def solve():
             p=pods[i]; cp=cps[p['n']] if p['n']<len(cps) else cps[0]
             d=math.sqrt((p['x']-cp[0])**2+(p['y']-cp[1])**2)
             eff_cp = C if p['n'] == 0 else p['n']
-            scrs.append(laps[i]*5000+eff_cp*500+(20000-d)/2000)
+            scrs.append(laps[i]*50000+eff_cp*500+(20000-d)/20)
             
         run=[False]*4
         if scrs[0]>=scrs[1]: run[0]=True
         else: run[1]=True
+        if scrs[2]>=scrs[3]: run[2]=True
+        else: run[3]=True
         
-        actions = []
         for i in range(2):
             p=pods[i]
             vf,vr=tl(p['vx'],p['vy'],p['a'])
@@ -381,7 +392,8 @@ def solve():
                 ot=cps[o['n']]
                 otx,oty=ot[0]-p['x'],ot[1]-p['y']
                 otf,otr=tl(otx,oty,p['a'])
-                feat=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dist,mate,osh,otf*SP,otr*SP,0.0,0.0]
+                o_run=1.0 if run[j] else 0.0
+                feat=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dist,mate,osh,otf*SP,otr*SP,o_run,0.0]
                 if o['tm']==p['tm']: otm.extend(feat)
                 else: oen.append(feat)
             if not otm: otm=[0.0]*13
@@ -390,24 +402,30 @@ def solve():
             cf,cr=tl(cx,cy,p['a'])
             ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
             
-            if run[i]: out=mr.f(oself,otm,oen,ocp)
-            else: out=mb.f(oself,otm,oen,ocp)
+            # Use Single Brain with Role Input
+            role_val = 1.0 if run[i] else 0.0
+            out = mr.f(oself,otm,oen,ocp, role_val)
             
             rl_th = int(out[0]*100)
             rl_ang = out[1]*18.0
             rl_sh = (out[2]==1)
             rl_bo = (out[3]==1)
             
-            best_act = (rl_th, rl_ang, rl_sh, False) 
+            # NN output is Relative Angle (Delta).
+            # We need Absolute Angle for the Search Candidate (Target Heading).
+            current_abs_angle = pods[i]['a']
+            rl_abs_angle = current_abs_angle + rl_ang
             
-            vars = [0, 3, -3, 6, -6]
+            best_act = (rl_th, rl_abs_angle, rl_sh, False) 
+            
+            vars = [0, 3, -3, 6, -6, 12, -12]
             candidates = []
-            candidates.append((rl_th, rl_ang, rl_sh))
+            candidates.append((rl_th, rl_abs_angle, rl_sh))
             
             if not rl_sh:
                 for da in vars:
-                    candidates.append((100, rl_ang + da, False)) 
-                candidates.append((0, rl_ang, False))
+                    candidates.append((100, rl_abs_angle + da, False)) 
+                candidates.append((0, rl_abs_angle, False))
             
             best_score = -999999.0
             
@@ -426,19 +444,20 @@ def solve():
                 
                 score += (fp['n'] + fp['laps']*len(cps)) * 50000 - dist
                 
-                if run[i]:
-                    dx, dy = cp_pos[0]-fp['x'], cp_pos[1]-fp['y']
-                    t_ang = math.degrees(math.atan2(dy, dx))
-                    d_a = abs(t_ang - fp['a'])
-                    while d_a > 180: d_a = 360 - d_a
-                    score -= d_a * 10 
+                if (run[i]):
+                     # Runner
+                     dx, dy = cp_pos[0]-fp['x'], cp_pos[1]-fp['y']
+                     t_ang = math.degrees(math.atan2(dy, dx))
+                     d_a = abs(t_ang - fp['a'])
+                     while d_a > 180: d_a = 360 - d_a
+                     score -= d_a * 10
+                else:
+                     # Blocker: Stick to RL logic more?
+                     d_a_rl = abs(ang - rl_ang)
+                     score -= d_a_rl * 50
                 
                 if fp['x'] < 400 or fp['x'] > 15600 or fp['y'] < 400 or fp['y'] > 8600:
                     score -= 100000 
-                    
-                if not run[i]:
-                    d_a_rl = abs(ang - rl_ang)
-                    score -= d_a_rl * 100 
                 
                 if score > best_score:
                     best_score = score
@@ -456,10 +475,9 @@ def solve():
             if scd[i]>0: scd[i]-=1
             print(f"{tx} {ty} {pw}")
             
-        first_turn = False
-
 if __name__=="__main__": solve()
 """
+
 
 def export_model(model_path, output_path="submission.py"):
     # Load Model
@@ -483,36 +501,31 @@ def export_model(model_path, output_path="submission.py"):
         print(f"Loading RMS stats from {rms_path}")
         rms_stats = torch.load(rms_path, map_location='cpu')
         
-        fuse_normalization_pilot(agent.runner_actor.pilot, rms_stats)
-        fuse_normalization_commander(agent.runner_actor.commander, rms_stats)
+        fuse_normalization_pilot(agent.actor.pilot, rms_stats)
+        fuse_normalization_commander(agent.actor.commander, rms_stats)
         
-        fuse_normalization_pilot(agent.blocker_actor.pilot, rms_stats)
-        fuse_normalization_commander(agent.blocker_actor.commander, rms_stats)
+        # fuse_normalization_pilot(agent.blocker_actor.pilot, rms_stats)
+        # fuse_normalization_commander(agent.blocker_actor.commander, rms_stats)
     else:
         print("WARNING: No RMS stats found!")
             
-    # Quantize Both (Pilot + Commander seq)
-    q_run, scale_run = quantize_weights(agent.runner_actor.pilot, agent.runner_actor.commander)
-    q_blk, scale_blk = quantize_weights(agent.blocker_actor.pilot, agent.blocker_actor.commander)
+    # Quantize Universal
+    q_univ, scale_univ = quantize_weights(agent.actor)
     
-    enc_run = encode_data(q_run)
-    enc_blk = encode_data(q_blk)
+    enc_univ = encode_data(q_univ)
     
     # Escape
-    run_esc = enc_run.replace("\\", "\\\\").replace("\"", "\\\"")
-    blk_esc = enc_blk.replace("\\", "\\\\").replace("\"", "\\\"")
+    univ_esc = enc_univ.replace("\\", "\\\\").replace("\"", "\\\"")
     
     # Retrieve Hidden Dims
-    hp = agent.runner_actor.pilot.hidden_dim
-    hc = agent.runner_actor.commander.hidden_dim
+    hp = agent.actor.pilot.hidden_dim
+    hc = agent.actor.commander.hidden_dim
     
     # Minify Physics
     fast_phys = minify_code(FAST_PHYSICS_CODE)
     
-    script = DUAL_FILE_TEMPLATE.replace("{BLOB_RUNNER}", run_esc)\
-        .replace("{SCALE_VAL_R}", str(scale_run))\
-        .replace("{BLOB_BLOCKER}", blk_esc)\
-        .replace("{SCALE_VAL_B}", str(scale_blk))\
+    script = SINGLE_FILE_TEMPLATE.replace("{BLOB_UNIV}", univ_esc)\
+        .replace("{SCALE_VAL}", str(scale_univ))\
         .replace("{WIDTH}", str(WIDTH))\
         .replace("{HEIGHT}", str(HEIGHT))\
         .replace("{HP}", str(hp))\

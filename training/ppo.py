@@ -1068,7 +1068,7 @@ class PPOTrainer:
                       for p in self.population:
                            agent = p['agent']
                            # Clone Weights
-                           agent.blocker_actor.load_state_dict(agent.runner_actor.state_dict())
+
                            
                            
                        # [FIX] Simplified Mitosis: Just Clone. 
