@@ -90,7 +90,7 @@ class TrainingSession:
             self.trainer = PPOTrainer(logger_callback=self._log_callback)
         return self.trainer
 
-    def start(self, model_name=None, curriculum_mode="auto", curriculum_stage=0, config=None):
+    def start(self, model_name=None, curriculum_mode="auto", curriculum_stage=0, config=None, max_checkpoints=5):
         if self.running:
             return
         
@@ -119,6 +119,10 @@ class TrainingSession:
         self.trainer.curriculum_mode = curriculum_mode
         self.trainer.env.curriculum_stage = curriculum_stage
         self.trainer.log(f"Session started with Curriculum: {self.trainer.curriculum_mode} | Stage: {self.trainer.env.curriculum_stage}")
+        
+        # Apply Max Checkpoints Config
+        self.trainer.config.max_checkpoints_to_keep = max_checkpoints
+        self.trainer.log(f"Config: Max Checkpoints to Keep = {max_checkpoints}")
 
         # [FIX] Sync Curriculum Manager and Env Config explicitly
         # If we just set env.curriculum_stage int, env.config remains stuck on previous default (Nursery).
@@ -148,6 +152,10 @@ class TrainingSession:
              if path is None:
                  if model_name.startswith("gen_") and "agent" in model_name: 
                      path = f"data/checkpoints/{model_name}.pt"
+                 # Support new stage-based paths (e.g. stage_1/gen_25) passed as ID
+                 elif os.path.isdir(f"data/{model_name}"):
+                     path = f"data/{model_name}"
+                 # Support legacy generations
                  elif os.path.isdir(f"data/generations/{model_name}"):
                      path = f"data/generations/{model_name}"
                  else:

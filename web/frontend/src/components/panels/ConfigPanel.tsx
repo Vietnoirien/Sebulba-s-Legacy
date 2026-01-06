@@ -33,7 +33,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v8', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v9', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,

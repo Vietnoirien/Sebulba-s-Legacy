@@ -614,8 +614,9 @@ class PodRacerEnv:
             # Apply Reward for each pod
             # Note: rank_diff is [N, 4]
             # w_rank is [N]. Expand.
-            
-            rewards_indiv += rank_diff.float() * w_rank.unsqueeze(1)
+            # FIX: Only apply to Runners. Blockers should not be penalized for losing rank (ambush).
+            is_runner_mask = self.is_runner.float() # [B, 4]
+            rewards_indiv += rank_diff.float() * w_rank.unsqueeze(1) * is_runner_mask
             
             # Update state
             self.prev_ranks = curr_ranks
@@ -637,7 +638,16 @@ class PodRacerEnv:
             # rewards_indiv -= pen_val * active_mask.float()
             # Careful with shape
             penalty_tensor = pen_val * active_mask.float()
-            rewards_indiv -= penalty_tensor
+            
+            # FIX: Halve penalty for Blockers to allow "Doorman" loitering
+            # Blockers (is_runner=0) get 0.5 * penalty
+            # Runners (is_runner=1) get 1.0 * penalty
+            role_scale = 0.5 + 0.5 * self.is_runner.float() # [B, 4] -> 1.0 for Runner, 0.5 for Blocker
+            # Actually, is_runner is [B, 4] (boolean/int)? No, self.is_runner is [B, 4] bool usually or int.
+            # Let's check init: self.is_runner is a tensor.
+            # Assuming 0/1.
+            
+            rewards_indiv -= penalty_tensor * role_scale
 
         
         # D. Checkpoints (Individual Progress)

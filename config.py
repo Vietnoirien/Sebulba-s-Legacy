@@ -82,6 +82,7 @@ class TrainingConfig:
     pop_size: int = 64
     evolve_interval: int = 2
     exploiter_ratio: float = 0.125
+    max_checkpoints_to_keep: int = 5
     
     # Batch Size Config (Per Agent)
     update_epochs: int = 4
@@ -184,7 +185,7 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_STEP_PENALTY: 10.0, # Increased to 10.0 to make Time Cost significant (Speed Incentive)
     RW_ORIENTATION: 1.0, # Reduced to soft guidance
     RW_WRONG_WAY: 10.0,
-    RW_COLLISION_MATE: 2.0,
+    RW_COLLISION_MATE: 5.0, # Increased from 2.0 (User Request) to discourage friendly fire
     RW_PROXIMITY: 5.0,
     RW_MAGNET: 10.0, # Proximity Pull
     RW_RANK: 500.0, # Rank Change

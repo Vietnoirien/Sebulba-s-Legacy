@@ -143,6 +143,7 @@ class StartPayload(BaseModel):
     model: Optional[str] = "scratch"
     curriculum_mode: Optional[str] = "auto"
     curriculum_stage: Optional[int] = 0
+    max_checkpoints: Optional[int] = 5
     config: Optional[Dict[str, Any]] = None
 
 @app.post("/api/start")
@@ -151,15 +152,18 @@ async def start_training(payload: StartPayload = None):
     curr_mode = "auto"
     curr_stage = 0
     initial_config = None
+    max_cp = 5
     
     if payload:
         model_name = payload.model
         curr_mode = payload.curriculum_mode
         curr_stage = payload.curriculum_stage
         initial_config = payload.config
+        if payload.max_checkpoints:
+             max_cp = payload.max_checkpoints
 
     try:
-        session.start(model_name=model_name, curriculum_mode=curr_mode, curriculum_stage=curr_stage, config=initial_config)
+        session.start(model_name=model_name, curriculum_mode=curr_mode, curriculum_stage=curr_stage, config=initial_config, max_checkpoints=max_cp)
         return {"status": "started", "model": model_name, "curriculum": curr_mode, "stage": curr_stage}
     except Exception as e:
         import traceback
@@ -257,31 +261,58 @@ async def list_generations():
     Returns: List[Dict] with id, name, path, and stats if available.
     """
     generations = []
-    base_dir = "data/generations"
+    base_dir = "data"
     if not os.path.exists(base_dir):
         return []
-        
-    for name in os.listdir(base_dir):
-        path = os.path.join(base_dir, name)
-        if os.path.isdir(path) and name.startswith("gen_"):
-            # Try to get timestamp
+
+    # Helper to process a gen folder
+    def process_gen_folder(path, name_prefix=""):
+        try:
+            name = os.path.basename(path)
+            ctime = os.path.getctime(path)
+            agents = [f for f in os.listdir(path) if f.endswith(".pt")]
+            
+            # ID is the relative path from data/ e.g. "stage_1/gen_10" or "generations/gen_5"
+            rel_path = os.path.relpath(path, base_dir)
+            
+            # Display Name
+            display_name = name.replace("_", " ").title()
+            if name_prefix:
+                display_name = f"{name_prefix} - {display_name}"
+            
+            generations.append({
+                "id": rel_path,
+                "name": display_name,
+                "path": path,
+                "creation_time": ctime,
+                "agent_count": len(agents)
+            })
+        except Exception:
+            pass
+
+    # 1. Scan old-style data/generations
+    old_gen_dir = os.path.join(base_dir, "generations")
+    if os.path.exists(old_gen_dir):
+        for name in os.listdir(old_gen_dir):
+            path = os.path.join(old_gen_dir, name)
+            if os.path.isdir(path) and name.startswith("gen_"):
+                process_gen_folder(path, "Legacy")
+
+    # 2. Scan stage_* directories
+    for stage_dir in os.listdir(base_dir):
+        if stage_dir.startswith("stage_") and os.path.isdir(os.path.join(base_dir, stage_dir)):
             try:
-                ctime = os.path.getctime(path)
+                # Extract stage number for nice display
+                stage_num = stage_dir.split("_")[1]
+                stage_path = os.path.join(base_dir, stage_dir)
                 
-                # Count agents
-                agents = [f for f in os.listdir(path) if f.endswith(".pt")]
-                
-                # ID is the folder name
-                generations.append({
-                    "id": name,
-                    "name": name.replace("_", " ").title(), # gen_0 -> Gen 0
-                    "path": path,
-                    "creation_time": ctime,
-                    "agent_count": len(agents)
-                })
-            except Exception:
+                for gen_dir in os.listdir(stage_path):
+                    if gen_dir.startswith("gen_") and os.path.isdir(os.path.join(stage_path, gen_dir)):
+                        path = os.path.join(stage_path, gen_dir)
+                        process_gen_folder(path, f"Stage {stage_num}")
+            except:
                 pass
-                
+
     # Sort by creation time desc
     generations.sort(key=lambda x: x["creation_time"], reverse=True)
     return generations

@@ -142,6 +142,17 @@ class PPOTrainer:
                 'nursery_score': 0.0
             })
             
+            # --- MITIGATION: COLD START BLOCKER ---
+            # Copy Runner Embedding (Index 1) > Blocker Embedding (Index 0)
+            # This ensures Blockers start with the same 'skill context' as Runners
+            # instead of random noise.
+            # Only done at init/load time.
+            with torch.no_grad():
+                emb_weight = agent.actor.role_embedding.weight
+                emb_weight[0] = emb_weight[1].clone()
+                # self.log(f"Agent {i}: Role Mitosis Applied (Runner -> Blocker)")
+
+            
             # Fill Tensor
             start_idx = i * self.config.envs_per_agent
             end_idx = start_idx + self.config.envs_per_agent
@@ -835,7 +846,10 @@ class PPOTrainer:
         self.leader_idx = self.population[best_guy]['id']
 
     def save_generation(self):
-        gen_dir = f"data/generations/gen_{self.generation}"
+        # NEW: Stage-based structure
+        stage_dir = f"data/stage_{self.env.curriculum_stage}"
+        gen_dir = os.path.join(stage_dir, f"gen_{self.generation}")
+        
         os.makedirs(gen_dir, exist_ok=True)
         self.log(f"Saving generation {self.generation} to {gen_dir}...")
         
@@ -877,31 +891,29 @@ class PPOTrainer:
             'cp': self.rms_cp.state_dict()
         }, rms_path)
 
-        # --- Auto-Flush Old Generations ---
+        # --- Auto-Flush Old Generations (Stage-Specific, Date-Based) ---
         try:
-            MAX_KEEP = 5
-            gen_root = "data/generations"
-            existing_gens = []
+            MAX_KEEP = self.config.max_checkpoints_to_keep
             
-            # Scan
-            if os.path.exists(gen_root):
-                for d in os.listdir(gen_root):
-                    path = os.path.join(gen_root, d)
+            # Scan current stage directory
+            if os.path.exists(stage_dir):
+                all_gens = []
+                for d in os.listdir(stage_dir):
+                    path = os.path.join(stage_dir, d)
                     if d.startswith("gen_") and os.path.isdir(path):
-                        try:
-                            g_num = int(d.split('_')[1])
-                            existing_gens.append((g_num, path))
-                        except:
-                            pass
+                        # Use modification time for pruning
+                        mtime = os.path.getmtime(path)
+                        all_gens.append((mtime, path, d))
             
-            # Sort and Delete
-            existing_gens.sort(key=lambda x: x[0]) # Ascending
-            
-            if len(existing_gens) > MAX_KEEP:
-                to_delete = existing_gens[:-MAX_KEEP]
-                for g_num, path in to_delete:
-                    shutil.rmtree(path)
-                    self.log(f"Auto-Flush: Deleted old generation {g_num} to save space.")
+                # Sort by Time (Oldest First)
+                all_gens.sort(key=lambda x: x[0]) 
+                
+                # Prune
+                if len(all_gens) > MAX_KEEP:
+                    to_delete = all_gens[:-MAX_KEEP]
+                    for _, path, d_name in to_delete:
+                        shutil.rmtree(path)
+                        self.log(f"Auto-Flush: Deleted old generation {d_name} from {stage_dir} (Limit {MAX_KEEP})")
                     
         except Exception as e:
             self.log(f"Auto-Flush Warning: {e}")

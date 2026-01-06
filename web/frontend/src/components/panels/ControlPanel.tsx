@@ -12,6 +12,7 @@ export const ControlPanel: React.FC = () => {
     // const [selectedModel, setSelectedModel] = useState<string>("scratch") // Moved to Context
     const [curriculumMode, setCurriculumMode] = useLocalStorage("spt2_control_curriculumMode", "auto")
     const [curriculumStage, setCurriculumStage] = useLocalStorage("spt2_control_curriculumStage", 0)
+    const [maxCheckpoints, setMaxCheckpoints] = useLocalStorage("spt2_control_maxCheckpoints", 5)
 
     const [generations, setGenerations] = useState<any[]>([])
 
@@ -45,7 +46,8 @@ export const ControlPanel: React.FC = () => {
                     body: JSON.stringify({
                         model: selectedModel,
                         curriculum_mode: curriculumMode,
-                        curriculum_stage: curriculumStage
+                        curriculum_stage: curriculumStage,
+                        max_checkpoints: maxCheckpoints
                     })
                 })
             } else {
@@ -178,6 +180,23 @@ export const ControlPanel: React.FC = () => {
                         <option value={4}>Stage 4: League</option>
                     </select>
                 </div>
+            </div>
+
+            <div className="mb-4">
+                <label className="text-[10px] text-gray-400 font-mono uppercase block mb-1">Max Checkpoints</label>
+                <div className="flex items-center gap-2">
+                    <input
+                        type="range"
+                        min="1"
+                        max="20"
+                        step="1"
+                        value={maxCheckpoints}
+                        onChange={(e) => setMaxCheckpoints(parseInt(e.target.value))}
+                        className="flex-1 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <span className="text-xs text-white font-mono w-6 text-right">{maxCheckpoints}</span>
+                </div>
+                <p className="text-[9px] text-gray-500 font-mono mt-0.5">Keeps newest per stage (by Date)</p>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
