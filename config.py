@@ -170,6 +170,7 @@ RW_PROXIMITY = 11
 RW_MAGNET = 12 # Proximity Pull
 RW_RANK = 13 # Rank Improvement
 RW_LAP = 14 # Lap Completion
+RW_DENIAL = 15 # Deny Enemy Progress (Blocker Only)
 LAP_REWARD_MULTIPLIER = 1.5
 
 DEFAULT_REWARD_WEIGHTS = {
@@ -187,7 +188,8 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_PROXIMITY: 5.0,
     RW_MAGNET: 10.0, # Proximity Pull
     RW_RANK: 500.0, # Rank Change
-    RW_LAP: 2000.0 # RW_LAP (New) - Index 14 manually assigned
+    RW_LAP: 2000.0, # RW_LAP (New) - Index 14 manually assigned
+    RW_DENIAL: 0.5 # Deny Reward (New) - Balances with Collision (0.5 * 600u = 300/step => ~3000/sec)
 }
 
 from typing import List, Optional

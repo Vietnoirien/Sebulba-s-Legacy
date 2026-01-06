@@ -648,6 +648,21 @@ class PodRacerEnv:
         
         events_cp_passed = torch.zeros((self.num_envs, 4), dtype=torch.bool, device=self.device) # For visuals/logging
         
+        # --- Rank Calculation (Global) ---
+        # Score = Lap * 50000 + NextCP * 500 + (20000 - Dist)
+        p_laps = self.laps.float()
+        p_ncp = self.next_cp_id.float()
+        # new_dists is [B, 4] calculated in Dense Rewards section
+        true_dist = new_dists 
+        
+        scores = p_laps * 50000.0 + p_ncp * 500.0 + (20000.0 - true_dist)
+        
+        # Calculate Rank
+        s_col = scores.unsqueeze(2)
+        s_row = scores.unsqueeze(1)
+        ranks = (s_row > s_col).sum(dim=2).float().unsqueeze(-1) # [B, 4, 1]
+        rank_norm = ranks / 3.0 # [0, 1]
+        
         for i in range(4):
             next_ids = self.next_cp_id[:, i]
             # Gather targets
@@ -755,6 +770,7 @@ class PodRacerEnv:
                 taken_steps = self.steps_last_cp[pass_idx, i]
                 infos["cp_steps"][pass_idx, i] = taken_steps
                 self.steps_last_cp[pass_idx, i] = 0
+                
                 
                 # --- REWARD CALCULATION ---
                 # RW_LAP imported from config
@@ -968,8 +984,20 @@ class PodRacerEnv:
             enemy_runner_mask = self.is_runner[:, enemy_indices] # [B, 2]
             
             bonus = torch.zeros(self.num_envs, device=self.device)
-            bonus += impact_e1 * enemy_runner_mask[:, 0].float()
-            bonus += impact_e2 * enemy_runner_mask[:, 1].float()
+            
+            # Rank Scaling for Blocker: Hitting the Leader (Rank 0) is worth 2x. Hitting Loser is 1x.
+            # rank_norm is [B, 4, 1].
+            # e1_rank = rank_norm[:, enemy_indices[0], 0]
+            # scale = 1.0 + (1.0 - rank)
+            
+            r_e1 = rank_norm[:, enemy_indices[0], 0]
+            r_e2 = rank_norm[:, enemy_indices[1], 0]
+            
+            s_e1 = 1.0 + (1.0 - r_e1)
+            s_e2 = 1.0 + (1.0 - r_e2)
+            
+            bonus += impact_e1 * enemy_runner_mask[:, 0].float() * s_e1
+            bonus += impact_e2 * enemy_runner_mask[:, 1].float() * s_e2
             
             blocker_damage_metric[:, i] = bonus * is_block.float()
             
@@ -1014,6 +1042,80 @@ class PodRacerEnv:
                       prox_rew[condition] += bonus[condition]
                  
                  rewards_indiv[:, i] += prox_rew * w_prox * is_block.float()
+
+        # --- RW_DENIAL (Blocker -> Deny Enemy Progress) ---
+        # "The Doorman Reward": Stop enemy from moving to CP.
+        # Only active if w_denial > 0 and Stage >= Duel
+        
+        # We assume RW_DENIAL is index 15. Check if weights match env config or generic.
+        # w_denial = reward_weights[:, 15] if size > 15
+        # Since we use fixed indices, we rely on caller to provide correct weights tensor size.
+        
+        w_denial = reward_weights[:, 15] if reward_weights.shape[1] > 15 else torch.zeros(self.num_envs, device=self.device)
+        
+        if self.curriculum_stage >= STAGE_DUEL and w_denial.sum() > 0:
+             for i in range(4):
+                 is_block = ~self.is_runner[:, i]
+                 if not is_block.any(): continue
+                 
+                 team = i // 2
+                 enemy_team = 1 - team
+                 # Get Enemy Runner Index
+                 e_indices = torch.tensor([2*enemy_team, 2*enemy_team+1], device=self.device)
+                 is_e_run_mask = self.is_runner[:, e_indices] # [B, 2]
+                 
+                 denial_rew = torch.zeros(self.num_envs, device=self.device)
+                 p_pos = self.physics.pos[:, i]
+
+                 for idx_in_team in range(2):
+                      real_e_idx = e_indices[idx_in_team]
+                      is_target = is_e_run_mask[:, idx_in_team] # Bool [B]
+                      
+                      # Only process if this enemy is a runner and I am a blocker
+                      valid_pair = is_block & is_target
+                      if not valid_pair.any(): continue
+                      
+                      # Rank Scaling
+                      # e_rank = rank_norm[:, real_e_idx, 0]
+                      # scale = 1.0 + (1.0 - e_rank)
+                      
+                      e_rank = rank_norm[:, real_e_idx, 0]
+                      rank_scale = 1.0 + (1.0 - e_rank)
+                      
+                      # 1. Check Distance (Doorman Constraint)
+                      e_pos = self.physics.pos[:, real_e_idx]
+                      dist = torch.norm(e_pos - p_pos, dim=1)
+                      
+                      # Interact only if < 3000u (Visible range)
+                      close_mask = valid_pair & (dist < 3000.0)
+                      if not close_mask.any(): continue
+                      
+                      # 2. Calculate Enemy Progress Velocity
+                      # Vector to Enemy's Next CP
+                      e_next_cp = self.next_cp_id[:, real_e_idx]
+                      # Gather CP Pos
+                      batch_idx = torch.arange(self.num_envs, device=self.device)
+                      cp_pos = self.checkpoints[batch_idx, e_next_cp] # [B, 2]
+                      
+                      vec_to_cp = cp_pos - e_pos
+                      d_cp = torch.norm(vec_to_cp, dim=1, keepdim=True) + 1e-6
+                      dir_to_cp = vec_to_cp / d_cp # Normalized [B, 2]
+                      
+                      e_vel = self.physics.vel[:, real_e_idx] # [B, 2]
+                      
+                      # Dot Product: Velocity component towards CP
+                      # Positive = Going to CP (Bad for Blocker)
+                      # Negative = Going away (Good for Blocker)
+                      progress_speed = (e_vel * dir_to_cp).sum(dim=1)
+                      
+                      # Reward = -Progress
+                      # If enemy speed 600 -> Reward -600 (Penalty)
+                      # If enemy speed -200 (Bounced) -> Reward +200
+                      # Scaling: w_denial is usually ~0.5. 
+                      # So -300 to +100 range per step.
+                      denial_rew[close_mask] += (-progress_speed[close_mask]) * rank_scale[close_mask]
+                 
+                 rewards_indiv[:, i] += denial_rew * w_denial * is_block.float()
                  
         # Decrement Role Timer
         self.role_lock_timer = torch.clamp(self.role_lock_timer - 1, min=0)
@@ -1119,26 +1221,19 @@ class PodRacerEnv:
         v_mag = torch.norm(vel, dim=-1, keepdim=True) * S_VEL
         
         # --- Rank Calculation ---
-        # Score = Lap * 50000 + NextCP * 500 + (20000 - Dist)
-        # Dist is 'dest' (Normalized distance / S_POS = True Distance)
-        # dest is [B, 4, 1]. S_POS = 1/16000. So True Dist = dest * 16000.
-        true_dist = dest.squeeze(-1) / S_POS
+        # Calculate Rank for Observation
+        # t_vec_g is [B, 4, 2] (Global vector to target)
+        dist_next_obs = torch.norm(t_vec_g, dim=-1) # [B, 4]
         
-        # Laps and NextCP
-        p_laps = self.laps.float()
-        p_ncp = self.next_cp_id.float()
+        # Score calculation (same as in step, but recomputed for obs)
+        score_obs = self.laps.float() * 1000.0 + self.next_cp_id.float() * 100.0 - dist_next_obs
+        s_row_obs = score_obs.unsqueeze(1) # [B, 1, 4]
+        s_col_obs = score_obs.unsqueeze(2) # [B, 4, 1]
         
-        # Score [B, 4]
-        scores = p_laps * 50000.0 + p_ncp * 500.0 + (20000.0 - true_dist)
+        # Rank: Count how many entities have a score strictly greater than mine
+        ranks_obs = (s_col_obs > s_row_obs).sum(dim=2).float().unsqueeze(-1) # [B, 4, 1]
+        rank_norm = ranks_obs / 3.0 # Normalize [0, 1]
         
-        # Calculate Rank (How many scores > my score)
-        # Compare [B, 4, 1] vs [B, 1, 4] -> [B, 4, 4]
-        s_col = scores.unsqueeze(2)
-        s_row = scores.unsqueeze(1)
-        # Count > Self (dim 2 sum)
-        ranks = (s_row > s_col).sum(dim=2).float().unsqueeze(-1) # [B, 4, 1]
-        
-        rank_norm = ranks / 3.0 # Normalize 0 (1st) to 1 (4th) range [0, 1]
         pad = torch.zeros_like(v_mag)
 
         # Assemble Self
@@ -1294,12 +1389,15 @@ class PodRacerEnv:
         ot_vec_l = rotate_vec(ot_vec_g, p_angle_exp) * S_POS
         
         # Padding [B, 4, 3, 2] -> Now [B, 4, 3, 1] for last pad
-        pad_scalar = torch.zeros_like(o_shield_f)
+        # REPLACE PAD WITH RANK
+        # rank_norm is [B, 4, 1] (Self Rank)
+        # We gather it for others
+        o_rank = rank_norm[:, other_indices] # [B, 4, 3, 1]
         
         # Concat Entity
-        # dp(2), dv(2), cos(1), sin(1), dist(1), mate(1), shield(1), ot(2), is_runner(1), pad(1) -> 13
+        # dp(2), dv(2), cos(1), sin(1), dist(1), mate(1), shield(1), ot(2), is_runner(1), rank(1) -> 13
         entity_obs = torch.cat([
-            dp_local, dv_local, rel_cos, rel_sin, dist, is_mate, o_shield_f, ot_vec_l, o_is_runner, pad_scalar
+            dp_local, dv_local, rel_cos, rel_sin, dist, is_mate, o_shield_f, ot_vec_l, o_is_runner, o_rank
         ], dim=-1) # [B, 4, 3, 13]
         
         # --- CP Features (6) ---

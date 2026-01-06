@@ -61,7 +61,7 @@ class PPOTrainer:
         
         # Reward Weights [TotalEnvs, 15] - Per environment weights
         # 15 = Win, Loss, CP, Scale, Progress, Runner, Blocker, StepPen, Orient, WrongWay, Mate, Prox, Magnet, Rank, Lap
-        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 15), device=self.device)
+        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 16), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((15,), device=self.device)
@@ -2168,6 +2168,13 @@ class PPOTrainer:
             if telemetry_callback:
                 # Pass league_stats as a new argument
                 telemetry_callback(global_step, sps, 0, 0, self.current_win_rate, self.telemetry_env_indices[0], total_loss/self.config.pop_size, log_line, False, league_stats=league_stats)
+
+            # --- Memory Optimization ---
+            # Explicitly clear cache after heavy update loop
+            import gc
+            gc.collect()
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
 
             start_time = time.time()
             

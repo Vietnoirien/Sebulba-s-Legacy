@@ -393,7 +393,11 @@ def solve():
                 otx,oty=ot[0]-p['x'],ot[1]-p['y']
                 otf,otr=tl(otx,oty,p['a'])
                 o_run=1.0 if run[j] else 0.0
-                feat=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dist,mate,osh,otf*SP,otr*SP,o_run,0.0]
+                o_rnk=0
+                for s in scrs:
+                    if s>scrs[j]: o_rnk+=1
+                o_flr=o_rnk/3.0
+                feat=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dist,mate,osh,otf*SP,otr*SP,o_run,o_flr]
                 if o['tm']==p['tm']: otm.extend(feat)
                 else: oen.append(feat)
             if not otm: otm=[0.0]*13

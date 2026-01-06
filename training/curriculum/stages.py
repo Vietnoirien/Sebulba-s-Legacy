@@ -303,7 +303,10 @@ class TeamStage(Stage):
         # I should bind env to stage? 
         # Ideally Stage.on_enter(env) saves the env?
         # Yes, Stage can hold a reference to Env if initialized/entered.
-        return 2 # Placeholder, dynamic logic requires Env access which is not guaranteed here yet.
+        # Team Mode requires more time for complex strategies (Blocking/Coop) to emerge
+        # and for the agent to stabilize its coordination policy.
+        # 2 Iterations is too fast (aggressive culling). Increasing to 5.
+        return 5
 
     def get_active_pods(self) -> List[int]:
         return [0, 1]

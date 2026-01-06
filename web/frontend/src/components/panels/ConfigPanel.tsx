@@ -19,7 +19,8 @@ const RW = {
     COLLISION_MATE: 10,
     PROXIMITY: 11,
     MAGNET: 12,
-    RANK: 13
+    RANK: 13,
+    DENIAL: 15
 }
 
 interface ConfigPreset {
@@ -32,7 +33,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v7', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v8', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -47,7 +48,8 @@ export const ConfigPanel: React.FC = () => {
             [RW.COLLISION_MATE]: 2.0,
             [RW.STEP_PENALTY]: 10.0,
             [RW.PROXIMITY]: 5.0,
-            [RW.RANK]: 500.0
+            [RW.RANK]: 500.0,
+            [RW.DENIAL]: 0.5
         },
         tau: 0.0,
         team_spirit: 0.0
@@ -235,7 +237,7 @@ export const ConfigPanel: React.FC = () => {
                 {st >= 2 && (
                     <div className="bg-slate-800/30 p-3 rounded border border-slate-700">
                         <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mb-2">Bot Settings</h3>
-                        <Slider label="BOT DIFFICULTY" min={0} max={1} step={0.05} value={curriculum.difficulty} valueDisplay={curriculum.difficulty.toFixed(2)}
+                        <Slider label="BOT DIFFICULTY" min={0} max={1} step={0.01} value={curriculum.difficulty} valueDisplay={curriculum.difficulty.toFixed(2)}
                             onChange={(e) => setCurriculum(prev => ({ ...prev, difficulty: parseFloat(e.target.value) }))} />
                     </div>
                 )}
@@ -366,6 +368,8 @@ export const ConfigPanel: React.FC = () => {
                                 onChange={(e) => setWeight(RW.LOSS, parseFloat(e.target.value))} />
                             <Slider label="HUMILIATION (BLOCKER)" min={0} max={50} step={0.5} value={rewards.weights[RW.COLLISION_BLOCKER]}
                                 onChange={(e) => setWeight(RW.COLLISION_BLOCKER, parseFloat(e.target.value))} />
+                            <Slider label="DENIAL (DOORMAN)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.DENIAL]}
+                                onChange={(e) => setWeight(RW.DENIAL, parseFloat(e.target.value))} />
                             <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit}
                                 onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />
                         </div>
