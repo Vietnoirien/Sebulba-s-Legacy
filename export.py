@@ -161,10 +161,76 @@ def encode_data(quantized_data):
         for c in chars: encoded_str += chr(c + 33)
     return encoded_str
 
+# Minify the physics code for embedding
+def minify_code(code):
+    import re
+    # Remove comments
+    code = re.sub(r'#.*', '', code)
+    # Remove empty lines
+    code = re.sub(r'\n\s*\n', '\n', code)
+    # Remove leading/trailing whitespace
+    code = code.strip()
+    return code
+
+FAST_PHYSICS_CODE = """
+import math
+def clip(v, mn, mx): return max(mn, min(mx, v))
+def sim(pods, cps, acts):
+    for i, p in enumerate(pods):
+        ua = acts[i][1]
+        da = clip(ua, -18.0, 18.0)
+        p['a'] += da
+        if p['a'] > 180: p['a'] -= 360
+        elif p['a'] <= -180: p['a'] += 360
+        th = clip(acts[i][0], 0, 100)
+        if acts[i][2]: 
+             p['s'] = 4; p['m'] = 10.0; th = 0
+        else:
+             if p['s'] > 0: p['s'] -= 1; th = 0
+             p['m'] = 10.0 if p['s'] == 3 else 1.0
+        r = math.radians(p['a'])
+        p['vx'] += th * math.cos(r); p['vy'] += th * math.sin(r)
+        p['x'] += p['vx']; p['y'] += p['vy']
+    for _ in range(2): 
+        pairs = []
+        for i in range(4):
+            for j in range(i+1, 4):
+                 dx = pods[j]['x'] - pods[i]['x']; dy = pods[j]['y'] - pods[i]['y']
+                 d2 = dx*dx + dy*dy; rs = 800.0
+                 if d2 < rs*rs:
+                     d = math.sqrt(d2); d = 1e-4 if d < 1e-4 else d
+                     nx, ny = dx/d, dy/d
+                     dvx = pods[i]['vx'] - pods[j]['vx']; dvy = pods[i]['vy'] - pods[j]['vy']
+                     prod = dvx*nx + dvy*ny
+                     m1 = pods[i].get('m', 1.0); m2 = pods[j].get('m', 1.0)
+                     f = prod / (1/m1 + 1/m2)
+                     if f < 120.0 and prod > 0: f = 120.0
+                     elif prod <= 0: f = 0
+                     jx, jy = -f*nx, -f*ny
+                     ov = rs - d; sep = ov / 2.0; sx, sy = nx*sep, ny*sep
+                     pairs.append((i, j, jx, jy, sx, sy, m1, m2))
+        for i, j, jx, jy, sx, sy, m1, m2 in pairs:
+             pods[i]['vx'] += jx/m1; pods[i]['vy'] += jy/m1; pods[i]['x'] -= sx; pods[i]['y'] -= sy
+             pods[j]['vx'] -= jx/m2; pods[j]['vy'] -= jy/m2; pods[j]['x'] += sx; pods[j]['y'] += sy
+    for p in pods:
+        p['vx'] *= 0.85; p['vy'] *= 0.85; p['x'] = round(p['x']); p['y'] = round(p['y']); p['vx'] = int(p['vx']); p['vy'] = int(p['vy'])
+        cp = cps[p['n']]
+        if (p['x']-cp[0])**2 + (p['y']-cp[1])**2 < 360000:
+            p['n'] = (p['n'] + 1)
+            if p['n'] >= len(cps): p['n'] = 0; p['laps'] += 1
+            p['to'] = 100
+        else: p['to'] -= 1
+    return pods
+"""
+
 DUAL_FILE_TEMPLATE = """import sys, math
 W,H = {WIDTH},{HEIGHT}
 SP = 1.0/{WIDTH}.0
 SV = 1.0/1000.0
+
+# --- FAST PHYSICS ---
+{FAST_PHYSICS}
+# --------------------
 
 class N:
     def __init__(self,d,s):
@@ -191,15 +257,10 @@ class N:
 class B(N):
     def f(self,s,t,e,c):
         self.c=0
-        # --- PILOT ---
-        # Input 21 -> HP -> HP
         hp={HP}
-        x=s+c
-        x=self.lin(x,21,hp,True); x=self.lin(x,hp,hp,True)
+        x=s+c; x=self.lin(x,21,hp,True); x=self.lin(x,hp,hp,True)
         th_p=self.lin(x,hp,1)[0]; an_p=self.lin(x,hp,1)[0]
         
-        # --- COMMANDER ---
-        # Encoder (13->32->16) - 32 and 16 are fixed latent dims
         w1,b1,w2,b2=self.gw(416),self.gw(32),self.gw(512),self.gw(16)
         def enc(inp):
             h=[0.0]*32
@@ -213,32 +274,22 @@ class B(N):
                 for j in range(32): a+=h[j]*w2[r*32+j]
                 z[r]=a
             return z
-            
-        tm=enc(t)
-        encs=[enc(en) for en in e]
+        tm=enc(t); encs=[enc(en) for en in e]
         ctx=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
         
-        # Backbone (47 -> HC -> HC)
         hc={HC}
-        x=s+tm+ctx
-        x=self.lin(x,47,hc,True); x=self.lin(x,hc,hc,True)
-        
-        # Heads
+        x=s+tm+ctx; x=self.lin(x,47,hc,True); x=self.lin(x,hc,hc,True)
         sh=self.lin(x,hc,2); bo=self.lin(x,hc,2)
         b_th=self.lin(x,hc,1)[0]; b_an=self.lin(x,hc,1)[0]
         
-        # --- COMBINE ---
         ft = 1.0/(1.0+math.exp(-(th_p + b_th)))
         sum_a = an_p + b_an
         fa = (math.exp(2*sum_a)-1)/(math.exp(2*sum_a)+1)
         
-        return [ft,fa,1 if sh[1]>sh[0] else 0,1 if bo[1]>bo[0] else 0]
+        return [ft, fa, 1 if sh[1]>sh[0] else 0, 1 if bo[1]>bo[0] else 0]
 
-WR="{BLOB_RUNNER}"
-SC_R={SCALE_VAL_R}
-
-WB="{BLOB_BLOCKER}"
-SC_B={SCALE_VAL_B}
+WR="{BLOB_RUNNER}"; SC_R={SCALE_VAL_R}
+WB="{BLOB_BLOCKER}"; SC_B={SCALE_VAL_B}
 
 def tl(vx,vy,a):
     r=math.radians(a)
@@ -248,30 +299,53 @@ def tl(vx,vy,a):
 def solve():
     mr=B(WR,SC_R); mb=B(WB,SC_B)
 
-    input(); C=int(input())
+    if sys.version_info.minor >= 0: 
+        try: input() 
+        except: pass
+    try: C=int(input())
+    except: C=3
     cps=[list(map(int,input().split())) for _ in range(C)]
     laps,p_ncp,to,scd,bavl=[0]*4,[1]*4,[100]*4,[0]*4,[True,True]
+    
+    first_turn = True
+    
     while True:
         pods=[]
-        for i in range(2): x,y,vx,vy,a,n=map(int,input().split()); pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':i,'tm':0})
-        for i in range(2): x,y,vx,vy,a,n=map(int,input().split()); pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':i+2,'tm':1})
+        try:
+            line = input()
+            # If EOF
+            if not line: break
+            parts = list(map(int,line.split()))
+            x,y,vx,vy,a,n = parts
+            pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':0,'tm':0,'s':scd[0],'m':10.0 if scd[0]==3 else 1.0,'to':to[0],'laps':laps[0]})
+        except EOFError: break
+            
+        for i in range(1,4):
+             x,y,vx,vy,a,n=map(int,input().split())
+             tm = 0 if i < 2 else 1
+             s_val = scd[i] if i < 2 else 0
+             pods.append({'x':x,'y':y,'vx':vx,'vy':vy,'a':a,'n':n,'id':i,'tm':tm,'s':s_val,'m':1.0,'to':to[i],'laps':laps[i]})
+        
         for i in range(4):
             p=pods[i]
             if p['n']!=p_ncp[i]:
                 if p['n']==1 and p_ncp[i]==0: laps[i]+=1
                 to[i]=100
             else: to[i]-=1
-            p_ncp[i]=p['n']
+            p_ncp[i]=p['n']; pods[i]['laps']=laps[i]; pods[i]['to']=to[i]
+            
         scrs=[]
         for i in range(4):
             p=pods[i]; cp=cps[p['n']] if p['n']<len(cps) else cps[0]
             d=math.sqrt((p['x']-cp[0])**2+(p['y']-cp[1])**2)
             eff_cp = C if p['n'] == 0 else p['n']
-            scrs.append(laps[i]*5000000+eff_cp*50000+(20000-d))
+            scrs.append(laps[i]*5000+eff_cp*500+(20000-d)/2000)
+            
         run=[False]*4
         if scrs[0]>=scrs[1]: run[0]=True
         else: run[1]=True
         
+        actions = []
         for i in range(2):
             p=pods[i]
             vf,vr=tl(p['vx'],p['vy'],p['a'])
@@ -283,17 +357,15 @@ def solve():
             ftd=math.sqrt(gx**2+gy**2)*SP
             ds=ftd+1e-6
             fac,fas=(ftf/SP)/(ds/SP),(ftr/SP)/(ds/SP)
-            fsh=scd[i]/3.0
-            fbo=1.0 if bavl[0] else 0.0
-            fto=to[i]/100.0
-            fla=laps[i]/3.0
-            fle=1.0 if run[i] else 0.0
+            fsh=scd[i]/3.0; fbo=1.0 if bavl[0] else 0.0
+            fto=to[i]/100.0; fla=laps[i]/3.0; fle=1.0 if run[i] else 0.0
             vm=math.sqrt(p['vx']**2+p['vy']**2)*SV
             rnk=0
             for s in scrs:
                 if s>scrs[i]: rnk+=1
             flr=rnk/3.0
             oself=[fvf,fvr,ftf,ftr,ftd,fac,fas,fsh,fbo,fto,fla,fle,vm,0.0,flr]
+            
             otm,oen=[],[]
             for j in range(4):
                 if i==j: continue
@@ -305,7 +377,7 @@ def solve():
                 ra=o['a']-p['a']; rr=math.radians(ra)
                 dist=math.sqrt(dx**2+dy**2)*SP
                 mate=1.0 if o['tm']==p['tm'] else 0.0
-                osh=1.0 if scd[j]>0 else 0.0
+                osh=0.0
                 ot=cps[o['n']]
                 otx,oty=ot[0]-p['x'],ot[1]-p['y']
                 otf,otr=tl(otx,oty,p['a'])
@@ -321,13 +393,70 @@ def solve():
             if run[i]: out=mr.f(oself,otm,oen,ocp)
             else: out=mb.f(oself,otm,oen,ocp)
             
-            pw=str(int(out[0]*100))
-            if out[2]==1 and scd[i]==0: pw="SHIELD"; scd[i]=4
-            elif out[3]==1 and bavl[0]: pw="BOOST"; bavl[0]=False
+            rl_th = int(out[0]*100)
+            rl_ang = out[1]*18.0
+            rl_sh = (out[2]==1)
+            rl_bo = (out[3]==1)
+            
+            best_act = (rl_th, rl_ang, rl_sh, False) 
+            
+            vars = [0, 3, -3, 6, -6]
+            candidates = []
+            candidates.append((rl_th, rl_ang, rl_sh))
+            
+            if not rl_sh:
+                for da in vars:
+                    candidates.append((100, rl_ang + da, False)) 
+                candidates.append((0, rl_ang, False))
+            
+            best_score = -999999.0
+            
+            for (th, ang, sh) in candidates:
+                sim_pods = [p.copy() for p in pods]
+                acts = [[0,0,0]] * 4
+                acts[i] = [th, ang - sim_pods[i]['a'], sh]
+                
+                final_pods = sim(sim_pods, cps, acts)
+                fp = final_pods[i]
+                
+                score = 0
+                cp_idx = fp['n']
+                cp_pos = cps[cp_idx]
+                dist = math.sqrt((fp['x']-cp_pos[0])**2 + (fp['y']-cp_pos[1])**2)
+                
+                score += (fp['n'] + fp['laps']*len(cps)) * 50000 - dist
+                
+                if run[i]:
+                    dx, dy = cp_pos[0]-fp['x'], cp_pos[1]-fp['y']
+                    t_ang = math.degrees(math.atan2(dy, dx))
+                    d_a = abs(t_ang - fp['a'])
+                    while d_a > 180: d_a = 360 - d_a
+                    score -= d_a * 10 
+                
+                if fp['x'] < 400 or fp['x'] > 15600 or fp['y'] < 400 or fp['y'] > 8600:
+                    score -= 100000 
+                    
+                if not run[i]:
+                    d_a_rl = abs(ang - rl_ang)
+                    score -= d_a_rl * 100 
+                
+                if score > best_score:
+                    best_score = score
+                    best_act = (th, ang, sh, rl_bo)
+            
+            f_th, f_ang, f_sh, f_bo = best_act
+            
+            tx = int(p['x'] + 10000 * math.cos(math.radians(f_ang)))
+            ty = int(p['y'] + 10000 * math.sin(math.radians(f_ang)))
+            
+            pw = str(int(f_th))
+            if f_sh and scd[i] == 0: pw="SHIELD"; scd[i]=4
+            elif f_bo and bavl[0] and not f_sh: pw="BOOST"; bavl[0]=False
+            
             if scd[i]>0: scd[i]-=1
-            tx=int(p['x']+math.cos(math.radians(p['a']+out[1]*18.0))*10000)
-            ty=int(p['y']+math.sin(math.radians(p['a']+out[1]*18.0))*10000)
-            print(f"{tx} {ty} {pw}", flush=True)
+            print(f"{tx} {ty} {pw}")
+            
+        first_turn = False
 
 if __name__=="__main__": solve()
 """
@@ -377,6 +506,9 @@ def export_model(model_path, output_path="submission.py"):
     hp = agent.runner_actor.pilot.hidden_dim
     hc = agent.runner_actor.commander.hidden_dim
     
+    # Minify Physics
+    fast_phys = minify_code(FAST_PHYSICS_CODE)
+    
     script = DUAL_FILE_TEMPLATE.replace("{BLOB_RUNNER}", run_esc)\
         .replace("{SCALE_VAL_R}", str(scale_run))\
         .replace("{BLOB_BLOCKER}", blk_esc)\
@@ -384,7 +516,8 @@ def export_model(model_path, output_path="submission.py"):
         .replace("{WIDTH}", str(WIDTH))\
         .replace("{HEIGHT}", str(HEIGHT))\
         .replace("{HP}", str(hp))\
-        .replace("{HC}", str(hc))
+        .replace("{HC}", str(hc))\
+        .replace("{FAST_PHYSICS}", fast_phys)
     
     with open(output_path, 'w') as f:
         f.write(script)

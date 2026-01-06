@@ -382,7 +382,7 @@ class PPOTrainer:
         
         loss = pg_loss - ent_coef * ent.mean() + vf_coef * v_loss - div_coef * div_clamped
         
-        return loss, loss.detach()
+        return loss, (loss.detach(), pg_loss.detach(), v_loss.detach(), ent.mean().detach(), div_clamped.detach())
 
     def log(self, msg):
         print(msg)
@@ -905,7 +905,7 @@ class PPOTrainer:
                     
         except Exception as e:
             self.log(f"Auto-Flush Warning: {e}")
-    def log_iteration_summary(self, global_step, sps, current_tau, avg_loss):
+    def log_iteration_summary(self, global_step, sps, current_tau, avg_loss, avg_pg=0.0, avg_v=0.0, avg_ent=0.0, avg_div=0.0):
         leader = self.population[self.leader_idx]
         
         # Calculate Pop Stats
@@ -1013,7 +1013,8 @@ class PPOTrainer:
              
         self.log("-" * 80)
 
-        self.log(f" Loss: {avg_loss:.4f}")
+
+        self.log(f" Loss: {avg_loss:.4f} | PG: {avg_pg:.4f} | Val: {avg_v:.4f} | Ent: {avg_ent:.4f} | Div: {avg_div:.4f}")
         self.log(border)
 
     def update_step_penalty_annealing(self):
@@ -1044,6 +1045,8 @@ class PPOTrainer:
         start_time = time.time()
         sps = 0 # Initialize to avoid unbound error on first steps
         
+        self.last_transition_iteration = -999 # Initialize
+        
         # Helper stacker REMOVED - using direct tensor slicing
 
         while global_step < self.config.total_timesteps:
@@ -1067,19 +1070,23 @@ class PPOTrainer:
                            # Clone Weights
                            agent.blocker_actor.load_state_dict(agent.runner_actor.state_dict())
                            
+                           
+                       # [FIX] Simplified Mitosis: Just Clone. 
+                       # Diagnostics showed that Zeroing Teammate Weights caused 'Reverse' (-0.99) behavior 
+                       # compared to preserving them (+0.86), likely due to learned bias from Stage 2 padding (-100k).
+                       # We rely on training to adapt the weights to the new input distribution.
+                               
+
+
+                      # [FIX] CRITICAL: Sync Modified Agents back to Vectorized Stack!
+                      # Without this, the optimizer continues using random Blocker weights.
+                      self.log(">>> [FIX] Syncing Mitosis changes to Vectorized Parameters... <<<")
+                      self.sync_agents_to_vectorized()
+                      
                       # Reset Vectorized Optimizer State (Critical to break old momentum)
                       self.log(">>> [MITOSIS] Resetting Vectorized Optimizer State to clear Stage 2 momentum. <<<")
                       self.vectorized_adam.reset_state()
-
-                      # Reset Normalization Statistics (RMS) for Stage 3 Adaptation
-                      # Critical: Input distribution changes (Ghost -> Real), Stats must be flushed.
-                      self.log(">>> [MITOSIS] Resetting Return Normalization (RMS_RET) ONLY for Stage 3 Adaptation. Keeping Obs Stats. <<<")
-                      # self.rms_self.reset() # REMOVED: Keep physics scaling
-                      # self.rms_ent.reset()  # REMOVED: Keep entity scaling
-                      # self.rms_cp.reset()   # REMOVED: Keep cp scaling
-                      self.rms_ret.reset()    # KEEP: Reward scale changes significantly in Team Mode
-                           
-                 self.env.reset()
+                      
                  
                  # GENERATE NEW MATCH ID (Forces Frontend Reset)
                  self.match_id = str(uuid.uuid4())
@@ -1095,14 +1102,9 @@ class PPOTrainer:
             # Solo+: Stable Evolution (2). Steps 256.
             
             # SOTA Tuning (See stage_0_tuning_report.md)
-            # SOTA Tuning (See stage_0_tuning_report.md)
             # Delegated to Stage Class (Evolve Interval)
             # target_steps removed - fixed to config.num_steps (512)
             target_evolve = self.curriculum.current_stage.target_evolve_interval
-            
-            # Dynamic Evolve Check (if callable/property logic is complex, might need method)
-            # For Team Stage, it was dynamic: int(8 - 4 * diff).
-            # We will handle this in the TeamStage property implementation.
             
             # Apply Evolve Interval
             self.current_evolve_interval = target_evolve         
@@ -1974,6 +1976,12 @@ class PPOTrainer:
             # Compiled Grad Function (Memoized by vmap implicitly? Better to compile)
             compute_grad = vmap(grad(self._functional_loss, has_aux=True), in_dims=(0,0,0,0,0,0,0,0,0,0,0,None,0,0,None,None))
             
+            total_loss = 0.0
+            total_pg = 0.0
+            total_v = 0.0
+            total_ent = 0.0
+            total_div = 0.0
+            
             for _ in range(self.config.update_epochs):
                  np.random.shuffle(inds)
                  for start in range(0, num_samples, minibatch_size):
@@ -1995,13 +2003,20 @@ class PPOTrainer:
                       # (Pop parallel)
                       # Compute Vectorized Gradients
                       # (Pop parallel)
-                      grads, batch_loss = compute_grad(
+                      grads, batch_aux = compute_grad(
                           self.stacked_params, self.stacked_buffers,
                           m_s, m_tm, m_en, m_cp, m_act, m_lp, m_v, m_adv, m_ret, 
                           use_div, t_ent, t_clip, t_vf, t_div_coef
                       )
                       
-                      total_loss += batch_loss.sum().item()
+                      # Unpack Aux: Tuple of Tensors [Pop, MB]
+                      b_loss, b_pg, b_v, b_ent, b_div = batch_aux
+                      
+                      total_loss += b_loss.sum().item()
+                      total_pg += b_pg.sum().item()
+                      total_v += b_v.sum().item()
+                      total_ent += b_ent.sum().item()
+                      total_div += b_div.sum().item()
                       
                       # Optimizer Step
                       self.vectorized_adam.step(grads)
@@ -2112,11 +2127,35 @@ class PPOTrainer:
                  self.log(f"🏆 League: {leader_id_str} vs {self.current_opponent_id} | WR: {win_rate:.2f} (Hist: {hist_wr:.2f})")
 
             # Evolution Check
+            # Adding Grace Period: Do not evolve immediately after a stage transition.
+            # This allows EMA metrics to stabilize in the new environment.
+            iterations_since_transition = self.iteration - self.last_transition_iteration
+            TRANSITION_GRACE_PERIOD = 20 # 20 Iterations = ~20-30 mins of training.
+            
+            in_grace_period = (iterations_since_transition < TRANSITION_GRACE_PERIOD)
+            
             if self.iteration % self.current_evolve_interval == 0:
-                self.evolve_population()
+                if in_grace_period:
+                    self.log(f"Evolution Skipped: In Grace Period (Iter {iterations_since_transition}/{TRANSITION_GRACE_PERIOD}).")
+                else:
+                    self.evolve_population()
             
             # Logging
-            self.log_iteration_summary(global_step, sps, current_tau, total_loss/self.config.pop_size)
+            # Logging
+            # Average over (Pop * Epochs * Minibatches)?
+            # total_loss is sum over [Pop, Epochs, Minibatches] (since we loop epochs and minibatches and sum)
+            # wait, compute_grad returns [Pop]. sum() sums over pop.
+            # So total_loss is sum over all updates and all agents.
+            # Denominator: Pop * Epochs * (NumSamples / MinibatchSize)
+            num_updates = self.config.pop_size * self.config.update_epochs * (num_samples // minibatch_size)
+            
+            avg_loss = total_loss / num_updates
+            avg_pg = total_pg / num_updates
+            avg_v = total_v / num_updates
+            avg_ent = total_ent / num_updates
+            avg_div = total_div / num_updates
+            
+            self.log_iteration_summary(global_step, sps, current_tau, avg_loss, avg_pg, avg_v, avg_ent, avg_div)
             
             # Construct simple line for telemetry log/frontend if needed (backward compat)
             leader = self.population[self.leader_idx]
