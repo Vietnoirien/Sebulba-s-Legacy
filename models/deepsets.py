@@ -141,6 +141,43 @@ class CustomLSTM(nn.Module):
         out = torch.stack(outputs, dim=1)
         return out, (h.unsqueeze(0), c.unsqueeze(0))
 
+class MapTransformer(nn.Module):
+    """
+    Compact Transformer for Map Encoding.
+    Input: Sequence of Checkpoints (Relative) [B, S, 2]
+    Output: Map Embedding [B, 32]
+    """
+    def __init__(self, input_dim=2, d_model=32, nhead=2, num_layers=1):
+        super().__init__()
+        self.d_model = d_model
+        
+        # 1. Linear Projection
+        self.input_proj = layer_init(nn.Linear(input_dim, d_model))
+        
+        # 2. Transformer Encoder
+        # batch_first=True for [B, S, F]
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=64, batch_first=True, dropout=0.0)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # 3. Aggregation (Max Pool or Attention Pooling?)
+        # Max Pool is simpler and robust.
+        
+    def forward(self, map_obs):
+        # map_obs: [B, S, 2]
+        x = F.relu(self.input_proj(map_obs))
+        # Force Math Attention to avoid vmap warning/performance drop with efficient implementation
+        # Using new context manager
+        import torch.nn.attention as attention
+        # backend=attention.SDPBackend.MATH
+        with attention.sdpa_kernel(attention.SDPBackend.MATH):
+            x = self.transformer(x) # [B, S, d_model]
+        
+        # Global Max Pooling
+        # Masking? We assume fixed size map for now or pad with 0. 
+        # DeepSets logic: Max over S dim.
+        emb, _ = torch.max(x, dim=1) # [B, d_model]
+        return emb
+
 class PodActor(nn.Module):
     """
     Recurrent Actor.
@@ -158,13 +195,13 @@ class PodActor(nn.Module):
             nn.ReLU()
         )
         
+        # Map Encoder (New)
+        self.map_encoder = MapTransformer(input_dim=2, d_model=32, nhead=2, num_layers=1)
+        
         # Commander Features
         self.role_embedding = nn.Embedding(2, 16)
         # CommanderNet (modified to be an embedder)
-        # Input: Self(15) + Team(16) + Enemy(16) + Role(16) = 63
-        # We'll use the existing CommanderNet structure but strip heads? 
-        # Easier to just inline the encoder part or reuse CommanderNet class if modified.
-        # Let's redefine it here to be explicit and concise for export.
+        # Input: Self(15) + Team(16) + Enemy(16) + Role(16) + Map(32) = 95
         
         self.enemy_encoder = nn.Sequential(
             layer_init(nn.Linear(13, 32)),
@@ -173,14 +210,12 @@ class PodActor(nn.Module):
         )
         
         self.commander_backbone = nn.Sequential(
-            layer_init(nn.Linear(15 + 16 + 16 + 16, 128)), # Self(15)+Team(16)+Ctx(16)+Role(16)
+            layer_init(nn.Linear(15 + 16 + 16 + 16 + 32, 128)), # Self+Team+Ctx+Role+Map
             nn.ReLU(),
             layer_init(nn.Linear(128, 64)), # Output 64 to match Pilot
             nn.ReLU()
         )
         
-        # 2. LSTM Core
-        # Input: Pilot(64) + Commander(64) = 128
         # 2. LSTM Core
         # Input: Pilot(64) + Commander(64) = 128
         self.lstm = CustomLSTM(input_size=128, hidden_size=lstm_hidden)
@@ -197,11 +232,9 @@ class PodActor(nn.Module):
         # LogStd (Learnable)
         self.actor_logstd = nn.Parameter(torch.zeros(2))
         
-    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, role_ids, lstm_state=None, done=None):
+    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, lstm_state=None, done=None):
         # self_obs: [B, 15]
-        # Check for sequence dimension.
-        # If input is [B, S, F], we process as sequence.
-        # If input is [B, F], we unsqueeze to [B, 1, F].
+        # map_obs: [B, MaxCP, 2]
         
         has_seq = (self_obs.ndim == 3)
         if not has_seq:
@@ -209,6 +242,7 @@ class PodActor(nn.Module):
             teammate_obs = teammate_obs.unsqueeze(1)
             enemy_obs = enemy_obs.unsqueeze(1)
             next_cp_obs = next_cp_obs.unsqueeze(1)
+            map_obs = map_obs.unsqueeze(1) # [B, 1, MaxCP, 2]
             role_ids = role_ids.unsqueeze(1)
             if done is not None: done = done.unsqueeze(1)
             
@@ -222,11 +256,19 @@ class PodActor(nn.Module):
         flat_en = enemy_obs.reshape(B*S, enemy_obs.shape[2], -1)
         flat_role = role_ids.reshape(B*S)
         
+        # Flatten Map for processing: [B*S, MaxCP, 2]
+        # map_obs is [B, S, MaxCP, 2]
+        bs_map, s_map, max_cp, dim_map = map_obs.shape
+        flat_map = map_obs.reshape(bs_map * s_map, max_cp, dim_map)
+        
         # A. Pilot Embed
         pilot_in = torch.cat([flat_self, flat_cp], dim=1)
         p_emb = self.pilot_embed(pilot_in) # [B*S, 64]
         
-        # B. Commander Embed
+        # B. Map Embed
+        m_emb = self.map_encoder(flat_map) # [B*S, 32]
+        
+        # C. Commander Embed
         # Encode Teammate
         tm_lat = self.enemy_encoder(flat_tm) # [B*S, 16]
         # Encode Enemies
@@ -238,7 +280,7 @@ class PodActor(nn.Module):
         
         r_emb = self.role_embedding(flat_role) # [B*S, 16]
         
-        cmd_in = torch.cat([flat_self, tm_lat, en_ctx, r_emb], dim=1)
+        cmd_in = torch.cat([flat_self, tm_lat, en_ctx, r_emb, m_emb], dim=1)
         c_emb = self.commander_backbone(cmd_in) # [B*S, 64]
         
         # --- 2. LSTM ---
@@ -247,26 +289,15 @@ class PodActor(nn.Module):
         
         if lstm_state is None:
              # Initial state
-             # We rely on caller to provide state, or init zero.
-             # PPO rollout provides state.
              device = self_obs.device
              h0 = torch.zeros(1, B, self.lstm.hidden_size, device=device)
              c0 = torch.zeros(1, B, self.lstm.hidden_size, device=device)
              lstm_state = (h0, c0)
 
-        # Handle DONEs (Reset state)
-        # If training on sequences, we mask state where done=True?
-        # Typically PPO handles this by resetting state buffers, but inside forward 
-        # during inference, we might need it.
-        # For simplicity, we assume state is managed externally or sequences don't cross episodes.
-        
         out, (hn, cn) = self.lstm(lstm_in, lstm_state)
         # out: [B, S, H]
         
         # --- 3. Heads ---
-        # Apply heads directly to out [B, S, H]
-        # Linear layer accepts arbitrary leading dimensions
-        
         thrust_logits = self.head_thrust(out)
         angle_input = self.head_angle(out)
         
@@ -284,9 +315,7 @@ class PodActor(nn.Module):
             shield_logits = shield_logits.squeeze(1)
             boost_logits = boost_logits.squeeze(1)
         
-            # Reshape for consistency if needed, but squeeze does it.
-            
-        # Unified std expansion (Dimension Agnostic)
+        # Unified std expansion
         dist_mean = torch.cat([thrust_mean, angle_mean], dim=-1) # [..., 2]
         std = torch.exp(self.actor_logstd).expand_as(dist_mean)
              
@@ -305,16 +334,18 @@ class PodCritic(nn.Module):
     def __init__(self, hidden_dim=256, lstm_hidden=64):
         super().__init__()
         # Simplified feature extraction for Critic (MLP -> LSTM)
+        # Simplified feature extraction for Critic (MLP -> LSTM)
         self.encoder = nn.Sequential(
-            layer_init(nn.Linear(15 + 13 + 13 + 6, 256)), # Self+Team+Enemy(Mean)+CP
+            layer_init(nn.Linear(15 + 13 + 13 + 6 + 32, 256)), # Self+Team+Enemy(Mean)+CP+Map(32)
             nn.ReLU(),
             layer_init(nn.Linear(256, 128)),
             nn.ReLU()
         )
+        self.map_encoder = MapTransformer(d_model=32, nhead=2, num_layers=1)
         self.lstm = CustomLSTM(128, lstm_hidden)
         self.value_head = layer_init(nn.Linear(lstm_hidden, 1), std=1.0)
         
-    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, lstm_state=None):
+    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, lstm_state=None):
         has_seq = (self_obs.ndim == 3)
         if not has_seq:
             self_obs = self_obs.unsqueeze(1)
@@ -327,8 +358,29 @@ class PodCritic(nn.Module):
         # Simple Enemy Aggregation (Mean)
         en_mean = enemy_obs.mean(dim=2) # [B, S, 13]
         
+        # Critic also needs map?
+        # For now, let's keep Critic simplified. 
+        # Map Encoding
+        if map_obs is None:
+             B_map = B
+             S_map = S if has_seq else 1
+             map_obs = torch.zeros((B_map, S_map, 6, 2), device=self_obs.device)
+             
+        # Flatten time dim for transformer: [B*S, N_CP, 2]
+        if has_seq:
+            map_flat = map_obs.view(B*S, -1, 2)
+        else:
+            map_flat = map_obs.view(B, -1, 2) # [B, N, 2]
+            
+        map_emb = self.map_encoder(map_flat) # [B*S, 32] or [B, 32]
+        
+        if has_seq:
+            map_emb = map_emb.view(B, S, 32)
+        else:
+             map_emb = map_emb.view(B, 1, 32)
+
         # Concat Features
-        x = torch.cat([self_obs, teammate_obs, en_mean, next_cp_obs], dim=2) # [B, S, F]
+        x = torch.cat([self_obs, teammate_obs, en_mean, next_cp_obs, map_emb], dim=2) # [B, S, F]
         flat_x = x.reshape(B*S, -1)
         
         emb = self.encoder(flat_x).view(B, S, -1)
@@ -362,11 +414,11 @@ class PodAgent(nn.Module):
         # Recurrent Critic
         self.critic_net = PodCritic(hidden_dim=256, lstm_hidden=lstm_hidden)
         
-    def get_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, lstm_state=None):
-        val, _ = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs, lstm_state)
+    def get_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, lstm_state=None):
+        val, _ = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, lstm_state)
         return val#.squeeze(-1) # Squeeze last dim? handled by caller check
 
-    def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, action=None, role_ids=None, actor_state=None, critic_state=None, done=None):
+    def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, action=None, role_ids=None, actor_state=None, critic_state=None, done=None):
         # NOTE: role_ids must be passed externally or derived.
         # Derived:
         if role_ids is None:
@@ -375,12 +427,29 @@ class PodAgent(nn.Module):
              else:
                   role_ids = (self_obs[:, 11] > 0.5).long()
 
+        # Dummy Map for now if not provided
+        if map_obs is None:
+             B = self_obs.shape[0]
+             D_Map = 6 # Max checkpoints hardcoded/inferred? 
+             # Ideally get MAX_CHECKPOINTS from config or context, but here we are inside model. 
+             # Let's assume 6 or check env?
+             # For robustness, we created MAX_CHECKPOINTS=6 in config.py
+             # But we can't easily import it here cleanly without circular dependency risk relative to env.
+             # However, we can use shape inference if we want, or just 6.
+             
+             # If S dim exists
+             if self_obs.ndim == 3:
+                 S = self_obs.shape[1]
+                 map_obs = torch.zeros((B, S, 6, 2), device=self_obs.device)
+             else:
+                 map_obs = torch.zeros((B, 6, 2), device=self_obs.device)
+
         # 1. Actor Forward
-        means_pair, std, logits_pair, (hn_a, cn_a) = self.actor(self_obs, teammate_obs, enemy_obs, next_cp_obs, role_ids, actor_state, done)
+        means_pair, std, logits_pair, (hn_a, cn_a) = self.actor(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, actor_state, done)
         
         # 2. Critic Forward
         # Note: Critic maintains separate state? Yes ideally.
-        value, (hn_c, cn_c) = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs, critic_state)
+        value, (hn_c, cn_c) = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, critic_state)
         
         # Unpack
         thrust_mean, angle_mean = means_pair

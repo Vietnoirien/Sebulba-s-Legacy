@@ -62,7 +62,7 @@ class RewardScalingConfig:
 @dataclass
 class TrainingConfig:
     # PPO Hyperparameters
-    lr: float = 3e-4  # Lower LR for LSTM stability?
+    lr: float = 1.5e-4  # Lower LR for LSTM stability?
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
@@ -73,7 +73,7 @@ class TrainingConfig:
     # LSTM / BPTT
     use_lstm: bool = True
     lstm_hidden_size: int = 48
-    seq_length: int = 16  # BPTT Horizon
+    seq_length: int = 32  # BPTT Horizon
     
     # Optimization
     num_epochs: int = 4
@@ -95,7 +95,7 @@ class TrainingConfig:
     
     # Batch Size Config (Per Agent)
     update_epochs: int = 4
-    num_minibatches: int = 64
+    num_minibatches: int = 128
     
     @property
     def envs_per_agent(self) -> int:

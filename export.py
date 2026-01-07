@@ -156,6 +156,44 @@ def quantize_weights(actor):
     weights.extend(extract_layer(actor.head_angle))
     weights.extend(extract_layer(actor.head_shield))
     weights.extend(extract_layer(actor.head_boost))
+
+    # 7. Map Encoder (Transformer)
+    # 2 -> 32 (Linear)
+    weights.extend(extract_layer(actor.map_encoder.embedding))
+    
+    # Layer 0 Only (Fixed 1 layer)
+    # Self Attn: in_proj_weight, in_proj_bias (3 * 32 -> 96)
+    # out_proj: weight, bias (32 -> 32)
+    # Norm1: weight, bias (32)
+    # Lin1: weight, bias (32 -> 64) (d_model -> dim_feedforward)
+    # Lin2: weight, bias (64 -> 32)
+    # Norm2: weight, bias (32)
+    
+    enc = actor.map_encoder.transformer_encoder.layers[0]
+    
+    # In Proj
+    weights.extend(enc.self_attn.in_proj_weight.data.cpu().numpy().flatten())
+    weights.extend(enc.self_attn.in_proj_bias.data.cpu().numpy().flatten())
+    
+    # Out Proj (Non-Linear Layer in Torch, but Linear in Logic)
+    weights.extend(enc.self_attn.out_proj.weight.data.cpu().numpy().flatten())
+    weights.extend(enc.self_attn.out_proj.bias.data.cpu().numpy().flatten())
+    
+    # Norm1
+    weights.extend(enc.norm1.weight.data.cpu().numpy().flatten())
+    weights.extend(enc.norm1.bias.data.cpu().numpy().flatten())
+    
+    # FF Lin1
+    weights.extend(enc.linear1.weight.data.cpu().numpy().flatten())
+    weights.extend(enc.linear1.bias.data.cpu().numpy().flatten())
+    
+    # FF Lin2
+    weights.extend(enc.linear2.weight.data.cpu().numpy().flatten())
+    weights.extend(enc.linear2.bias.data.cpu().numpy().flatten())
+    
+    # Norm2
+    weights.extend(enc.norm2.weight.data.cpu().numpy().flatten())
+    weights.extend(enc.norm2.bias.data.cpu().numpy().flatten())
     
     # Quantize
     min_val, max_val = min(weights), max(weights)
@@ -314,69 +352,139 @@ class N:
         self.C, self.h = nc, nh
         return nh
 
-class B(N):
-    def f(self,s,t,e,c,role,reset):
-        self.c=0
-        if reset: self.h=[0.0]*{LSTM}; self.C=[0.0]*{LSTM}
+        self.C, self.h = nc, nh
+        return nh
+    
+    def map_tr(self, m):
+        # m: List of [x, y] checks (MaxCP)
+        # 1. Embed: 2 -> 32
+        # Start of Map Weights.
+        # Need to track offset manually or cleaner way?
+        # Let's count bytes consumed by previous layers.
+        # Pilot(21->64->64)= 1344 + 4096 = 5440 + biases...
+        # Dynamic 'c' handles offset.
         
-        # 1. Pilot Embed
-        # 21->64(R)->64(R)
-        p = s+c # 21
-        p = self.lin(p, 21, 64, True, True)
-        p = self.lin(p, 64, 64, True, True)
+        # Linear Embed (2->32)
+        w_emb = self.gw(2*32); b_emb = self.gw(32)
         
-        # 2. Enemy Enc
-        # 13->32(R)->16(Ctx)
-        # Shared weights, need to cache
-        w1, b1 = self.gw(13*32), self.gw(32)
-        w2, b2 = self.gw(32*16), self.gw(16)
+        # Transformer Weights
+        # In Proj (32 -> 96)
+        w_in = self.gw(32*96); b_in = self.gw(96)
+        # Out Proj (32 -> 32)
+        w_out = self.gw(32*32); b_out = self.gw(32)
+        # Norm1 (32)
+        g_n1 = self.gw(32); b_n1 = self.gw(32)
+        # Lin1 (32 -> 64)
+        w_l1 = self.gw(32*64); b_l1 = self.gw(64)
+        # Lin2 (64 -> 32)
+        w_l2 = self.gw(64*32); b_l2 = self.gw(32)
+        # Norm2 (32)
+        g_n2 = self.gw(32); b_n2 = self.gw(32)
         
-        def enc(inp):
-            # Manual Lin apply
-            h=[]
-            for r in range(32):
-                a=b1[r]
-                for j in range(13): a+=inp[j]*w1[r*13+j]
-                h.append(max(0.0,a))
-            z=[]
-            for r in range(16):
-                a=b2[r]
-                for j in range(32): a+=h[j]*w2[r*32+j]
-                z.append(a) # No Activation
-            return z
+        # Helper: Linear
+        def L(x, w, b, i, o):
+            res = []
+            for k in range(o):
+                acc = b[k]
+                for j in range(i): acc += x[j]*w[k*i+j]
+                res.append(acc)
+            return res
+            
+        # Helper: Norm
+        def N(x, g, b):
+            mu = sum(x)/len(x)
+            var = sum((v-mu)**2 for v in x)/len(x)
+            std = math.sqrt(var + 1e-5)
+            return [(x[i]-mu)/std * g[i] + b[i] for i in range(len(x))]
 
-        # Teammate 
-        tm = enc(t)
+        # Execution
+        # 1. Embedding
+        seq = []
+        for checks in m: # checks is [x, y]
+            seq.append(L(checks, w_emb, b_emb, 2, 32))
+            
+        # 2. Transformer Layer (1 Layer)
+        # Self Attention
+        # Single Head logic since nhead=2 is complex to golf? 
+        # No, must implement MHA. D=32, H=2, Dh=16.
+        # Input: seq [N, 32]
         
-        # Enemies (Max Pool)
-        encs=[enc(en) for en in e]
-        ctx=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
+        skip = [s[:] for s in seq] # Residual
         
-        # 3. Role
-        r_emb = self.emb(role, 16)
+        # QKV
+        # In_proj weights are packed [3*D, D] -> [96, 32]
+        # output is [N, 96] -> split into Q, K, V
+        qkv_seq = [L(s, w_in, b_in, 32, 96) for s in seq]
         
-        # 4. Cmd Backbone
-        # 63->128(R)->64(R)
-        cmd_in = s + tm + ctx + r_emb
-        cmd = self.lin(cmd_in, 63, 128, True, True)
-        cmd = self.lin(cmd, 128, 64, True, True)
+        atten_out = []
+        scale = 1.0 / 4.0 # sqrt(16)
         
-        # 5. LSTM
-        # Input: Pilot(64) + Cmd(64) = 128
-        lstm_in = p + cmd
-        lstm_out = self.lstm(lstm_in) # Returns new h
+        for t in range(len(seq)):
+            # Per Head
+            row_out = [0.0]*32
+            for h in range(2):
+                # Extract Q for this time step and head
+                # Q start 0, K start 32, V start 64
+                # Head 0: 0-15. Head 1: 16-31.
+                qs = 0 + h*16; ke = 32 + h*16; ve = 64 + h*16
+                
+                # My Q
+                q_vec = qkv_seq[t][qs : qs+16]
+                
+                # Attention Scores
+                scores = []
+                for s_idx in range(len(seq)):
+                    k_vec = qkv_seq[s_idx][ke : ke+16]
+                    dot = sum(q_vec[z]*k_vec[z] for z in range(16))
+                    scores.append(dot * scale)
+                
+                # Softmax
+                max_s = max(scores)
+                exps = [math.exp(s - max_s) for s in scores]
+                sum_e = sum(exps)
+                probs = [e/sum_e for e in exps]
+                
+                # Weighted Sum V
+                head_v = [0.0]*16
+                for s_idx, prob in enumerate(probs):
+                    v_vec = qkv_seq[s_idx][ve : ve+16]
+                    for z in range(16): head_v[z] += prob * v_vec[z]
+                    
+                # Concatenate back to row
+                for z in range(16): row_out[h*16 + z] = head_v[z]
+                
+            atten_out.append(row_out)
+            
+        # Out Proj
+        proj_out = [L(a, w_out, b_out, 32, 32) for a in atten_out]
         
-        # 6. Heads
-        # Linear {LSTM}->N
-        th_l = self.lin(lstm_out, {LSTM}, 1, True, False)[0]
-        an_l = self.lin(lstm_out, {LSTM}, 1, True, False)[0]
-        sh_l = self.lin(lstm_out, {LSTM}, 2, True, False)
-        bo_l = self.lin(lstm_out, {LSTM}, 2, True, False)
+        # Add & Norm
+        norm1_out = []
+        for i in range(len(seq)):
+            summed = [skip[i][j] + proj_out[i][j] for j in range(32)]
+            norm1_out.append(N(summed, g_n1, b_n1))
+            
+        skip2 = [x[:] for x in norm1_out]
         
-        ft = 1.0/(1.0+math.exp(-th_l))
-        fa = math.tanh(an_l)
-        
-        return [ft, fa, 1 if sh_l[1]>sh_l[0] else 0, 1 if bo_l[1]>bo_l[0] else 0]
+        # FF
+        ff_out = []
+        for x in norm1_out:
+            # Linear1 + ReLU
+            l1 = L(x, w_l1, b_l1, 32, 64)
+            l1 = [max(0.0, v) for v in l1]
+            # Linear2
+            l2 = L(l1, w_l2, b_l2, 64, 32)
+            ff_out.append(l2)
+            
+        # Add & Norm 2 (Output)
+        final_seq = []
+        for i in range(len(seq)):
+            summed = [skip2[i][j] + ff_out[i][j] for j in range(32)]
+            final_seq.append(N(summed, g_n2, b_n2))
+            
+        # Max Pool over sequence
+        pooled = [max(chk[j] for chk in final_seq) for j in range(32)]
+        return pooled
 
 blob="{BLOB_UNIV}"; scale={SCALE_VAL}
 
@@ -479,7 +587,17 @@ def solve():
             c1=cps[p['n']]; c2=cps[(p['n']+1)%len(cps)]
             cx,cy=c2[0]-c1[0],c2[1]-c1[1]
             cf,cr=tl(cx,cy,p['a'])
-            ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
+            o_map = []
+            # Relative Map Coords
+            # N checks = len(cps). Input is [x, y].
+            # Order: From Next CP (p['n']) to end, then start to p['n']-1 (Canonical)
+            cnt = len(cps)
+            start_n = p['n']
+            for k in range(cnt):
+                 idx = (start_n + k) % cnt
+                 cx, cy = cps[idx][0] - p['x'], cps[idx][1] - p['y']
+                 cf, cr = tl(cx, cy, p['a'])
+                 o_map.append([cf*SP, cr*SP])
             
             # Use Single Brain with Role Input
             # Reset Check: If New Episode or Respawn or First Step
@@ -490,7 +608,7 @@ def solve():
             # Never reset is safer for continuity.
             
             role_val = 1.0 if run[i] else 0.0
-            out = mr.f(oself,otm,oen,ocp, role_val, False)
+            out = mr.f(oself,otm,oen,ocp, o_map, role_val, False)
             
             rl_th = int(out[0]*100)
             rl_ang = out[1]*18.0

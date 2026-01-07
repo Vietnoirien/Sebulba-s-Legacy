@@ -34,3 +34,8 @@ In Stage 5, agents stop fighting scripted bots and begin fighting **Historical C
 *   **Prioritized Fictitious Self-Play**: We maintain a pool of past checkpoints.
 *   **Matchmaking**: Opponents are selected based on **Regret** (Win Rate ~50%). Agents play against opponents they struggle against, not just the random history.
 *   **Exploiters**: The population includes "Exploiter" agents designed solely to beat the current leader, preventing the main population from over-fitting to a specific meta.
+
+## 4. Optimization & Resources
+The addition of the **Map Transformer** increased the memory footprint of the agent. To maintain high-throughput training (8192 environments) on consumer GPUs (e.g., RTX 5070 12GB), we adjust the PPO batching strategy:
+*   **Sequential Minibatches**: We increased `num_minibatches` from 64 to **128**. This halves the memory required for storing activations during the PPO backward pass, preventing `CUDA out of memory` errors without reducing the total number of environments or simulation throughput.
+*   **Math Attention**: We explicitly enforce `SDPBackend.MATH` for the Map Transformer to ensure compatibility with `torch.vmap` during the vectorized forward pass.

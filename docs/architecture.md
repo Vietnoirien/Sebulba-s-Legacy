@@ -25,6 +25,7 @@ graph TD
             end
             
             enemy_encoder["DeepSets Enemy Encoder"]
+            map_encoder["Map Transformer"]
             role_emb["Role Embedding"]
         end
     end
@@ -39,6 +40,8 @@ graph TD
     sim_vec -- "Enemies" --> enemy_encoder 
     enemy_encoder --> cmd_feat
     sim_vec -- "Self+Team" --> cmd_feat
+    sim_vec -- "Map (Next CPs)" --> map_encoder
+    map_encoder --> cmd_feat
     role_emb --> cmd_feat
     
     pilot_feat --> lstm_core
@@ -83,7 +86,13 @@ The game can have varying numbers of opponents. We use a **Permutation Invariant
 2.  Latent vectors are summed (or max-pooled) to create a single fixed-size "Enemy Content Vector".
 3.  This vector describes the "threat level" of the race regardless of whether there are 1, 2, or 3 opponents.
 
-### 5. Intrinsic Curiosity (RND)
+### 5. Map Transformer
+To provide global track foresight, we employ a compact **Transformer Encoder**:
+*   **Input**: A sequence of the next `N` checkpoints (relative to the pod's position and orientation).
+*   **Attention**: Uses Self-Attention (math-backend enforced for vmap compatibility) to understand the curvature and complexity of the upcoming path.
+*   **Output**: A concise "Map Embedding" that informs the Commander Stream about future turns (e.g., "Sharp right turn coming up").
+
+### 6. Intrinsic Curiosity (RND)
 We incorporate **Random Network Distillation** to generate intrinsic rewards.
 *   **Target Network**: A fixed, randomly initialized network mapping states to a random output.
 *   **Predictor Network**: Tries to predict the Target Network's output.

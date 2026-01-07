@@ -4,6 +4,7 @@ from config import *
 
 class GPUPhysics:
     def __init__(self, num_envs, device='cuda'):
+        print(f"DEBUG: GPUPhysics init. num_envs type: {type(num_envs)}, value: {num_envs}, device type: {type(device)}")
         self.num_envs = num_envs
         self.device = torch.device(device)
         

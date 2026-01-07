@@ -229,6 +229,7 @@ class PPOTrainer:
                  'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 13), device=self.device),
                  'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 13), device=self.device),
                  'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 6), device=self.device),
+                 'map_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, MAX_CHECKPOINTS, 2), device=self.device), # [B, MaxCP, 2]
                  'actions': torch.zeros((self.current_num_steps, num_active_per_agent_step, 4), device=self.device),
                  'rewards': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
                  'dones': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
@@ -343,30 +344,44 @@ class PPOTrainer:
             
         self.sync_agents_to_vectorized()
 
-    def _functional_inference(self, params, buffers, s, tm, en, cp, actor_h, actor_c, critic_h, critic_c):
+    def _functional_inference(self, params, buffers, s, tm, en, cp, map_obs, actor_h, actor_c, critic_h, critic_c):
         """
         Functional wrapper for vmap inference.
         """
         # Reconstruct tuple state
-        # Input h, c are [Batch, Layers, Hidden] (Permuted by PPO buffer format [B, L, H])
-        # Wait, PPO buffer is [Pop, B, L, H]. vmap slices Pop -> [B, L, H].
-        # But we need [Layers, Batch, H] for LSTM forward (standard pytorch layout).
-        # So we permute (1, 0, 2).
-        
         actor_state = (actor_h.permute(1,0,2).contiguous(), actor_c.permute(1,0,2).contiguous())
         critic_state = (critic_h.permute(1,0,2).contiguous(), critic_c.permute(1,0,2).contiguous())
         
         # Output: action, logprob, ent, val, states
-        out = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'actor_state': actor_state, 'critic_state': critic_state})
-        action, logprob, ent, val, states = out
-        return action, logprob, ent, val, states['actor'], states['critic']
+        out = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'map_obs': map_obs, 'actor_state': actor_state, 'critic_state': critic_state})
+        # Wait, if we added map_obs to forward, we can pass it as positional if signature updated, or kwargs. 
+        # Our modified PodActor signature is: forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, ...)
+        # So we MUST pass map_obs!
+        # And since functional_call takes args tuple...
+        
+        # But wait, self.template_agent signature changed.
+        # functional_call args must match forward args: (self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids)
+        
+        # We need to include map_obs in the args tuple.
+        # But wait, _functional_inference arguments also need map_obs?
+        # Yes.
+        
+        # But let's fix the call inside _functional_inference first.
+        # We need "map_obs" passed from caller.
+        # So I need to update _functional_inference signature.
+        
+        # STOP. I cannot change signature here without changing the vmap call site.
+        # I will update the signature in the NEXT hunk.
+        # Here I will just assume `mp` is passed in arguments.
+        action, logp, ent, val, states = out
+        return action, logp, ent, val, states['actor'], states['critic']
 
-    def _functional_get_value(self, params, buffers, s, tm, en, cp, critic_h, critic_c):
+    def _functional_get_value(self, params, buffers, s, tm, en, cp, map_obs, critic_h, critic_c):
         # We need critic state to get value
         critic_state = (critic_h.permute(1,0,2).contiguous(), critic_c.permute(1,0,2).contiguous())
-        return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'method': 'get_value', 'lstm_state': critic_state})
+        return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'method': 'get_value', 'map_obs': map_obs, 'lstm_state': critic_state})
 
-    def _functional_loss(self, params, buffers, s, tm, en, cp, act, old_logp, old_val, adv, ret, actor_h0, actor_c0, critic_h0, critic_c0, use_div, ent_coef, clip_range, vf_coef, div_coef):
+    def _functional_loss(self, params, buffers, s, tm, en, cp, map_obs, act, old_logp, old_val, adv, ret, actor_h0, actor_c0, critic_h0, critic_c0, use_div, ent_coef, clip_range, vf_coef, div_coef):
         # s, tm, en, cp are [MB, SeqLat, D]
         # h0, c0 are [MB, 1, Hidden] -> Need [Layers, MB, Hidden]
         
@@ -378,10 +393,8 @@ class PPOTrainer:
         c_c = critic_c0.permute(1, 0, 2).contiguous()
         
         # Forward (Sequence Mode handled by PodAgent based on input dim)
-        # Forward (Sequence Mode handled by PodAgent based on input dim)
         # We disable divergence check for LSTM architecture for now as it doesn't support 'compute_divergence'
-        # We disable divergence check for LSTM architecture for now as it doesn't support 'compute_divergence'
-        _, logp, ent, val, states = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp, act), kwargs={'actor_state': (a_h, a_c), 'critic_state': (c_h, c_c)})
+        _, logp, ent, val, states = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'map_obs': map_obs, 'action': act, 'actor_state': (a_h, a_c), 'critic_state': (c_h, c_c)})
         div = torch.tensor(0.0, device=s.device)
         
         next_actor_h, next_actor_c = states['actor']
@@ -1240,8 +1253,8 @@ class PPOTrainer:
             # Using self.agent_batches (allocated dynamically)
                  
             # Unpack Obs
-            # obs_data is tuple (self, tm, en, cp) tensors [4, self.config.num_envs, ...]
-            all_self, all_tm, all_en, all_cp = obs_data
+            # obs_data is tuple (self, tm, en, cp, map) tensors
+            all_self, all_tm, all_en, all_cp, all_map = obs_data
             
             # CRITICAL: Disable Autograd for entire collection phase to prevent graph growth
             _prev_grad_state = torch.is_grad_enabled()
@@ -1262,6 +1275,7 @@ class PPOTrainer:
                 raw_tm = all_tm[active_pods].view(-1, 13)
                 raw_en = all_en[active_pods].view(-1, 2, 13)
                 raw_cp = all_cp[active_pods].view(-1, 6)
+                raw_map = all_map[active_pods].view(-1, MAX_CHECKPOINTS, 2)
                 
                 # Normalize & Update Stats
                 norm_self = self.rms_self(raw_self)
@@ -1275,6 +1289,21 @@ class PPOTrainer:
                 norm_en = self.rms_ent(raw_en.view(-1, D_ent)).view(total_rows_en, N_en, D_ent)
                 
                 norm_cp = self.rms_cp(raw_cp)
+                
+                # Normalize Map (Uses RMS CP? Or RMS Map?)
+                # Map is just Relative Coordinates.
+                # CP normalization should be roughly applicable? Or new RMS?
+                # For now let's reuse RMS CP (since it's checkpoint relative coords)
+                # MaxCP * 2. rms_cp is [6]. We check last dim.
+                # raw_map is [..., N_CP, 2].
+                # RMS_CP expects [..., 6] (which is 3 * 2). Not compatible.
+                # Map coordinates are similar to CP relative coords.
+                # Maybe just plain division by S_POS (already done in get_obs) is enough?
+                # get_obs returns normalized values (* S_POS).
+                # PPO RMS layer usually centers and scales variance.
+                # Let's skip heavy normalization for map first to avoid complexity / instability.
+                # Just raw features (already scaled 0-1 range roughly)
+                norm_map = raw_map 
                 
                 # 1. Inference per Agent
                 full_actions = []
@@ -1312,6 +1341,7 @@ class PPOTrainer:
                 v_tm = norm_tm.view(N_A, Pop, EPA, 13).permute(1, 0, 2, 3).reshape(Pop, -1, 13)
                 v_en = norm_en.view(N_A, Pop, EPA, 2, 13).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 13)
                 v_cp = norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
+                v_mp = norm_map.view(N_A, Pop, EPA, MAX_CHECKPOINTS, 2).permute(1, 0, 2, 3, 4).reshape(Pop, -1, MAX_CHECKPOINTS, 2)
 
                 # Initialize Current States if first step
                 if step == 0:
@@ -1337,8 +1367,8 @@ class PPOTrainer:
                 # vmap expects inputs to be stacked. self.curr_... is [Pop, Batch, ...]
                 
                 # Add critic startes to input
-                v_act, v_lp, _, v_val, (v_nah, v_nac), (v_nch, v_ncc) = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0,0,0,0,0), randomness='different')(
-                    self.stacked_params, self.stacked_buffers, v_s, v_tm, v_en, v_cp, self.curr_actor_h, self.curr_actor_c, self.curr_critic_h, self.curr_critic_c
+                v_act, v_lp, _, v_val, (v_nah, v_nac), (v_nch, v_ncc) = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0,0,0,0,0,0), randomness='different')(
+                    self.stacked_params, self.stacked_buffers, v_s, v_tm, v_en, v_cp, v_mp, self.curr_actor_h, self.curr_actor_c, self.curr_critic_h, self.curr_critic_c
                 )
                 
                 # Update Current States
@@ -1402,7 +1432,9 @@ class PPOTrainer:
                     batch['self_obs'][step] = v_s[i].detach()
                     batch['teammate_obs'][step] = v_tm[i].detach()
                     batch['enemy_obs'][step] = v_en[i].detach()
+                    batch['enemy_obs'][step] = v_en[i].detach()
                     batch['cp_obs'][step] = v_cp[i].detach()
+                    batch['map_obs'][step] = v_mp[i].detach()
                     
                     batch['actions'][step] = v_act[i].detach().reshape(self.config.envs_per_agent * 1, 4)
                     batch['logprobs'][step] = v_lp[i].detach().flatten()
@@ -1964,7 +1996,7 @@ class PPOTrainer:
                      if os.environ.get("ENABLE_PROFILING"):
                         self.log(f"Profile (Step {step}): A_Inf={(t_infer_end-t_loop_start)*1000:.1f} | B_Leag={(t_pre_step-t_infer_end)*1000:.1f} | C_Step={(t_step_end-t_pre_step)*1000:.1f} | D_Rew={(t_post_reward-t_step_end)*1000:.1f} | E_Stat={(t_post_stats-t_post_reward)*1000:.1f} | F_Tel={(t_post_telemetry-t_post_stats)*1000:.1f} | G_Beh={(t_behavior_end-t_post_telemetry)*1000:.1f} | H_Res={(t_reset_end-t_behavior_end)*1000:.1f} | I_Obs={(t_obs_end-t_reset_end)*1000:.1f}")
                     
-                all_self, all_tm, all_en, all_cp = obs_data
+                all_self, all_tm, all_en, all_cp, all_map = obs_data
 
             # Restore Grad
             torch.set_grad_enabled(_prev_grad_state)
@@ -2037,6 +2069,11 @@ class PPOTrainer:
             next_norm_en = next_norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
             next_norm_cp = next_norm_cp.view(len(active_pods), self.config.num_envs, 6)
             
+            # Map Norm (Reuse same logic as rollout)
+            next_raw_map = all_map[active_pods].view(-1, MAX_CHECKPOINTS, 2)
+            next_norm_map = next_raw_map
+            next_norm_map = next_norm_map.view(len(active_pods), self.config.num_envs, MAX_CHECKPOINTS, 2)
+            
             # --- VECTORIZED GAE ---
             # 1. Collect Global Data
             all_next_vals = []
@@ -2054,11 +2091,12 @@ class PPOTrainer:
             v_n_tm = next_norm_tm.view(N_A, Pop, EPA, 13).permute(1, 0, 2, 3).reshape(Pop, -1, 13)
             v_n_en = next_norm_en.view(N_A, Pop, EPA, 2, 13).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 13)
             v_n_cp = next_norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
+            v_n_mp = next_norm_map.view(N_A, Pop, EPA, MAX_CHECKPOINTS, 2).permute(1, 0, 2, 3, 4).reshape(Pop, -1, MAX_CHECKPOINTS, 2)
             
             with torch.no_grad():
                 # Use current critic states (at end of rollout)
-                v_next_vals = vmap(self._functional_get_value, in_dims=(0,0,0,0,0,0,0,0), randomness='different')(
-                     self.stacked_params, self.stacked_buffers, v_n_s, v_n_tm, v_n_en, v_n_cp, self.curr_critic_h, self.curr_critic_c
+                v_next_vals = vmap(self._functional_get_value, in_dims=(0,0,0,0,0,0,0,0,0), randomness='different')(
+                     self.stacked_params, self.stacked_buffers, v_n_s, v_n_tm, v_n_en, v_n_cp, v_n_mp, self.curr_critic_h, self.curr_critic_c
                 )
             
             # Flatten to [TotalBatch] matching g_dones structure
@@ -2133,6 +2171,7 @@ class PPOTrainer:
             flat_tm = transform_seq(torch.stack([b.pop('teammate_obs') for b in self.agent_batches]))
             flat_en = transform_seq(torch.stack([b.pop('enemy_obs') for b in self.agent_batches]))
             flat_cp = transform_seq(torch.stack([b.pop('cp_obs') for b in self.agent_batches]))
+            flat_mp = transform_seq(torch.stack([b.pop('map_obs') for b in self.agent_batches]))
             flat_act = transform_seq(torch.stack([b.pop('actions') for b in self.agent_batches]))
             flat_old_logp = transform_seq(torch.stack([b.pop('logprobs') for b in self.agent_batches]))
             
@@ -2186,7 +2225,7 @@ class PPOTrainer:
             minibatch_size = max(1, num_sequences // self.config.num_minibatches)
             
             # Compiled Grad Function
-            compute_grad = vmap(grad(self._functional_loss, has_aux=True), in_dims=(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, None,0,0,None,None))
+            compute_grad = vmap(grad(self._functional_loss, has_aux=True), in_dims=(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, None,0,0,None,None))
             
             total_loss = 0.0
             total_pg = 0.0
@@ -2205,6 +2244,7 @@ class PPOTrainer:
                       m_tm = flat_tm[:, mb_inds]
                       m_en = flat_en[:, mb_inds]
                       m_cp = flat_cp[:, mb_inds]
+                      m_mp = flat_mp[:, mb_inds]
                       m_act = flat_act[:, mb_inds]
                       m_lp = flat_old_logp[:, mb_inds]
                       m_v = flat_old_val[:, mb_inds]
@@ -2220,7 +2260,7 @@ class PPOTrainer:
                       # Compute Vectorized Gradients
                       grads, batch_aux = compute_grad(
                           self.stacked_params, self.stacked_buffers,
-                          m_s, m_tm, m_en, m_cp, m_act, m_lp, m_v, m_adv, m_ret, 
+                          m_s, m_tm, m_en, m_cp, m_mp, m_act, m_lp, m_v, m_adv, m_ret, 
                           m_ah, m_ac, m_ch, m_cc,
                           use_div, t_ent, t_clip, t_vf, t_div_coef
                       )

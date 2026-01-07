@@ -1302,6 +1302,7 @@ class PodRacerEnv:
             self_obs: [B, 4, 14]
             entity_obs: [B, 4, 3, 13]
             cp_obs: [B, 4, 6]
+            map_obs: [B, 4, MaxCP, 2] # New
         """
         
         B = self.num_envs
@@ -1592,8 +1593,78 @@ class PodRacerEnv:
         # Permute
         tm_c = tm_obs.permute(1, 0, 2).contiguous()
         en_c = en_obs.permute(1, 0, 2, 3).contiguous()
-        
-        # cp_obs: [B, 4, 6] -> [4, B, 6]
         cp_c = cp_obs.permute(1, 0, 2).contiguous()
         
-        return self_c, tm_c, en_c, cp_c
+        # --- Map Features (MaxCP * 2) ---
+        # All checkpoints relative to current pod pos and orientation
+        # self.checkpoints: [B, N_CP, 2] (Padded)
+        
+        # 1. Expand checkpoints to [B, 4, N_CP, 2]
+        all_cps = self.checkpoints.unsqueeze(1).expand(-1, 4, -1, -1)
+        
+        # 2. Global Delta
+        # p_pos: [B, 4, 1, 2]
+        d_map_g = all_cps - p_pos
+        
+        # 3. Rotate
+        # p_angle_exp needs to be [B, 4, N_CP] check dims
+        # p_angle [B, 4, 1] -> [B, 4, N_CP]
+        max_cp = all_cps.shape[2]
+        p_angle_map = p_angle.expand(-1, -1, max_cp)
+        
+        map_local = rotate_vec(d_map_g, p_angle_map) * S_POS # [B, 4, MaxCP, 2]
+        
+        # 4. Canonical Ordering
+        # Rotate checkpoints so the list starts with next_cp_id?
+        # This makes the sequence invariant to lap progress.
+        # "Relative Map": CP[0] is always NextCP, CP[1] is Next+1, ...
+        
+        # Gather indices: [next, next+1, ...]
+        # next_cp_id: [B, 4]
+        # We need a gather index tensor of shape [B, 4, MaxCP]
+        
+        # range [0, 1, ... MaxCP-1]
+        range_idx = torch.arange(max_cp, device=device).unsqueeze(0).unsqueeze(0) # [1, 1, MaxCP]
+        
+        # num_checkpoints: [B] -> [B, 4, 1]
+        n_cp_b = self.num_checkpoints.unsqueeze(1).unsqueeze(2)
+        
+        # next_cp_id: [B, 4] -> [B, 4, 1]
+        start_idx = self.next_cp_id.long().unsqueeze(-1)
+        
+        # (Start + Range) % NumCheckpoints
+        # Careful with padding: if n_cp < max_cp, modulo might access invalid indices if we just wrapped max_cp.
+        # But here max_cp IS the tensor size.
+        # Wait, self.checkpoints has valid data up to n_cp, then zeros? Or Repeated?
+        # Usually tracked by n_cp.
+        # For Transformer, we want the valid sequence loop.
+        
+        # Correct Gather Index:
+        # idx = (start + range) % n_cp
+        # But we must mask out indices >= n_cp if logic requires.
+        # However, `self.checkpoints` likely contains 0,0 at padding.
+        # If we modulo by n_cp, we stay in valid range.
+        # Then we might need to mask the output if we want true Variable Length.
+        # But keeping it simple: Just rotate the loop.
+        
+        gather_idx = (start_idx + range_idx) % n_cp_b
+        
+        # Expand indices for gather on dim 2
+        # map_local: [B, 4, N, 2]
+        # gather_idx: [B, 4, N] -> [B, 4, N, 2]
+        gather_idx_2d = gather_idx.unsqueeze(-1).expand(-1, -1, -1, 2)
+        
+        map_ordered = torch.gather(map_local, 2, gather_idx_2d)
+        
+        # Masking? 
+        # If we gathered valid CPs, we are good.
+        # What about padding/zeros? 
+        # If n_cp=3 and max=6, we have indices 0,1,2,0,1,2... repeated?
+        # Ideally we want 0,1,2, PAD, PAD.
+        # Mask: range_idx < n_cp_b
+        mask_valid = (range_idx < n_cp_b).float().unsqueeze(-1) # [B, 4, MaxCP, 1]
+        map_ordered = map_ordered * mask_valid # Zero out padding
+        
+        map_c = map_ordered.permute(1, 0, 2, 3).contiguous() # [4, B, N, 2]
+        
+        return self_c, tm_c, en_c, cp_c, map_c
