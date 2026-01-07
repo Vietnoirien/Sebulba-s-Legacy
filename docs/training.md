@@ -1,24 +1,25 @@
 # Training & Curriculum
 
-## 1. Curriculum Learning
-The agent traverses through 6 distinct stages of difficulty, graduating only when specific performance metrics are met.
+## 1. Recursive Curriculum Learning
+The agent traverses through 5 distinct stages of difficulty. Each stage focuses on a specific behavioral primitive, ensuring the agent learns to "walk before it runs."
 
-| Stage | Name | Format | Goal | Graduation |
-| :--- | :--- | :--- | :--- | :--- |
-| **0** | **Nursery** | Solo (No Enemy) | Learn basic navigation and physics control. | Consistency Score > 500 |
-| **1** | **Solo** | Time Trial | Maximize speed and trajectory efficiency. | Standardized Score > 3000 |
-| **2** | **Duel** | 1v1 vs Bot | Defeat a dynamic scripted opponent. | Win Rate > 65% (vs "Insane" Bot) |
-| **3** | **Intercept** | 2v2 (Blocker vs Runner) | **Blocker Academy**: Learn to deny the opponent Runner. | Denial Rate > 60% |
-| **4** | **Team** | 2v2 vs Team | Cooperative racing with Runner/Blocker roles. | Win Rate > 60% |
-| **5** | **League** | 2v2 vs History | Full league play against past elite agents. | N/A (End Game) |
+| Stage | Name | Format | Focus |
+| :--- | :--- | :--- | :--- |
+| **0** | **Nursery** | Solo (No Enemy) | **Basic Control**. Learning the mapping between Thrust/Angle and velocity vectors. |
+| **1** | **Solo** | Time Trial | **Optimization**. Finding racing lines that minimize distance and maximize speed. |
+| **2** | **Duel** | 1v1 vs Bot | **Combat Intro**. Learning to race while accounting for a dynamic obstacle (the opponent). |
+| **3** | **Intercept** | 1v1 (Blocker Role) | **Aggression**. The "Blocker Academy". The agent MUST deny the opponent from finishing. |
+| **4** | **Team** | 2v2 (Runner+Blocker) | **Coordination**. Controlling two pods simultaneously to maximize Team Score. |
+| **5** | **League** | 2v2 vs History | **Robustness**. Meta-gaming against the entire history of policies. |
 
-### Transition to Team Play
-Entering Stage 3 (Intercept) introduces role specialization.
-*   **Blocker Academy**: The agent controls a single specialized "Blocker" pod. The goal is purely to prevent the opponent Runner from finishing. This teaches collision physics and aggressive blocking without the distraction of trying to race.
-*   **Team Mode (Stage 4)**: The agent controls **two pods** simultaneously:
-    *   **Pod 0**: Runner (Goal: Win race)
-    *   **Pod 1**: Blocker (Goal: Obstruct enemies)
-    *   **Team Spirit**: A curriculum-annealed coefficient blends individual selfish rewards with the team's collective outcome, ensuring the Blocker acts in the Runner's best interest.
+### Graduation Criteria (The Quality Gates)
+To prevent "luck-based" progression, we use strict statistical gates:
+
+*   **Nursery $\to$ Solo**: `Consistency > 500`. The agent must finish the track without crashing into walls for 100 consecutive episodes.
+*   **Solo $\to$ Duel**: `Efficiency < 40.0`. The agent must complete checkpoints with near-optimal movement.
+*   **Duel $\to$ Intercept**: `Win Rate > 65%` against the "Insane" scripted bot.
+*   **Intercept $\to$ Team**: `Denial Rate > 60%`. The Blocker must successfully prevent the opponent runner from finishing the race.
+*   **Team $\to$ League**: `Win Rate > 60%` against a coordinated team of scripted bots.
 
 ## 2. Population Based Training (PBT)
 We do not train a single agent. We evolve a population of **128 Agents**.

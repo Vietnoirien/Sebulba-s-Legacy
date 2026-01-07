@@ -13,40 +13,51 @@ The **Mad Pod Racing** challenge on CodinGame represents a complex continuous co
     *   **Opponents**: Unknown policies (from simple path-followers to complex heuristic searchers).
 
 ### The "Gold League" Problem
-In the Gold League, agents typically master basic pathfinding (getting to checkpoints). The transition to **Legend League** requires:
+In the Gold League, agents typically master basic pathfinding. The transition to **Legend League** requires:
 1.  **Adversarial Interaction**: actively blocking opponents while racing.
-2.  **Long-term Planning**: Deviating from the optimal racing line to secure a delayed advantage (e.g., waiting for a boost).
+2.  **Long-term Planning**: Deviating from the optimal racing line to secure a delayed advantage.
 3.  **Coordination**: In 2v2 modes, sacrificing one pod to ensure the other wins.
 
-Traditional Heuristic Search (minimax/MCTS) struggles here due to the branching factor of continuous physics and the depth required for strategic blocking. Our hypothesis is that **Massive Scale Reinforcement Learning** can discover these emergent behaviors that are too complex to hand-code.
+Traditional Heuristic Search (minimax/MCTS) struggles here due to the branching factor of continuous physics. Our hypothesis is that **Massive Scale Reinforcement Learning** can discover these emergent behaviors.
 
-## 2. Methodology: The OpenAI Five Approach
+## 2. Methodology: The "Sim-to-Tensor" Framework
 
-We explicitly adopted the architecture and philosophy of **OpenAI Five** (Dota 2), adapting it to the constraints of the Pod Racer environment.
+We explicitly adopted the architecture of **OpenAI Five**, but adapted it for consumer hardware by keeping the entire lifecycle on the GPU.
 
-### "Copying the Stack"
-Our system mirrors the core tenets of the OpenAI Five system:
-1.  **PPO (Proximal Policy Optimization)**: We use PPO with Generalized Advantage Estimation (GAE) for its stability in continuous control.
-2.  **Massive Scale**: Like OpenAI Five, we rely on large batch sizes (Horizon 128 * 8192 Envs = ~1M samples per update) to smooth out the variance of the gradients.
-3.  **Self-Play**: The primary training signal comes from beating a copy of oneself (or past selves), creating a natural curriculum where the opponent improves exactly as fast as the agent.
-4.  **LSTM / Memory**: Unlike earlier iterations, our primary submission now utilizes a specialized LSTM core to handle temporal context and partial observability, enabling more robust strategic decisions.
+### Vectorized Optimization
+Standard PPO implementations suffer from CPU-GPU bandwidth bottlenecks. We implement a **fully vectorized training loop**:
+1.  **GPU Physics**: The simulation step `S_t+1 = Sim(S_t, A_t)` is a PyTorch tensor operation.
+2.  **Vectorized Adam**: Instead of maintaining a list of 128 `torch.optim.Adam` instances (one per agent in the population), we implement a single custom optimizer that treats the population dimension as a batch dimension:
+    *   Parameters: `[Population, Layers, Features]`
+    *   Operations: `param -= lr * grad / (sqrt(v) + eps)` applied via `vmap`.
+    This allows us to train **64 distinct policies** simultaneously with the throughput of a single large batch interaction.
 
-### Formalized Architecture
-We define our policy $\pi_\theta(a | s, z)$ where:
-*   $s$: The observation state (Self, Enemies, Checkpoints).
-*   $z$: A discrete **Role Embedding** ($z \in \{0, 1\}$).
-*   $\theta$: The shared parameters of the neural network.
+## 3. Architecture: Recurrent Split Backbone
 
-By conditioning the policy on $z$, we approximate a **Mixture of Experts** without the parameter cost.
-$$ \text{PilotNet}(s) \rightarrow \text{DrivingSkills} $$
-$$ \text{CommanderNet}(\text{DrivingSkills}, z) \rightarrow \text{RoleBehavior} $$
+To solve the "100k Character Limit" constraint while retaining complex multi-modal behavior (Racing vs Blocking), we utilize a **True Parameter Sharing** architecture with a Recurrent Core.
 
-This allows the agent to learn a specialized "Blocker" manifold and a "Runner" manifold that intersect at the "Basic Driving" manifold, maximizing the utility of every parameter in the 100k character limit.
+### The "Universal Brain"
+We define our policy $\pi_\theta(a | s, z)$ where $z \in \{0, 1\}$ is a **Role Embedding**.
+*   **Pilot Stream**: A lightweight MLP ($15 \rightarrow 64 \rightarrow 48$) processes "Reactive" features (Velocity, Next Checkpoint).
+*   **Commander Stream**: A deeper path ($48 \rightarrow 48$) processes "Tactical" features (Teammates, Enemies).
+    *   **DeepSets**: Enemies are processed via a permutation-invariant encoder $g(x) = \max_i(f(x_i))$.
+    *   **Map Transformer**: A sequence of future checkpoints is encoded via Self-Attention to provide track foresight.
+*   **LSTM Core**: Both streams fuse into an LSTM ($H=64$), allowing the agent to maintain temporal context (e.g., "I just crashed", "I am waiting for a boost").
 
-## 3. Evolutionary Strategy (NSGA-II)
-To avoid the need for manual hyperparameter tuning (which is expensive at this scale), we wrap the RL process in a **Population Based Training** loop.
+By conditioning the Commander Stream on $z$, the network learns two distinct behavioral manifolds (Runner/Blocker) that share the same underlying physics understanding (Pilot Stream).
 
-We formulate the selection as a Multi-Objective Optimization problem:
+## 4. Hybrid Inference: Neural-Guided Local Search
+
+Pure RL policies can be jittery or miss precise geometric opportunities. We implement a **System 1 / System 2** hybrid inference:
+
+1.  **System 1 (Neural Net)**: The PPO policy $\pi_\theta(s)$ proposes a distribution of actions. We sample the mode (greedy) and several nearby variations ($\pm 3^\circ, \pm 6^\circ$).
+2.  **System 2 (Local Search)**: We use a **minified physics engine** (embedded in the submission) to simulate these candidate actions for 1 step.
+    *   $a^* = \text{argmax}_{a \in \mathcal{C}} \text{Scoring}(\text{Sim}(s, a))$
+    *   The scoring function penalizes collisions and rewards alignment with the racing line.
+
+This "Safety Layer" allows the RL to be aggressive/creative while the Local Search handles the fine-grained precision required to pass checkpoints without collision.
+
+## 5. Evolutionary Strategy (NSGA-II)
+To avoid manual hyperparameter tuning, we wrap the RL process in a **Population Based Training** loop using **NSGA-II** selection.
 $$ \text{Maximize } F(x) = ( f_{win}(x), f_{novelty}(x), f_{efficiency}(x) ) $$
-
-Using **NSGA-II** (Non-dominated Sorting Genetic Algorithm II), we maintain a Pareto Frontier of agents. This preserves agents that might have a lower Win Rate but exhibit highly novel behavior (potential creative strategies) or high racing efficiency (potential speedsters), preventing the population from collapsing into a single, brittle local optimum.
+This preserves agents that might have a lower Win Rate but exhibit highly novel behavior, preventing the population from collapsing into a specific meta.
