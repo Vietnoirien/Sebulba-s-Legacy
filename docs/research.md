@@ -29,7 +29,7 @@ Our system mirrors the core tenets of the OpenAI Five system:
 1.  **PPO (Proximal Policy Optimization)**: We use PPO with Generalized Advantage Estimation (GAE) for its stability in continuous control.
 2.  **Massive Scale**: Like OpenAI Five, we rely on large batch sizes (Horizon 128 * 8192 Envs = ~1M samples per update) to smooth out the variance of the gradients.
 3.  **Self-Play**: The primary training signal comes from beating a copy of oneself (or past selves), creating a natural curriculum where the opponent improves exactly as fast as the agent.
-4.  **LSTM / Memory** (Experimental): While our primary submission uses MLP for speed/size, the infrastructure supports LSTM to handle partial observability.
+4.  **LSTM / Memory**: Unlike earlier iterations, our primary submission now utilizes a specialized LSTM core to handle temporal context and partial observability, enabling more robust strategic decisions.
 
 ### Formalized Architecture
 We define our policy $\pi_\theta(a | s, z)$ where:
