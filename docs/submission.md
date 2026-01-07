@@ -85,10 +85,16 @@ graph TD
     LSTM --> H_Bo(Boost)
     end
 
-    H_Th --> Out_Th(Action: Thrust)
-    H_Ang --> Out_Ang(Action: Angle)
-    H_Sh --> Out_Misc(Action: Shield/Boost)
-    H_Bo --> Out_Misc
+    subgraph "Neural-Guided Local Search"
+    H_Th & H_Ang & H_Sh & H_Bo --> Gen[Candidate Generation]
+    Gen --> |Simulate 1 Step| Sim[Fast Physics]
+    Sim --> Score[Heuristic Scoring]
+    Score --> Select[Select Best]
+    end
+
+    Select --> Out_Th(Action: Thrust)
+    Select --> Out_Ang(Action: Angle)
+    Select --> Out_Misc(Action: Shield/Boost)
 ```
 
 ## Neural-Guided Local Search
