@@ -218,9 +218,19 @@ async def wipe_checkpoints():
             session.trainer.league.registry = []
             session.trainer.league.payoff = {} # Reset Match History
             session.trainer.league._save_registry()
+            session.trainer.league._save_registry()
             session.trainer.league._save_payoff()
             
-        # 4. Clear Registry & Payoff (Filesystem)
+        # 4. Clear League Store (Deep Clean)
+        league_store = "data/league_store"
+        if os.path.exists(league_store):
+            try:
+                shutil.rmtree(league_store)
+                os.makedirs(league_store, exist_ok=True)
+            except Exception as e:
+                print(f"Failed to clear league store: {e}")
+            
+        # 5. Clear Registry & Payoff (Filesystem)
         # Even if trainer is active, force wipe files to be sure
         if os.path.exists("data/league.json"):
             with open("data/league.json", "w") as f:

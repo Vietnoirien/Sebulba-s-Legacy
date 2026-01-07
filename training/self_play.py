@@ -6,7 +6,7 @@ import glob
 from pathlib import Path
 import shutil
 
-LEAGUE_DIR = "data/checkpoints"
+LEAGUE_DIR = "data/league_store"
 LEAGUE_FILE = "data/league.json"
 PAYOFF_FILE = "data/payoff.json"
 

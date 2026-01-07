@@ -130,11 +130,11 @@ export const RaceCanvas: React.FC = () => {
                     }
 
                     // Trigger Flash
-                    if (index === 0) {
-                        // Red Team Flag (Pod 0)
+                    if (pod.team === 0) {
+                        // Red Team
                         flashes.current[passedCpId].red = 1.0
                     } else {
-                        // White Team/Bots
+                        // White Team
                         flashes.current[passedCpId].white = 1.0
                     }
                 }

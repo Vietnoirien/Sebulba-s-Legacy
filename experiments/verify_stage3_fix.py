@@ -36,11 +36,8 @@ def verify_fix():
     trainer.curriculum.set_stage(STAGE_TEAM)
     trainer.env.set_stage(STAGE_TEAM, trainer.curriculum.current_stage.get_env_config(), reset_env=True)
     
-    # 3. Mitosis (Simulate what happens on transition)
-    # We assume Gen 66 might already have Mitosis applied if it was "freshly arriving"?
-    # User said "freshly arriving in stage 3 AFTER mitosis".
-    # So weights should be good. 
-    # But we should ensure Optimizer state is reset if we were continuing.
+    # 3. Transition Check (Simulate what happens on transition)
+    # Ensure optimizer state is reset if we were continuing.
     # Since we created a NEW trainer, optimizer is fresh.
     
     # 4. Run Training Loop for a few steps

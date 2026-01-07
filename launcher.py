@@ -3,6 +3,7 @@ import signal
 import sys
 import time
 import os
+import webbrowser
 from pathlib import Path
 
 def cleanup(backend_proc, frontend_proc):
@@ -103,6 +104,13 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     print("System running. Press Ctrl+C to stop.")
+    
+    # Open Browser
+    import webbrowser
+    print("Opening browser...")
+    # Give a moment for services to bind
+    time.sleep(1.5) 
+    webbrowser.open("http://localhost:5173")
     
     try:
         while True:

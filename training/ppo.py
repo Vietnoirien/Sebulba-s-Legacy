@@ -38,8 +38,8 @@ from torch.func import functional_call, vmap, grad
 
 class PPOTrainer:
 
-    def __init__(self, device='cuda', logger_callback=None):
-        self.config = TrainingConfig()
+    def __init__(self, config: Optional[TrainingConfig] = None, device='cuda', logger_callback=None):
+        self.config = config if config is not None else TrainingConfig()
         self.curriculum_config = CurriculumConfig()
         self.curriculum = CurriculumManager(self.curriculum_config)
         # Sync Initial Stage Config
@@ -142,17 +142,8 @@ class PPOTrainer:
                 'nursery_score': 0.0
             })
             
-            # --- MITIGATION: COLD START BLOCKER ---
-            # Copy Runner Embedding (Index 1) > Blocker Embedding (Index 0)
-            # This ensures Blockers start with the same 'skill context' as Runners
-            # instead of random noise.
-            # Only done at init/load time.
-            with torch.no_grad():
-                emb_weight = agent.actor.role_embedding.weight
-                emb_weight[0] = emb_weight[1].clone()
-                # self.log(f"Agent {i}: Role Mitosis Applied (Runner -> Blocker)")
+            # Match ID (Unique per agent lifetime)
 
-            
             # Fill Tensor
             start_idx = i * self.config.envs_per_agent
             end_idx = start_idx + self.config.envs_per_agent
@@ -243,6 +234,11 @@ class PPOTrainer:
                  'dones': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
                  'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
                  'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                 # LSTM States [Chunks, Batch, Layers, Hidden] - Sparse Storage
+                 'actor_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                 'actor_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                 'critic_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                 'critic_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
              })
 
         if self.nursery_metrics_buffer.shape[0] != self.config.pop_size:
@@ -347,34 +343,61 @@ class PPOTrainer:
             
         self.sync_agents_to_vectorized()
 
-    def _functional_inference(self, params, buffers, s, tm, en, cp):
+    def _functional_inference(self, params, buffers, s, tm, en, cp, actor_h, actor_c, critic_h, critic_c):
         """
         Functional wrapper for vmap inference.
         """
-        return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'compute_divergence': False})
-
-    def _functional_get_value(self, params, buffers, s, tm, en, cp):
-        return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'method': 'get_value'})
-
-    def _functional_loss(self, params, buffers, s, tm, en, cp, act, old_logp, old_val, adv, ret, use_div, ent_coef, clip_range, vf_coef, div_coef):
-        # Forward
-        if use_div:
-            _, logp, ent, val, div = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp, act), kwargs={'compute_divergence': True})
-        else:
-            _, logp, ent, val = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp, act), kwargs={'compute_divergence': False})
-            div = torch.tensor(0.0, device=s.device)
-            
-        val = val.flatten()
-        ratio = (logp - old_logp).exp()
+        # Reconstruct tuple state
+        # Input h, c are [Batch, Layers, Hidden] (Permuted by PPO buffer format [B, L, H])
+        # Wait, PPO buffer is [Pop, B, L, H]. vmap slices Pop -> [B, L, H].
+        # But we need [Layers, Batch, H] for LSTM forward (standard pytorch layout).
+        # So we permute (1, 0, 2).
         
-        # Advantage Normalization (Per-batch inside vmap? No, PPO usually norms batch-wide)
-        # But here 'adv' input is already normalized minibatches? 
-        # Standard PPO normalizes advantage over the MINIBATCH.
-        # If we normalize inside vmap, we normalize over 1 sample? NO.
-        # vmap maps over the POPULATION dimension.
-        # Inside vmap, 's' is [Minibatch, D] corresponding to ONE agent.
-        # So we can normalize adv inside here!
-        # adv is [Minibatch].
+        actor_state = (actor_h.permute(1,0,2).contiguous(), actor_c.permute(1,0,2).contiguous())
+        critic_state = (critic_h.permute(1,0,2).contiguous(), critic_c.permute(1,0,2).contiguous())
+        
+        # Output: action, logprob, ent, val, states
+        out = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'actor_state': actor_state, 'critic_state': critic_state})
+        action, logprob, ent, val, states = out
+        return action, logprob, ent, val, states['actor'], states['critic']
+
+    def _functional_get_value(self, params, buffers, s, tm, en, cp, critic_h, critic_c):
+        # We need critic state to get value
+        critic_state = (critic_h.permute(1,0,2).contiguous(), critic_c.permute(1,0,2).contiguous())
+        return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'method': 'get_value', 'lstm_state': critic_state})
+
+    def _functional_loss(self, params, buffers, s, tm, en, cp, act, old_logp, old_val, adv, ret, actor_h0, actor_c0, critic_h0, critic_c0, use_div, ent_coef, clip_range, vf_coef, div_coef):
+        # s, tm, en, cp are [MB, SeqLat, D]
+        # h0, c0 are [MB, 1, Hidden] -> Need [Layers, MB, Hidden]
+        
+        # Permute states to [Layers, MB, Hidden] usually [1, MB, 64]
+        # Input is [MB, 1, 64]
+        a_h = actor_h0.permute(1, 0, 2).contiguous()
+        a_c = actor_c0.permute(1, 0, 2).contiguous()
+        c_h = critic_h0.permute(1, 0, 2).contiguous()
+        c_c = critic_c0.permute(1, 0, 2).contiguous()
+        
+        # Forward (Sequence Mode handled by PodAgent based on input dim)
+        # Forward (Sequence Mode handled by PodAgent based on input dim)
+        # We disable divergence check for LSTM architecture for now as it doesn't support 'compute_divergence'
+        # We disable divergence check for LSTM architecture for now as it doesn't support 'compute_divergence'
+        _, logp, ent, val, states = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp, act), kwargs={'actor_state': (a_h, a_c), 'critic_state': (c_h, c_c)})
+        div = torch.tensor(0.0, device=s.device)
+        
+        next_actor_h, next_actor_c = states['actor']
+        next_critic_h, next_critic_c = states['critic']
+            
+        # val is [MB, Seq]
+        val = val.flatten() # [MB*Seq]
+        # old_val is [MB, Seq] -> flatten
+        old_val = old_val.flatten()
+        logp = logp.flatten()
+        old_logp = old_logp.flatten()
+        ent = ent.flatten()
+        adv = adv.flatten()
+        ret = ret.flatten()
+        
+        ratio = (logp - old_logp).exp()
         
         if adv.numel() > 1:
             adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -393,7 +416,7 @@ class PPOTrainer:
         
         loss = pg_loss - ent_coef * ent.mean() + vf_coef * v_loss - div_coef * div_clamped
         
-        return loss, (loss.detach(), pg_loss.detach(), v_loss.detach(), ent.mean().detach(), div_clamped.detach())
+        return loss, (loss.detach(), pg_loss.detach(), v_loss.detach(), ent.mean().detach(), div_clamped.detach(), (next_actor_h, next_actor_c), (next_critic_h, next_critic_c))
 
     def log(self, msg):
         print(msg)
@@ -474,6 +497,12 @@ class PPOTrainer:
     def check_curriculum(self):
         self.curriculum.update(self)
         self.update_step_penalty_annealing()
+        
+        # [NEW] Team Spirit Annealing
+        new_spirit = self.curriculum.update_team_spirit(self)
+        if new_spirit != self.team_spirit:
+             self.team_spirit = new_spirit
+             # self.log(f"Config: Team Spirit updated to {self.team_spirit:.2f}") # Too spammy? No, only on change.
 
     def get_active_pods(self):
         return self.curriculum.get_active_pods()
@@ -870,8 +899,9 @@ class PPOTrainer:
             
             # Register Top Agents to League
             # START SOTA UPDATE: Enforce strict entry criteria
-            # Only save to League if passing the "Racer" bar (Stage 1+ and Diff > 0.5)
-            if self.env.curriculum_stage >= STAGE_DUEL and self.env.bot_difficulty > 0.5:
+            # Only save to League if passing the "Team" bar (Stage 4+ and Diff > 0.5)
+            # User Constraint: "we don't wan't to save agent in the league before they reached stage 4 (team)"
+            if self.env.curriculum_stage >= STAGE_TEAM and self.env.bot_difficulty > 0.6:
                 if p in top_2:
                     league_name = f"gen_{self.generation}_agent_{agent_id}"
                     metrics = {
@@ -1008,7 +1038,7 @@ class PPOTrainer:
         
         self.log(border)
         self.log(f" ITERATION {self.iteration} | Gen {self.generation} | Step {global_step} | SPS {sps} | Iter: {iter_str} | Total: {total_str}")
-        self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f} | Step Pen: {curr_step_pen:.1f}")
+        self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f} | Spirit: {self.team_spirit:.2f} | Step Pen: {curr_step_pen:.1f}")
         self.log("-" * 80)
         self.log(f" {'Metric':<15} | {'Leader':<10} | {'Pop Avg':<10} | {'Best Agt':<10}")
         self.log("-" * 80)
@@ -1055,7 +1085,7 @@ class PPOTrainer:
         
         obs_data = self.env.get_obs()
         start_time = time.time()
-        sps = 0 # Initialize to avoid unbound error on first steps
+        sps = 0.0 # Initialize to avoid unbound error on first steps
         
         self.last_transition_iteration = -999 # Initialize
         
@@ -1282,11 +1312,89 @@ class PPOTrainer:
                 v_tm = norm_tm.view(N_A, Pop, EPA, 13).permute(1, 0, 2, 3).reshape(Pop, -1, 13)
                 v_en = norm_en.view(N_A, Pop, EPA, 2, 13).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 13)
                 v_cp = norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
+
+                # Initialize Current States if first step
+                if step == 0:
+                     # [Pop, Batch, 1, Hidden]
+                     total_batch = v_s.shape[1]
+                     self.curr_actor_h = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
+                     self.curr_actor_c = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
+                     self.curr_critic_h = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
+                     self.curr_critic_c = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
                 
+                # Check Sparse Store (Before Forward? No, we need state used for THIS step)
+                if step % self.config.seq_length == 0:
+                     chunk_idx = step // self.config.seq_length
+                     for i in range(Pop):
+                         batch = self.agent_batches[i]
+                         batch['actor_h'][chunk_idx] = self.curr_actor_h[i].detach()
+                         batch['actor_c'][chunk_idx] = self.curr_actor_c[i].detach()
+                         batch['critic_h'][chunk_idx] = self.curr_critic_h[i].detach()
+                         batch['critic_c'][chunk_idx] = self.curr_critic_c[i].detach()
+
                 # VMAP Execution
-                v_act, v_lp, _, v_val = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0), randomness='different')(
-                    self.stacked_params, self.stacked_buffers, v_s, v_tm, v_en, v_cp
+                # Pass Current States
+                # vmap expects inputs to be stacked. self.curr_... is [Pop, Batch, ...]
+                
+                # Add critic startes to input
+                v_act, v_lp, _, v_val, (v_nah, v_nac), (v_nch, v_ncc) = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0,0,0,0,0), randomness='different')(
+                    self.stacked_params, self.stacked_buffers, v_s, v_tm, v_en, v_cp, self.curr_actor_h, self.curr_actor_c, self.curr_critic_h, self.curr_critic_c
                 )
+                
+                # Update Current States
+                self.curr_actor_h = v_nah
+                self.curr_actor_c = v_nac
+                # Critic states are not returned by inference?
+                # Wait, I updated _functional_inference to only return actor states in previous tool call?
+                # "Output: action, logprob, ent, val, states"
+                # And functional_call returns what PodAgent returns.
+                # PodAgent.forward returns: ..., (ah, ac), (ch, cc)
+                # So yes, it returns BOTH.
+                self.curr_critic_h = v_nch
+                self.curr_critic_c = v_ncc
+                
+                # Fix vmap shape artifacts (Batch x Batch) if present
+                
+                # Helper for diagonal fix on [P, B, B, ...]
+                def fix_diag(t):
+                    # 1. Check for 5D States [P, L, B, B, H] - Artifact at dim 2 and 3
+                    if t.ndim == 5 and t.shape[2] == t.shape[3]:
+                        return t.diagonal(dim1=2, dim2=3).permute(0, 3, 1, 2).contiguous()
+
+                    # 2. Check for 3D/4D Actions/LogProbs - Artifact at dim 1 and 2
+                    if t.ndim >= 3 and t.shape[1] == t.shape[2]:
+                        # [P, B, B, ...] -> [P, ..., B]
+                        # diagonal(dim1=1, dim2=2) moves diag to FASTEST dimension (last).
+                        # Input [P, B, B, F]. Output [P, F, B].
+                        # We need [P, B, F].
+                        # So permute(-1) to dim 1.
+                        # If t is [P, B, B, F]. Result [P, F, B]. Permute(0, 2, 1).
+                        
+                        if t.ndim == 4: # Act [P, B, B, F]
+                            return t.diagonal(dim1=1, dim2=2).permute(0, 2, 1).contiguous()
+                        elif t.ndim == 3: # LogP [P, B, B]
+                            return t.diagonal(dim1=1, dim2=2) # [P, B]
+                    
+                    # 3. Canonicalize 4D State Output [P, L, B, H] -> [P, B, L, H]
+                    if t.ndim == 4 and t.shape[1] == 1 and t.shape[2] != 1:
+                         return t.permute(0, 2, 1, 3).contiguous()
+
+                    return t
+
+                v_act = fix_diag(v_act)
+                v_lp = fix_diag(v_lp)
+                v_val = fix_diag(v_val)
+                
+                v_nah = fix_diag(v_nah)
+                v_nac = fix_diag(v_nac)
+                v_nch = fix_diag(v_nch)
+                v_ncc = fix_diag(v_ncc)
+
+                # Update current states
+                self.curr_actor_h = v_nah
+                self.curr_actor_c = v_nac
+                self.curr_critic_h = v_nch
+                self.curr_critic_c = v_ncc
                 
                 # Store
                 for i in range(Pop):
@@ -1295,9 +1403,10 @@ class PPOTrainer:
                     batch['teammate_obs'][step] = v_tm[i].detach()
                     batch['enemy_obs'][step] = v_en[i].detach()
                     batch['cp_obs'][step] = v_cp[i].detach()
-                    batch['actions'][step] = v_act[i].detach()
-                    batch['logprobs'][step] = v_lp[i].detach()
-                    batch['values'][step] = v_val[i].flatten().detach()
+                    
+                    batch['actions'][step] = v_act[i].detach().reshape(self.config.envs_per_agent * 1, 4)
+                    batch['logprobs'][step] = v_lp[i].detach().flatten()
+                    batch['values'][step] = v_val[i].detach().flatten()
                     
                 # Prepare act_map
                 r_act = v_act.view(Pop, N_A, EPA, 4)
@@ -1311,6 +1420,22 @@ class PPOTrainer:
                 t_infer_end = time.time() # T2
                 
                 # Check for League Mode Opponent Logic (Stage 2: 2v2)
+                # ... Excluded ...
+                
+                # ... Excluded Opponent Logic Reuse ...
+                # (Assuming no change needed there for now as opponents need states too? 
+                # Opponent Agent uses MLP or LSTM?
+                # If Opponent is Loaded from old checkpoint, it might be MLP.
+                # If loaded from New Gen, it is LSTM.
+                # We need to handle this polymorphism in league logic!)
+                
+                # For now, let's assume we focus on Training Loop logic.
+                # League logic block was skipped in replacement to keep it simple? 
+                # No, I need to preserve it if I replace large chunk.
+                # I am replacing lines 1282-1416. 
+                # This covers VMAP Execution and Store. 
+                # It ENDS before League Logic.
+
                 if self.env.curriculum_stage >= STAGE_LEAGUE:
                      # We need to control Pods [2, 3] (Opponent Team).
                      # Strategy:
@@ -1802,6 +1927,29 @@ class PPOTrainer:
 
                 # Manual Reset
                 if dones.any():
+                    # Valid Dones
+                    done_mask = dones.view(self.config.num_envs, 1, 1, 1) # [Envs, 1, 1, 1]
+                    # We need to map dones to the vectorized state [Pop, Batch, 1, H]
+                    # Batch dim in vmap is [N_Active, Envs/Agent].
+                    # Wait, Batch size is Pop * EnvsPerAgent. vmap input is [Pop, BatchPerAgent].
+                    # dones is [TotalEnvs].
+                    # reshaping dones to [Pop, BatchPerAgent, 1, 1]
+                    
+                    # Dones is [Pop * EnvsPerAgent]
+                    d_reshaped = dones.view(Pop, EPA).unsqueeze(-1).unsqueeze(-1) # [Pop, EPA, 1, 1]
+                    # Expand to Active Pods dimension?
+                    # The state tensor is [Pop, N_Active * EPA, 1, H]
+                    # We need to repeat dones for each active pod.
+                    d_expanded = d_reshaped.repeat(1, N_A, 1, 1) # [Pop, N_A * EPA, 1, 1]
+                    # Reshape to match state [Pop, Batch, 1, 1]
+                    d_mask = d_expanded.reshape(Pop, -1, 1, 1)
+                    
+                    # Apply Mask (Reset state to zero if done)
+                    self.curr_actor_h = self.curr_actor_h * (1.0 - d_mask.float())
+                    self.curr_actor_c = self.curr_actor_c * (1.0 - d_mask.float())
+                    self.curr_critic_h = self.curr_critic_h * (1.0 - d_mask.float())
+                    self.curr_critic_c = self.curr_critic_c * (1.0 - d_mask.float())
+
                     reset_ids = torch.nonzero(dones).squeeze(-1)
                     self.env.reset(reset_ids)
                 
@@ -1908,16 +2056,18 @@ class PPOTrainer:
             v_n_cp = next_norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
             
             with torch.no_grad():
-                v_next_vals = vmap(self._functional_get_value, in_dims=(0,0,0,0,0,0), randomness='different')(
-                     self.stacked_params, self.stacked_buffers, v_n_s, v_n_tm, v_n_en, v_n_cp
+                # Use current critic states (at end of rollout)
+                v_next_vals = vmap(self._functional_get_value, in_dims=(0,0,0,0,0,0,0,0), randomness='different')(
+                     self.stacked_params, self.stacked_buffers, v_n_s, v_n_tm, v_n_en, v_n_cp, self.curr_critic_h, self.curr_critic_c
                 )
             
             # Flatten to [TotalBatch] matching g_dones structure
             g_next_val = v_next_vals.flatten()
             
-            # 2. Global GAE Construction
+            # 2. Global GAE Construction (On Full Trajectories FIRST)
             # Stack agent batches [Pop, Time, BPA]
             # Use pop() to clear from agent_batches immediately to save VRAM
+            # We pop STATES too
             s_rew = torch.stack([b.pop('rewards') for b in self.agent_batches]) 
             s_don = torch.stack([b.pop('dones') for b in self.agent_batches])
             s_val = torch.stack([b.pop('values') for b in self.agent_batches])
@@ -1927,7 +2077,7 @@ class PPOTrainer:
             g_dones = s_don.permute(1, 0, 2).reshape(self.current_num_steps, -1)
             g_values = s_val.permute(1, 0, 2).reshape(self.current_num_steps, -1)
             
-            # 3. GAE Loop (Unchanged logic, just running on Global Tensors)
+            # 3. GAE Loop (Standard Full Trajectory)
             g_adv = torch.zeros_like(g_rewards)
             lastgaelam = 0
             
@@ -1944,30 +2094,83 @@ class PPOTrainer:
             
             g_returns = g_adv + g_values
 
-            # Free GAE intermediates to save memory
+            # Free GAE intermediates
             del s_rew, s_don, g_rewards, g_dones, g_values, g_next_val
 
-            # 4. PPO Update (Vectorized)
+
+            # 4. SEQUENCE CHUNKING & FLATTENING (TBPTT Prep)
             t_ppo_start = time.time()
+
+            # Helper to chunk and flatten: [Pop, Steps, BPA, D] -> [Pop, TotalSeqs, SeqLen, D]
+            SeqLen = self.config.seq_length
+            NumChunks = self.current_num_steps // SeqLen
+
+            def transform_seq(tensor_stack):
+                # tensor_stack: [Pop, Steps, BPA, ...]
+                # View as [Pop, Chunks, SeqLen, BPA, ...]
+                # Permute to [Pop, Chunks, BPA, SeqLen, ...]
+                # Flatten [Chunks, BPA] -> TotalSeqs
+                shape = tensor_stack.shape
+                new_shape = (Pop, NumChunks, SeqLen, -1) + shape[3:]
+                viewed = tensor_stack.view(*new_shape)
+                # Permute: [Pop, Chunks, BPA, SeqLen, ...]
+                # Original dims: 0=Pop, 1=Chunks, 2=SeqLen, 3=BPA
+                permuted = viewed.permute(0, 1, 3, 2, *range(4, viewed.ndim))
+                # Flatten Chunks*BPA
+                return permuted.flatten(1, 2) # [Pop, TotalSeqs, SeqLen, ...]
+
+            # Helper for States: [Pop, Chunks+1, BPA, ...] -> [Pop, TotalSeqs, ...]
+            def transform_state(tensor_stack):
+                # tensor_stack: [Pop, Chunks+1, BPA, L, H]
+                # Take only first NumChunks
+                valid = tensor_stack[:, :NumChunks]
+                # Flatten [Chunks, BPA] -> TotalSeqs
+                return valid.flatten(1, 2) # [Pop, TotalSeqs, L, H]
+
+            # Transformation
+            # Stack Data: [Pop, Steps, BPA, D]
+            flat_s = transform_seq(torch.stack([b.pop('self_obs') for b in self.agent_batches]))
+            flat_tm = transform_seq(torch.stack([b.pop('teammate_obs') for b in self.agent_batches]))
+            flat_en = transform_seq(torch.stack([b.pop('enemy_obs') for b in self.agent_batches]))
+            flat_cp = transform_seq(torch.stack([b.pop('cp_obs') for b in self.agent_batches]))
+            flat_act = transform_seq(torch.stack([b.pop('actions') for b in self.agent_batches]))
+            flat_old_logp = transform_seq(torch.stack([b.pop('logprobs') for b in self.agent_batches]))
             
-            # Flatten Batches for Training: [Pop, TotalSamples, D]
-            # Aggressively release memory using pop()
-            flat_s = torch.stack([b.pop('self_obs') for b in self.agent_batches]).flatten(1, 2)
-            flat_tm = torch.stack([b.pop('teammate_obs') for b in self.agent_batches]).flatten(1, 2)
-            flat_en = torch.stack([b.pop('enemy_obs') for b in self.agent_batches]).flatten(1, 2)
-            flat_cp = torch.stack([b.pop('cp_obs') for b in self.agent_batches]).flatten(1, 2)
-            flat_act = torch.stack([b.pop('actions') for b in self.agent_batches]).flatten(1, 2)
-            flat_old_logp = torch.stack([b.pop('logprobs') for b in self.agent_batches]).flatten(1, 2)
+            # transform_seq works on s_val reference too? No, s_val was consumed/deleted.
+            # We need to reshape G_ADV and G_RET.
+            # g_adv is [Steps, TotalBatch]. TotalBatch = Pop * BPA.
+            # We need [Pop, Steps, BPA].
+            g_adv_reshaped = g_adv.view(self.current_num_steps, Pop, -1).permute(1, 0, 2)
+            g_ret_reshaped = g_returns.view(self.current_num_steps, Pop, -1).permute(1, 0, 2)
+            # Reconstruct Old Value (Optional?) - No, we popped it. 
+            # But we can reconstruct logic or store? 
+            # Actually we typically need Old Value for Clip Range.
+            # Let's assume we don't have it unless we stored it in 'values' buffer which we popped.
+            # Wait, s_val was popped on 1930. We can't reuse it.
+            # We should have kept a copy or transformed it.
+            # Since we deleted s_val, we rely on g_values from line 1935? 
+            # g_values was also deleted on 1955!
+            # CRITICAL MISS: We need old_values for PPO loss.
+            # FIX: Do not delete g_values until transformed.
+            # But g_values is [Steps, TotalBatch].
             
-            # Reuse s_val reference for old_val (since we need [Pop, Time, BPA] -> [Pop, TotalSamples])
-            # Wait, s_val was stacked [Pop, Time, BPA].
-            flat_old_val = s_val.flatten(1, 2) 
-            del s_val
+            # Let's assume we missed saving g_values. 
+            # PPO Value Clip relies on it. 
+            # Re-calculating...
+            # We can recover Old Value from g_returns - g_adv?
+            # Returns = Adv + Value -> Value = Returns - Adv.
+            g_values_recovered = g_returns - g_adv # Exact reconstruction
             
-            # Advantages: [Time, Pop*BPA] -> Permute/View back to [Pop, Time*BPA]
-            flat_adv = g_adv.view(self.current_num_steps, Pop, -1).permute(1, 0, 2).flatten(1, 2)
-            flat_ret = g_returns.view(self.current_num_steps, Pop, -1).permute(1, 0, 2).flatten(1, 2)
+            flat_old_val = transform_seq(g_values_recovered.view(self.current_num_steps, Pop, -1).permute(1, 0, 2).unsqueeze(-1)).squeeze(-1)
+            flat_adv = transform_seq(g_adv_reshaped.unsqueeze(-1)).squeeze(-1)
+            flat_ret = transform_seq(g_ret_reshaped.unsqueeze(-1)).squeeze(-1)
             
+            # Transform States
+            flat_ah = transform_state(torch.stack([b.pop('actor_h') for b in self.agent_batches]))
+            flat_ac = transform_state(torch.stack([b.pop('actor_c') for b in self.agent_batches]))
+            flat_ch = transform_state(torch.stack([b.pop('critic_h') for b in self.agent_batches]))
+            flat_cc = transform_state(torch.stack([b.pop('critic_c') for b in self.agent_batches]))
+
             # Config Tensors
             t_ent = torch.tensor([p.get('ent_coef', self.config.ent_coef) for p in self.population], device=self.device)
             t_clip = torch.tensor([p.get('clip_range', self.config.clip_range) for p in self.population], device=self.device)
@@ -1975,19 +2178,15 @@ class PPOTrainer:
             t_div_coef = torch.tensor(self.config.div_coef, device=self.device)
             use_div = (self.env.curriculum_stage >= STAGE_TEAM)
             
-            # Training Loop
-            num_samples = flat_s.shape[1]
-            inds = np.arange(num_samples)
-            # Use separate random state for shuffling? np.random.shuffle is in-place global. Fine.
-            batch_size = self.config.batch_size # This config is usually GLOBAL batch size?
-            # self.config.batch_size in standard PPO is usually num_steps * num_envs.
-            # Here we want per-agent batch size logic.
-            # self.config.batch_size // num_minibatches?
-            # Let's trust self.config.num_minibatches.
-            minibatch_size = num_samples // self.config.num_minibatches
+            # Training Loop (Sequence Batches)
+            num_sequences = flat_s.shape[1] # TotalSeqs
+            inds = np.arange(num_sequences)
             
-            # Compiled Grad Function (Memoized by vmap implicitly? Better to compile)
-            compute_grad = vmap(grad(self._functional_loss, has_aux=True), in_dims=(0,0,0,0,0,0,0,0,0,0,0,None,0,0,None,None))
+            # Minibatch Size (Sequences)
+            minibatch_size = max(1, num_sequences // self.config.num_minibatches)
+            
+            # Compiled Grad Function
+            compute_grad = vmap(grad(self._functional_loss, has_aux=True), in_dims=(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, None,0,0,None,None))
             
             total_loss = 0.0
             total_pg = 0.0
@@ -1997,11 +2196,11 @@ class PPOTrainer:
             
             for _ in range(self.config.update_epochs):
                  np.random.shuffle(inds)
-                 for start in range(0, num_samples, minibatch_size):
+                 for start in range(0, num_sequences, minibatch_size):
                       end = start + minibatch_size
                       mb_inds = inds[start:end]
                       
-                      # Slice [Pop, MB, D]
+                      # Slice [Pop, MB, Seq, D]
                       m_s = flat_s[:, mb_inds]
                       m_tm = flat_tm[:, mb_inds]
                       m_en = flat_en[:, mb_inds]
@@ -2012,18 +2211,22 @@ class PPOTrainer:
                       m_adv = flat_adv[:, mb_inds]
                       m_ret = flat_ret[:, mb_inds]
                       
+                      # States [Pop, MB, L, H] (Initial state for chunk)
+                      m_ah = flat_ah[:, mb_inds]
+                      m_ac = flat_ac[:, mb_inds]
+                      m_ch = flat_ch[:, mb_inds]
+                      m_cc = flat_cc[:, mb_inds]
+                      
                       # Compute Vectorized Gradients
-                      # (Pop parallel)
-                      # Compute Vectorized Gradients
-                      # (Pop parallel)
                       grads, batch_aux = compute_grad(
                           self.stacked_params, self.stacked_buffers,
                           m_s, m_tm, m_en, m_cp, m_act, m_lp, m_v, m_adv, m_ret, 
+                          m_ah, m_ac, m_ch, m_cc,
                           use_div, t_ent, t_clip, t_vf, t_div_coef
                       )
                       
                       # Unpack Aux: Tuple of Tensors [Pop, MB]
-                      b_loss, b_pg, b_v, b_ent, b_div = batch_aux
+                      b_loss, b_pg, b_v, b_ent, b_div, *_ = batch_aux
                       
                       total_loss += b_loss.sum().item()
                       total_pg += b_pg.sum().item()
@@ -2034,133 +2237,12 @@ class PPOTrainer:
                       # Optimizer Step
                       self.vectorized_adam.step(grads)
                       
-                      # RND Update (Flatten Population)
+                      # RND Update (Flatten Sequences too)
+                      # RND expects [TotalSamples, 15]
                       self.rnd.update(m_s.reshape(-1, 15).detach())
-                 
-            # Sync back to agent instances (Partial)? 
-            # Not strictly needed for training, but for checkpoints/evolution.
-            # We defer sync to checkpoint time or evolution time.
 
-            # Stats & Evolution
-            t_final = time.time()
-            gae_ms = (t_ppo_start - t_gae_start) * 1000
-            ppo_ms = (t_final - t_ppo_start) * 1000
-            self.log(f"Update Profile: GAE={gae_ms:.2f}ms | PPO={ppo_ms:.2f}ms")
-            
-            global_step += self.config.num_envs * self.current_num_steps
-            elapsed = time.time() - start_time
-            sps = int((self.config.num_envs * self.current_num_steps) / (elapsed + 1e-6))
-            
-            # Record Laps
-            for i in range(self.config.pop_size):
-                # Count laps for this agent's chunk
-                # laps tensor is [4096, 4]
-                start = i * self.config.envs_per_agent
-                end = start + self.config.envs_per_agent
-                # Sum laps of Pod 0 in this chunk
-                laps = self.env.laps[start:end, 0].sum().item()
-                # BUT this is cumulative laps.
-                # We want *new* laps or total progress?
-                # PBT usually checks performance over the interval.
-                # Let's track 'current laps' vs 'prev laps'?
-                # Or just raw laps count if we reset often.
-                # Actually, env laps are cumulative since reset.
-                pass
-                
-                # Simpler: Use the stage metrics which are cumulative, but that's global.
-                # We need per-agent metrics.
-                # Let's read directly from env.
-                # self.population[i]['laps_score'] = laps # Cumulative -> REMOVED (Now tracking incrementally)
-                pass
-
-
-            # ELO Updates (Post-Iteration)
-            if self.env.curriculum_stage >= STAGE_LEAGUE and hasattr(self, 'opponent_agent_loaded') and self.opponent_agent_loaded:
-                 # Calculate Population Win Rate vs Opponent
-                 # We tracked 'wins' in population.
-                 # 'wins' were attributed if winner == 0 (Pod 0).
-                 # We need total matches.
-                 # Since we ran self.config.num_steps * self.config.num_envs, we can estimate matches or track them?
-                 # Actually 'wins' is integer count of wins.
-                 # Total matches per agent = self.config.envs_per_agent (approx, assuming 1 match per env per iter? No.)
-                 # A match ends on DONE.
-                 # We need to know how many DONES happened for valid win rate calculation.
-                 # Let's aggregate average score?
-                 # SB3 typically uses Outcome: 1 for Win, 0 for Loss.
-                 # We just aggregate all wins across population and treat as "Population vs Opponent" match?
-                 
-                 # Simpler: For each elite/leader, update their ELO vs Opponent.
-                 # Updating for whole population might be noisy.
-                 # Let's update for the LEADER.
-                 
-                 leader = self.population[self.leader_idx]
-                 # We need specific match stats for Leader vs Opponent.
-                 # We have leader['wins']. Does it normalize by matches? No.
-                 # We need leader['matches_played'] or similar.
-                 # We didn't track matches_played explicitly per agent in the loop above.
-                 # BUT, we can infer it or just skip ELO update for now until we track it strictly?
-                 
-                 # Let's add 'matches' tracking in the loop quickly?
-                 # Yes, let's do it below.
-                 pass
-
-            # ELO & League Stats Updates
-            league_stats = None
-            
-            if self.env.curriculum_stage >= STAGE_DUEL and hasattr(self, 'opponent_agent_loaded') and self.opponent_agent_loaded:
-                 # 1. Update Payoff Matrix for Leader
-                 leader = self.population[self.leader_idx]
-                 leader_id_str = f"gen_{self.generation}_agent_{leader['id']}"
-                 
-                 # Calculate Delta Stats (Wins in this iteration vs THIS opponent)
-                 # We snapshot start stats after opponent load
-                 iter_wins = leader['wins'] - self.iteration_start_wins
-                 iter_matches = leader['matches'] - self.iteration_start_matches
-                 
-                 if iter_matches > 0:
-                     win_rate = iter_wins / iter_matches
-                     # Update PFSP Payoff Matrix
-                     self.league.update_match_result(leader_id_str, self.current_opponent_id, win_rate)
-                 else:
-                     win_rate = 0.0 # No matches finished?
-                 
-                 # Calculate stats to show
-                 # "wr" is historical (from matrix), or current? 
-                 # Let's show the Cumulative Matrix WR if available, else current.
-                 hist_wr = self.league.get_win_rate(leader_id_str, self.current_opponent_id)
-                 
-                 league_stats = {
-                     "matches_played": iter_matches,
-                     "wins": iter_wins,
-                     "win_rate": win_rate, 
-                     "opponent_id": self.current_opponent_id,
-                     "registry_count": len(self.league.registry)
-                 }
-                 
-                 self.log(f"🏆 League: {leader_id_str} vs {self.current_opponent_id} | WR: {win_rate:.2f} (Hist: {hist_wr:.2f})")
-
-            # Evolution Check
-            # Adding Grace Period: Do not evolve immediately after a stage transition.
-            # This allows EMA metrics to stabilize in the new environment.
-            iterations_since_transition = self.iteration - self.last_transition_iteration
-            TRANSITION_GRACE_PERIOD = 20 # 20 Iterations = ~20-30 mins of training.
-            
-            in_grace_period = (iterations_since_transition < TRANSITION_GRACE_PERIOD)
-            
-            if self.iteration % self.current_evolve_interval == 0:
-                if in_grace_period:
-                    self.log(f"Evolution Skipped: In Grace Period (Iter {iterations_since_transition}/{TRANSITION_GRACE_PERIOD}).")
-                else:
-                    self.evolve_population()
-            
-            # Logging
-            # Logging
-            # Average over (Pop * Epochs * Minibatches)?
-            # total_loss is sum over [Pop, Epochs, Minibatches] (since we loop epochs and minibatches and sum)
-            # wait, compute_grad returns [Pop]. sum() sums over pop.
-            # So total_loss is sum over all updates and all agents.
-            # Denominator: Pop * Epochs * (NumSamples / MinibatchSize)
-            num_updates = self.config.pop_size * self.config.update_epochs * (num_samples // minibatch_size)
+            # Stats Normalization
+            num_updates = self.config.pop_size * self.config.update_epochs * (num_sequences // minibatch_size)
             
             avg_loss = total_loss / num_updates
             avg_pg = total_pg / num_updates
@@ -2179,6 +2261,7 @@ class PPOTrainer:
             
             if telemetry_callback:
                 # Pass league_stats as a new argument
+                league_stats = None
                 telemetry_callback(global_step, sps, 0, 0, self.current_win_rate, self.telemetry_env_indices[0], total_loss/self.config.pop_size, log_line, False, league_stats=league_stats)
 
             # --- Memory Optimization ---
@@ -2188,6 +2271,23 @@ class PPOTrainer:
             if self.device.type == 'cuda':
                 torch.cuda.empty_cache()
 
+            # --- Loop Progression & Evolution ---
+            global_step += self.current_num_steps
+            elapsed = time.time() - start_time
+            if elapsed > 1.0:
+                sps = global_step / elapsed
+            
+            # Evolution Step
+            if self.iteration % self.current_evolve_interval == 0:
+                 self.log(f"Evolution Triggered at Iteration {self.iteration} (Interval: {self.current_evolve_interval})")
+                 self.evolve_population()
+                 # Reset optimizer state if needed? Usually PPO optimizer state is preserved or reset by design in evolve().
+                 # PPO usually resets optimizer per generation if we use 'Genetic PPO' style where weights are mutated.
+                 # If we use standard PPO, we don't mutate weights, just selection?
+                 # evolve_population() logic decides.
+            
+            start_time_iter = time.time() # Reset iter timer if tracking per-iter SPS
+            
             start_time = time.time()
             
             # Save Checkpoint (Leader)

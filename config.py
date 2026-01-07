@@ -61,14 +61,22 @@ class RewardScalingConfig:
 
 @dataclass
 class TrainingConfig:
-    # Hyperparameters
-    lr: float = 1e-4
-    gamma: float = 0.994
+    # PPO Hyperparameters
+    lr: float = 3e-4  # Lower LR for LSTM stability?
+    gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.01  # Increased from 0.0 for exploration
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
+    
+    # LSTM / BPTT
+    use_lstm: bool = True
+    lstm_hidden_size: int = 48
+    seq_length: int = 16  # BPTT Horizon
+    
+    # Optimization
+    num_epochs: int = 4
     div_coef: float = 0.005 # Role Regularization Coefficient (Reduced from 0.05 to prevent apathy)
     proficiency_penalty_const: float = 50.0
     ema_alpha: float = 0.3

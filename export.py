@@ -5,81 +5,12 @@ import argparse
 import sys
 import numpy as np
 import os
+import json
 from models.deepsets import PodAgent
 from config import *
 
 # Constants
 MAX_CHARS = 100000
-
-def fuse_normalization_pilot(model, rms_stats):
-    """
-    Fuses RMS stats into PilotNet.
-    Input: Self(15) + CP(6) = 21
-    """
-    print("Fusing Pilot Normalization...")
-    # Get Stats
-    mean_s, std_s = get_ms(rms_stats['self'])
-    mean_c, std_c = get_ms(rms_stats['cp'])
-    
-    # Layer 0: Linear(21 -> 32)
-    layer = model.net[0]
-    W = layer.weight.data.cpu().numpy()
-    b = layer.bias.data.cpu().numpy()
-    
-    # Split W: [32, 21] -> [32, 15] (Self), [32, 6] (CP)
-    W_self = W[:, 0:15]
-    W_cp   = W[:, 15:21]
-    
-    # Fuse Self
-    W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
-    
-    # Fuse CP
-    W_cp_new, shift_cp = fuse_layer_section(W_cp, mean_c, std_c)
-    
-    # Reassemble
-    W_new = np.concatenate([W_self_new, W_cp_new], axis=1)
-    b_new = b - shift_self - shift_cp
-    
-    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
-    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
-
-def fuse_normalization_commander(model, rms_stats):
-    """
-    Fuses RMS stats into CommanderNet.
-    Encoder Input: Enemy/Team (13)
-    Backbone Input: Self(15) + Latents...
-    """
-    print("Fusing Commander Normalization...")
-    mean_s, std_s = get_ms(rms_stats['self'])
-    mean_e, std_e = get_ms(rms_stats['ent']) # Used for both Team and Enemy
-    
-    # 1. Encoder Layer 0: Linear(13 -> 32)
-    layer = model.encoder[0]
-    W = layer.weight.data.cpu().numpy()
-    b = layer.bias.data.cpu().numpy()
-    
-    W_new, shift = fuse_layer_section(W, mean_e, std_e)
-    b_new = b - shift
-    
-    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
-    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
-    
-    # 2. Backbone Layer 0: Linear(47 -> 64)
-    # Input: Self(15) + TM(16) + EN(16)
-    layer = model.backbone[0]
-    W = layer.weight.data.cpu().numpy()
-    b = layer.bias.data.cpu().numpy()
-    
-    W_self = W[:, 0:15]
-    W_rest = W[:, 15:] # Latents are normalized by activations, not input stats
-    
-    W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
-    
-    W_new = np.concatenate([W_self_new, W_rest], axis=1)
-    b_new = b - shift_self
-    
-    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
-    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
 
 def get_ms(sd):
     mean = sd['mean'].cpu().numpy()
@@ -90,41 +21,142 @@ def get_ms(sd):
 def fuse_layer_section(W, mean, std, threshold=0.05):
     W_new = np.zeros_like(W)
     safe_mask = std > threshold
-    
-    # If std is too small, feature is constant -> W_new=0 (ignore strictly)
-    # or we could keep it if we trust the small std, but 0.05 is safe.
     W_new[:, safe_mask] = W[:, safe_mask] / std[None, safe_mask]
-    
     shift = np.sum(W_new * mean[None, :], axis=1)
     return W_new, shift
 
+def fuse_normalization_pilot(pilot, rms_stats):
+    """
+    Fuses RMS stats into Pilot Embed.
+    Input: Self(15) + CP(6) = 21
+    Target: pilot.pilot_embed[0] (Linear 21->64)
+    """
+    print("Fusing Pilot Normalization...")
+    mean_s, std_s = get_ms(rms_stats['self'])
+    mean_c, std_c = get_ms(rms_stats['cp'])
+    
+    layer = pilot.pilot_embed[0]
+    W = layer.weight.data.cpu().numpy()
+    b = layer.bias.data.cpu().numpy()
+    
+    # Split W: [64, 21] -> [64, 15], [64, 6]
+    W_self = W[:, 0:15]
+    W_cp   = W[:, 15:21]
+    
+    W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
+    W_cp_new, shift_cp = fuse_layer_section(W_cp, mean_c, std_c)
+    
+    W_new = np.concatenate([W_self_new, W_cp_new], axis=1)
+    b_new = b - shift_self - shift_cp
+    
+    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
+    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
+
+def fuse_normalization_commander(actor, rms_stats):
+    """
+    Fuses RMS stats into Commander components.
+    1. Enemy Encoder (Linear 13->32) -> RMS(Ent)
+    2. Commander Backbone (Linear 63->128) -> RMS(Self)
+    """
+    print("Fusing Commander Normalization...")
+    mean_s, std_s = get_ms(rms_stats['self'])
+    mean_e, std_e = get_ms(rms_stats['ent'])
+    
+    # 1. Enemy Encoder [0] (13 -> 32)
+    layer = actor.enemy_encoder[0]
+    W = layer.weight.data.cpu().numpy()
+    b = layer.bias.data.cpu().numpy()
+    
+    W_new, shift = fuse_layer_section(W, mean_e, std_e)
+    b_new = b - shift
+    
+    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
+    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
+    
+    # 2. Backbone [0] (63 -> 128)
+    # Input: Self(15) + Team(16) + Ctx(16) + Role(16)
+    layer = actor.commander_backbone[0]
+    W = layer.weight.data.cpu().numpy()
+    b = layer.bias.data.cpu().numpy()
+    
+    W_self = W[:, 0:15]
+    W_rest = W[:, 15:]
+    
+    W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
+    
+    W_new = np.concatenate([W_self_new, W_rest], axis=1)
+    b_new = b - shift_self
+    
+    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
+    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
+
+def extract_layer(layer, bias=True):
+    w = layer.weight.data.cpu().numpy().flatten()
+    if bias and layer.bias is not None:
+        b = layer.bias.data.cpu().numpy().flatten()
+        return np.concatenate([w, b])
+    return w
+
 def quantize_weights(actor):
     """
-    Extracts and quantizes weights from Universal Actor.
+    Traverses the New Layout and extracts weights.
+    Structure:
+     1. Pilot Embed (2 layers)
+     2. Enemy Enc (2 layers)
+     3. Role Emb (No bias)
+     4. Cmd Backbone (2 layers)
+     5. LSTM (Wi, Wh, bi, bh)
+     6. Heads (4 layers)
     """
     weights = []
     
-    # Pilot (Hidden 64)
-    # pilot.net[0], pilot.net[2], pilot.net[4] (NEW), heads
-    for layer in [actor.pilot.net[0], actor.pilot.net[2], actor.pilot.net[4], actor.pilot.head_thrust, actor.pilot.head_angle]:
-        weights.extend(extract_layer(layer))
-        
-    # Extra: Role Embedding (No Bias)
-    # [2, 16]
+    # 1. Pilot Embed
+    # [0], [2]
+    weights.extend(extract_layer(actor.pilot_embed[0]))
+    weights.extend(extract_layer(actor.pilot_embed[2]))
+    
+    # 2. Enemy Enc
+    # [0], [2]
+    weights.extend(extract_layer(actor.enemy_encoder[0]))
+    weights.extend(extract_layer(actor.enemy_encoder[2]))
+    
+    # 3. Role Emb
     weights.extend(actor.role_embedding.weight.data.cpu().numpy().flatten())
+    
+    # 4. Cmd Backbone
+    # [0], [2]
+    weights.extend(extract_layer(actor.commander_backbone[0]))
+    weights.extend(extract_layer(actor.commander_backbone[2]))
+    
+    # 5. LSTM
+    # input_size=128, hidden=64.
+    # We want: Wi(256, 128), Wh(256, 64), B(256)
+    lstm = actor.lstm
+    # PyTorch stores: weight_ih_l0, weight_hh_l0, bias_ih_l0, bias_hh_l0
+    # CustomLSTM stores: ih.weight, hh.weight, ih.bias, hh.bias
+    if hasattr(lstm, 'weight_ih_l0'): # Legacy nn.LSTM support
+        wi = lstm.weight_ih_l0.data.cpu().numpy().flatten()
+        wh = lstm.weight_hh_l0.data.cpu().numpy().flatten()
+        bi = lstm.bias_ih_l0.data.cpu().numpy()
+        bh = lstm.bias_hh_l0.data.cpu().numpy()
+    else: # CustomLSTM
+        wi = lstm.ih.weight.data.cpu().numpy().flatten()
+        wh = lstm.hh.weight.data.cpu().numpy().flatten()
+        bi = lstm.ih.bias.data.cpu().numpy()
+        bh = lstm.hh.bias.data.cpu().numpy()
         
-    # Commander (Hidden 128)
-    # encoder[0], encoder[2], backbone[0], backbone[2]
-    # head_shield, head_boost, head_bias_thrust, head_bias_angle
-    c_layers = [
-        actor.commander.encoder[0], actor.commander.encoder[2],
-        actor.commander.backbone[0], actor.commander.backbone[2], actor.commander.backbone[4],
-        actor.commander.head_shield, actor.commander.head_boost,
-        actor.commander.head_bias_thrust, actor.commander.head_bias_angle
-    ]
-    for layer in c_layers:
-        weights.extend(extract_layer(layer))
-        
+    b = bi + bh
+    
+    weights.extend(wi)
+    weights.extend(wh)
+    weights.extend(b)
+    
+    # 6. Heads
+    weights.extend(extract_layer(actor.head_thrust))
+    weights.extend(extract_layer(actor.head_angle))
+    weights.extend(extract_layer(actor.head_shield))
+    weights.extend(extract_layer(actor.head_boost))
+    
     # Quantize
     min_val, max_val = min(weights), max(weights)
     scale = max(abs(min_val), abs(max_val)) / 127.0
@@ -137,16 +169,7 @@ def quantize_weights(actor):
         
     return quantized, scale
 
-def extract_layer(layer):
-    w = layer.weight.data.cpu().numpy().flatten()
-    if layer.bias is not None:
-        b = layer.bias.data.cpu().numpy().flatten()
-    else:
-        b = np.zeros(layer.out_features)
-    return np.concatenate([w, b])
-
 def encode_data(quantized_data):
-    # Base85 Encoding as per existing logic
     byte_valid = []
     for q in quantized_data:
         if q < 0: byte_valid.append(q + 256)
@@ -165,14 +188,10 @@ def encode_data(quantized_data):
         for c in chars: encoded_str += chr(c + 33)
     return encoded_str
 
-# Minify the physics code for embedding
 def minify_code(code):
     import re
-    # Remove comments
     code = re.sub(r'#.*', '', code)
-    # Remove empty lines
     code = re.sub(r'\n\s*\n', '\n', code)
-    # Remove leading/trailing whitespace
     code = code.strip()
     return code
 
@@ -227,10 +246,9 @@ def sim(pods, cps, acts):
     return pods
 """
 
+# --- UPDATED TEMPLATE ---
 SINGLE_FILE_TEMPLATE = """import sys, math
-W,H = {WIDTH},{HEIGHT}
-SP = 1.0/{WIDTH}.0
-SV = 1.0/1000.0
+SP=1.0/{WIDTH}.0; SV=1.0/1000.0
 
 # --- FAST PHYSICS ---
 {FAST_PHYSICS}
@@ -238,7 +256,8 @@ SV = 1.0/1000.0
 
 class N:
     def __init__(self,d,s):
-        self.w = self.dec(d,s); self.c = 0
+        self.w=self.dec(d,s); self.c=0
+        self.h=[0.0]*{LSTM}; self.C=[0.0]*{LSTM} # LSTM State
     def dec(self,b,s):
         w,v,cnt=[],0,0
         for c in b:
@@ -250,57 +269,114 @@ class N:
                 v,cnt=0,0
         return w
     def gw(self,n): r=self.w[self.c:self.c+n]; self.c+=n; return r
-    def lin(self,x,i,o,r=False):
-        w,b,out=self.gw(i*o),self.gw(o),[]
+    def lin(self,x,i,o,bias=True,relu=False):
+        w,b,out=self.gw(i*o), self.gw(o) if bias else [0.0]*o, []
         for k in range(o):
             a=b[k]
             for j in range(i): a+=x[j]*w[k*i+j]
-            out.append(max(0.0,a) if r else a)
+            out.append(max(0.0,a) if relu else a)
         return out
     def emb(self, idx, dim):
-        # Embedding: [2, dim] flattened. No bias.
         w = self.gw(2 * dim)
-        start = int(idx) * dim
-        return w[start : start+dim]
+        s = int(idx) * dim
+        return w[s : s+dim]
+    def lstm(self, x):
+        # x(128) -> h({LSTM}), c({LSTM})
+        # Weights: Wi({GATES}, 128), Wh({GATES}, {LSTM}), B({GATES})
+        # Flattened gates: i, f, g, o
+        wi = self.lin(x, 128, {GATES}, bias=False, relu=False) # Consumes Wi
+        wh = self.lin(self.h, {LSTM}, {GATES}, bias=False, relu=False) # Consumes Wh
+        b = self.gw({GATES})
+        
+        nc, nh = [], []
+        for k in range({LSTM}):
+            # Extract gate components
+            # Offset k for each gate block (0..LSTM-1)
+            # Order: i, f, g, o
+            
+            idx_i, idx_f, idx_g, idx_o = k, {LSTM}+k, 2*{LSTM}+k, 3*{LSTM}+k
+            
+            gate_i = wi[idx_i] + wh[idx_i] + b[idx_i]
+            gate_f = wi[idx_f] + wh[idx_f] + b[idx_f]
+            gate_g = wi[idx_g] + wh[idx_g] + b[idx_g]
+            gate_o = wi[idx_o] + wh[idx_o] + b[idx_o]
+            
+            sig_i = 1.0/(1.0+math.exp(-gate_i))
+            sig_f = 1.0/(1.0+math.exp(-gate_f))
+            sig_o = 1.0/(1.0+math.exp(-gate_o))
+            tanh_g = math.tanh(gate_g)
+            
+            new_c = sig_f * self.C[k] + sig_i * tanh_g
+            new_h = sig_o * math.tanh(new_c)
+            
+            nc.append(new_c); nh.append(new_h)
+            
+        self.C, self.h = nc, nh
+        return nh
 
 class B(N):
-    def f(self,s,t,e,c,role):
+    def f(self,s,t,e,c,role,reset):
         self.c=0
-        hp={HP}
-        x=s+c; x=self.lin(x,21,hp,True); x=self.lin(x,hp,hp,True); x=self.lin(x,hp,hp,True)
-        th_p=self.lin(x,hp,1)[0]; an_p=self.lin(x,hp,1)[0]
+        if reset: self.h=[0.0]*{LSTM}; self.C=[0.0]*{LSTM}
         
-        # Read Role Emb
-        r_emb=self.emb(role, 16)
+        # 1. Pilot Embed
+        # 21->64(R)->64(R)
+        p = s+c # 21
+        p = self.lin(p, 21, 64, True, True)
+        p = self.lin(p, 64, 64, True, True)
         
-        w1,b1,w2,b2=self.gw(416),self.gw(32),self.gw(512),self.gw(16)
+        # 2. Enemy Enc
+        # 13->32(R)->16(Ctx)
+        # Shared weights, need to cache
+        w1, b1 = self.gw(13*32), self.gw(32)
+        w2, b2 = self.gw(32*16), self.gw(16)
+        
         def enc(inp):
-            h=[0.0]*32
+            # Manual Lin apply
+            h=[]
             for r in range(32):
                 a=b1[r]
                 for j in range(13): a+=inp[j]*w1[r*13+j]
-                h[r]=max(0.0,a)
-            z=[0.0]*16
+                h.append(max(0.0,a))
+            z=[]
             for r in range(16):
                 a=b2[r]
                 for j in range(32): a+=h[j]*w2[r*32+j]
-                z[r]=a
+                z.append(a) # No Activation
             return z
-        tm=enc(t); encs=[enc(en) for en in e]
+
+        # Teammate 
+        tm = enc(t)
+        
+        # Enemies (Max Pool)
+        encs=[enc(en) for en in e]
         ctx=[max(x[i] for x in encs) for i in range(16)] if encs else [0.0]*16
         
-        hc={HC}
-        # Input to Backbone: Self(15) + Team(16) + Enf(16) + Role(16) = 63
-        x=s+tm+ctx+r_emb
-        x=self.lin(x,63,hc,True); x=self.lin(x,hc,hc,True); x=self.lin(x,hc,hc,True)
-        sh=self.lin(x,hc,2); bo=self.lin(x,hc,2)
-        b_th=self.lin(x,hc,1)[0]; b_an=self.lin(x,hc,1)[0]
+        # 3. Role
+        r_emb = self.emb(role, 16)
         
-        ft = 1.0/(1.0+math.exp(-(th_p + b_th)))
-        sum_a = an_p + b_an
-        fa = (math.exp(2*sum_a)-1)/(math.exp(2*sum_a)+1)
+        # 4. Cmd Backbone
+        # 63->128(R)->64(R)
+        cmd_in = s + tm + ctx + r_emb
+        cmd = self.lin(cmd_in, 63, 128, True, True)
+        cmd = self.lin(cmd, 128, 64, True, True)
         
-        return [ft, fa, 1 if sh[1]>sh[0] else 0, 1 if bo[1]>bo[0] else 0]
+        # 5. LSTM
+        # Input: Pilot(64) + Cmd(64) = 128
+        lstm_in = p + cmd
+        lstm_out = self.lstm(lstm_in) # Returns new h
+        
+        # 6. Heads
+        # Linear {LSTM}->N
+        th_l = self.lin(lstm_out, {LSTM}, 1, True, False)[0]
+        an_l = self.lin(lstm_out, {LSTM}, 1, True, False)[0]
+        sh_l = self.lin(lstm_out, {LSTM}, 2, True, False)
+        bo_l = self.lin(lstm_out, {LSTM}, 2, True, False)
+        
+        ft = 1.0/(1.0+math.exp(-th_l))
+        fa = math.tanh(an_l)
+        
+        return [ft, fa, 1 if sh_l[1]>sh_l[0] else 0, 1 if bo_l[1]>bo_l[0] else 0]
 
 blob="{BLOB_UNIV}"; scale={SCALE_VAL}
 
@@ -311,7 +387,6 @@ def tl(vx,vy,a):
 
 def solve():
     mr=B(blob,scale)
-
     if sys.version_info.minor >= 0: 
         try: input() 
         except: pass
@@ -407,16 +482,21 @@ def solve():
             ocp=[ftf,ftr,cf*SP,cr*SP,0.0,0.0]
             
             # Use Single Brain with Role Input
+            # Reset Check: If New Episode or Respawn or First Step
+            # For submission, we can't easily detect Episode change except external var.
+            # But the loop runs continuously.
+            # "Game Loop" implies persistence.
+            # We should reset if 'to' is high? or just never reset.
+            # Never reset is safer for continuity.
+            
             role_val = 1.0 if run[i] else 0.0
-            out = mr.f(oself,otm,oen,ocp, role_val)
+            out = mr.f(oself,otm,oen,ocp, role_val, False)
             
             rl_th = int(out[0]*100)
             rl_ang = out[1]*18.0
             rl_sh = (out[2]==1)
             rl_bo = (out[3]==1)
             
-            # NN output is Relative Angle (Delta).
-            # We need Absolute Angle for the Search Candidate (Target Heading).
             current_abs_angle = pods[i]['a']
             rl_abs_angle = current_abs_angle + rl_ang
             
@@ -449,14 +529,12 @@ def solve():
                 score += (fp['n'] + fp['laps']*len(cps)) * 50000 - dist
                 
                 if (run[i]):
-                     # Runner
                      dx, dy = cp_pos[0]-fp['x'], cp_pos[1]-fp['y']
                      t_ang = math.degrees(math.atan2(dy, dx))
                      d_a = abs(t_ang - fp['a'])
                      while d_a > 180: d_a = 360 - d_a
                      score -= d_a * 10
                 else:
-                     # Blocker: Stick to RL logic more?
                      d_a_rl = abs(ang - rl_ang)
                      score -= d_a_rl * 50
                 
@@ -482,10 +560,55 @@ def solve():
 if __name__=="__main__": solve()
 """
 
+# Re-include helper functions (find_best_checkpoint) unchanged or adjusted to not depend on HP/HC
+def find_best_checkpoint():
+    league_path = "data/league.json"
+    if not os.path.exists(league_path):
+        print(f"Error: {league_path} not found. Cannot use --auto.")
+        sys.exit(1)
+        
+    try:
+        with open(league_path, "r") as f:
+            registry = json.load(f)
+    except Exception as e:
+        print(f"Error reading league.json: {e}")
+        sys.exit(1)
+        
+    if not registry:
+        print("Error: League registry is empty.")
+        sys.exit(1)
+        
+    valid_entries = [e for e in registry if "step" in e and "metrics" in e and "wins_ema" in e["metrics"]]
+    
+    if not valid_entries:
+        print("Error: No valid entries with metrics found in league.")
+        sys.exit(1)
+        
+    max_step = max(e["step"] for e in valid_entries)
+    latest_gen = [e for e in valid_entries if e["step"] == max_step]
+    latest_gen.sort(key=lambda x: x["metrics"]["wins_ema"], reverse=True)
+    
+    best_agent = latest_gen[0]
+    print(f"Auto-selected Best Agent: {best_agent['id']} | Gen: {max_step} | Win Rate: {best_agent['metrics']['wins_ema']:.4f}")
+    
+    if "data/checkpoints/" in best_agent["path"]:
+        filename = os.path.basename(best_agent["path"])
+        parts = filename.replace(".pt", "").split("_")
+        if len(parts) >= 4 and parts[0] == "gen" and parts[2] == "agent":
+            gen_id = parts[1]
+            agent_id = parts[3]
+            base_data = "data"
+            for stage in os.listdir(base_data):
+                if stage.startswith("stage_"):
+                    potential_path = os.path.join(base_data, stage, f"gen_{gen_id}", f"agent_{agent_id}.pt")
+                    if os.path.exists(potential_path):
+                        print(f"Resolved original path: {potential_path} (Contains RMS stats)")
+                        return potential_path
+                        
+    return best_agent["path"]
 
 def export_model(model_path, output_path="submission.py"):
     # Load Model
-    # Since we changed defaults to 64, this should be fine
     agent = PodAgent() 
     try:
         agent.load_state_dict(torch.load(model_path, map_location='cpu'))
@@ -505,11 +628,8 @@ def export_model(model_path, output_path="submission.py"):
         print(f"Loading RMS stats from {rms_path}")
         rms_stats = torch.load(rms_path, map_location='cpu')
         
-        fuse_normalization_pilot(agent.actor.pilot, rms_stats)
-        fuse_normalization_commander(agent.actor.commander, rms_stats)
-        
-        # fuse_normalization_pilot(agent.blocker_actor.pilot, rms_stats)
-        # fuse_normalization_commander(agent.blocker_actor.commander, rms_stats)
+        fuse_normalization_pilot(agent.actor, rms_stats)
+        fuse_normalization_commander(agent.actor, rms_stats)
     else:
         print("WARNING: No RMS stats found!")
             
@@ -521,20 +641,25 @@ def export_model(model_path, output_path="submission.py"):
     # Escape
     univ_esc = enc_univ.replace("\\", "\\\\").replace("\"", "\\\"")
     
-    # Retrieve Hidden Dims
-    hp = agent.actor.pilot.hidden_dim
-    hc = agent.actor.commander.hidden_dim
-    
     # Minify Physics
+    # Import FAST_PHYSICS_CODE from where? It was inline string in original file.
+    # Re-declare it.
     fast_phys = minify_code(FAST_PHYSICS_CODE)
     
+    
+    # Retrieve Dims
+    hp = agent.actor.pilot_embed[0].out_features # 64
+    hc = agent.actor.commander_backbone[2].out_features # 64
+    lstm_h = agent.actor.lstm.hidden_size # 48
+    gates = 4 * lstm_h # 192
+
     script = SINGLE_FILE_TEMPLATE.replace("{BLOB_UNIV}", univ_esc)\
         .replace("{SCALE_VAL}", str(scale_univ))\
         .replace("{WIDTH}", str(WIDTH))\
         .replace("{HEIGHT}", str(HEIGHT))\
-        .replace("{HP}", str(hp))\
-        .replace("{HC}", str(hc))\
-        .replace("{FAST_PHYSICS}", fast_phys)
+        .replace("{FAST_PHYSICS}", fast_phys)\
+        .replace("{LSTM}", str(lstm_h))\
+        .replace("{GATES}", str(gates))
     
     with open(output_path, 'w') as f:
         f.write(script)
@@ -545,11 +670,20 @@ def export_model(model_path, output_path="submission.py"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True, help="Path to .pt model")
+    parser.add_argument("--model", type=str, help="Path to .pt model")
     parser.add_argument("--out", type=str, default="submission.py")
+    parser.add_argument("--auto", action="store_true", help="Automatically select best checkpoint from league.json")
     args = parser.parse_args()
     
-    export_model(args.model, args.out)
+    if args.auto:
+        model_path = find_best_checkpoint()
+    elif args.model:
+        model_path = args.model
+    else:
+        print("Error: Must specify --model or --auto")
+        sys.exit(1)
+    
+    export_model(model_path, args.out)
 
 if __name__ == "__main__":
     main()

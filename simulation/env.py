@@ -377,6 +377,24 @@ class PodRacerEnv:
                 self.is_runner[env_ids, pod_idx] = is_run
             return
 
+        # [FIX] Force Fixed Roles for Stage 3 (Intercept) and Stage 4 (Team)
+        # We generally train specialized agents. Dynamic swapping ruins the Blocker's identity.
+        # Stage 3 is Blocker Academy -> Fixed Roles.
+        # Stage 4 is Team -> Fixed Roles (unless explicit "Dynamic" mode requested, which is not yet supported).
+        # Stage 5 (League) -> Maybe Dynamic? Let's keep it safe for now: Fixed everywhere except League?
+        # Let's enforce it for Stage 3 & 4.
+        if self.curriculum_stage >= STAGE_INTERCEPT and self.curriculum_stage <= STAGE_TEAM:
+             # Pod 0: Runner (True)
+             # Pod 1: Blocker (False)
+             # Pod 2: Runner (True)
+             # Pod 3: Blocker (False)
+             
+             self.is_runner[env_ids, 0] = True
+             self.is_runner[env_ids, 1] = False
+             self.is_runner[env_ids, 2] = True
+             self.is_runner[env_ids, 3] = False
+             return
+
         # Calculate Progress Score
         # Score = Laps * 1000 + NextCP * 10 + (1 - Dist/20000)
         # Higher is better
@@ -627,7 +645,14 @@ class PodRacerEnv:
             
             # Apply Progress Reward
             # Note: 1 unit distance = 1 point if weight=1.0. 
-            rewards_indiv[:, i] += progress * w_progress * dense_mult
+            # Apply Progress Reward
+            # Note: 1 unit distance = 1 point if weight=1.0. 
+            # [FIX] Mask for Blockers in Stage 3+
+            if self.curriculum_stage >= STAGE_INTERCEPT:
+                is_run = self.is_runner[:, i].float()
+                rewards_indiv[:, i] += progress * w_progress * dense_mult * is_run
+            else:
+                rewards_indiv[:, i] += progress * w_progress * dense_mult
             
             # --- B. Magnet Reward (Proximity Center) ---
             # If inside Approach Radius (e.g. 2 * Checkpoint Radius or just Checkpoint Radius?)
@@ -640,7 +665,16 @@ class PodRacerEnv:
                 # Score 0.0 to 1.0 (Close)
                 magnet_score = (1.0 - (dist[in_magnet_mask] / MAGNET_RADIUS))
                 # Square it to make the center much more attractive than the edge? No, linear is stable.
-                rewards_indiv[in_magnet_mask, i] += magnet_score * w_magnet[in_magnet_mask] * dense_mult
+                # Score 0.0 to 1.0 (Close)
+                magnet_score = (1.0 - (dist[in_magnet_mask] / MAGNET_RADIUS))
+                # Square it to make the center much more attractive than the edge? No, linear is stable.
+                
+                # [FIX] Mask for Blockers
+                if self.curriculum_stage >= STAGE_INTERCEPT:
+                     is_run = self.is_runner[in_magnet_mask, i].float()
+                     rewards_indiv[in_magnet_mask, i] += magnet_score * w_magnet[in_magnet_mask] * dense_mult * is_run
+                else:
+                     rewards_indiv[in_magnet_mask, i] += magnet_score * w_magnet[in_magnet_mask] * dense_mult
         
         # --- C. Orientation Reward (Soft Guidance / Wrong Way) ---
         if w_orient.sum() > 0.0 or w_wrong_way.sum() > 0.0:
@@ -659,7 +693,15 @@ class PodRacerEnv:
                 if w_orient.sum() > 0.0:
                     THRESHOLD = self.reward_scaling_config.orientation_threshold
                     pos_score = torch.clamp((alignment - THRESHOLD) / (1.0 - THRESHOLD), 0.0, 1.0)
-                    rewards_indiv[:, i] += pos_score * w_orient * dense_mult
+                    THRESHOLD = self.reward_scaling_config.orientation_threshold
+                    pos_score = torch.clamp((alignment - THRESHOLD) / (1.0 - THRESHOLD), 0.0, 1.0)
+                    
+                    # [FIX] Mask for Blockers
+                    if self.curriculum_stage >= STAGE_INTERCEPT:
+                         is_run = self.is_runner[:, i].float()
+                         rewards_indiv[:, i] += pos_score * w_orient * dense_mult * is_run
+                    else:
+                         rewards_indiv[:, i] += pos_score * w_orient * dense_mult
 
                 # Negative Penalty (Wrong Way)
                 neg_mask = alignment < -0.5 # Strictly facing away
@@ -685,6 +727,14 @@ class PodRacerEnv:
             # w_rank is [N]. Expand.
             # FIX: Only apply to Runners. Blockers should not be penalized for losing rank (ambush).
             is_runner_mask = self.is_runner.float() # [B, 4]
+            # Apply Reward for each pod
+            # Note: rank_diff is [N, 4]
+            # w_rank is [N]. Expand.
+            # FIX: Only apply to Runners. Blockers should not be penalized for losing rank (ambush).
+            # [FIX] Already had is_runner_mask logic planned, ensuring it is used.
+            is_runner_mask = self.is_runner.float() # [B, 4]
+            # If Stage < 3, everyone is runner essentially (or we don't care). 
+            # But is_runner is managed correctly in all stages.
             rewards_indiv += rank_diff.float() * w_rank.unsqueeze(1) * is_runner_mask
             
             # Update state
@@ -785,7 +835,15 @@ class PodRacerEnv:
                 pass_idx = torch.nonzero(passed).squeeze(-1)
                 
                 # Reset timeout
+                # Reset timeout
                 self.timeouts[pass_idx, i] = self.config.timeout_steps 
+                
+                # [FIX] Team Resets: In Stage 4 (Team), Runner resets Blocker's timer too.
+                # Just reset the whole team? Or specifically the teammate?
+                # Teammate index = i ^ 1
+                if self.curriculum_stage >= STAGE_TEAM:
+                     mate_idx = i ^ 1
+                     self.timeouts[pass_idx, mate_idx] = self.config.timeout_steps 
                 
                 # Determine Next CP and Lap Logic
                 # Use cached 'next_ids' (OLD target)
@@ -897,6 +955,13 @@ class PodRacerEnv:
                 
                 # DIRECT REWARD (Individual)
                 # rewards[pass_idx, i] += total_reward
+                
+                # [FIX] Role Preservation: Blockers get ZERO Racing Rewards in Stage 3+
+                # Otherwise they learn to race.
+                if self.curriculum_stage >= STAGE_INTERCEPT: # Stage 3
+                     is_run_mask = self.is_runner[pass_idx, i].float()
+                     total_reward = total_reward * is_run_mask
+                
                 rewards_indiv[pass_idx, i] += total_reward
                 
                 # Correction for Dense Reward Overshoot
@@ -909,7 +974,13 @@ class PodRacerEnv:
                 
                 # Scaling for Dense Reward (Explicit S_VEL)
                 # Correction applies to POD i
-                rewards_indiv[pass_idx, i] += overshoot_dist * w_progress[pass_idx] * dense_mult
+                
+                # [FIX] Role Preservation: Mask Progress too
+                if self.curriculum_stage >= STAGE_INTERCEPT:
+                     is_run_mask = self.is_runner[pass_idx, i].float()
+                     rewards_indiv[pass_idx, i] += overshoot_dist * w_progress[pass_idx] * dense_mult * is_run_mask
+                else:
+                     rewards_indiv[pass_idx, i] += overshoot_dist * w_progress[pass_idx] * dense_mult
 
         # Calculate dist_to_next for Nursery Metric [B, 4]
         # We need distance to next checkpoint for ALL pods, regardless of passing.
@@ -981,7 +1052,15 @@ class PodRacerEnv:
                      
                      penalty = MAX_PENALTY * (1.0 - progress)
                      
-                     rewards_indiv[p_idx, p_i] -= penalty
+                     penalty = MAX_PENALTY * (1.0 - progress)
+                     
+                     # [FIX] Mask Timeout Penalty for Blockers in Stage 3/4
+                     # They are NOT supposed to race. Progress is irrelevant for them.
+                     if self.curriculum_stage >= STAGE_INTERCEPT:
+                          is_run = self.is_runner[p_idx, p_i].float() # [K]
+                          rewards_indiv[p_idx, p_i] -= penalty * is_run
+                     else:
+                          rewards_indiv[p_idx, p_i] -= penalty
         finished = (self.laps >= MAX_LAPS)
         
         if finished.any():

@@ -62,13 +62,10 @@ class CurriculumManager:
          trainer.log(f"*** Curriculum Transition: {self.stages[prev_stage].name} -> {self.stages[next_stage_id].name} ***")
          trainer.log(f"*** Reason: {reason} ***")
          
+         
          # Reset Environment or trigger Mitosis handled by Trainer?
          # Trainer checks (prev != current) loop start and resets.
          # So we just set the state here.
-         
-         if next_stage_id == STAGE_TEAM:
-             # self.perform_mitosis(trainer) # DEPRECATED: Universal Actor shares weights.
-             pass
 
 
 
@@ -81,3 +78,26 @@ class CurriculumManager:
 
     def update_step_penalty(self, base_penalty: float) -> float:
         return self.current_stage.update_step_penalty(base_penalty)
+
+    def update_team_spirit(self, trainer) -> float:
+        """
+        Updates the team_spirit configuration based on stage progress.
+        Stage < 4: 0.0
+        Stage >= 4: Managed via on_evolution_step (Evolution-based annealing)
+        """
+        current = trainer.team_spirit
+        
+        if self.current_stage_id < STAGE_TEAM:
+            current = 0.0
+        # Else: Retain current value (updated via on_evolution_step)
+            
+        return current
+
+    def on_evolution_step(self, trainer):
+        """
+        Called when population evolution occurs.
+        Increments team_spirit by 0.01 if in Team Stage.
+        """
+        if self.current_stage_id >= STAGE_TEAM:
+            # Anneal by +0.01 per evolution
+            trainer.team_spirit = min(1.0, trainer.team_spirit + 0.01)
