@@ -134,6 +134,9 @@ class CurriculumConfig:
     team_graduation_difficulty: float = 0.85
     team_graduation_win_rate: float = 0.70
     team_graduation_checks: int = 5
+    
+    # Team Stage Start Difficulty
+    team_start_difficulty: float = 0.6
  
     # Critical Thresholds (Difficulty Adjustment)
     wr_critical: float = 0.25 # Trigger Difficulty Decrease

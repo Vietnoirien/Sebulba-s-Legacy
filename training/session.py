@@ -91,7 +91,7 @@ class TrainingSession:
             self.trainer = PPOTrainer(logger_callback=self._log_callback)
         return self.trainer
 
-    def start(self, model_name=None, curriculum_mode="auto", curriculum_stage=0, config=None, max_checkpoints=5, perform_mitosis=True):
+    def start(self, model_name=None, curriculum_mode="auto", curriculum_stage=0, config=None, max_checkpoints=5):
         if self.running:
             return
         
@@ -193,18 +193,7 @@ class TrainingSession:
                          # Load RMS Stats
                          self._load_rms_stats(path)
 
-                         # --- OPTIONAL MITOSIS ---
-                         # If explicitly requested and we are in Team Stage (or higher),
-                         # and we loaded a checkpoint (likely from Stage 2 which lacks Blocker training),
-                         # we perform Mitosis: Clone Runner Embedding -> Blocker Embedding.
-                         if perform_mitosis and self.trainer.env.curriculum_stage >= STAGE_TEAM:
-                              self.trainer.log(">>> [MITOSIS] Performing Requested Mitosis on Loaded Population... <<<")
-                              for p in self.trainer.population:
-                                  with torch.no_grad():
-                                      emb = p['agent'].actor.role_embedding.weight
-                                      # Copy Index 1 (Runner) -> Index 0 (Blocker)
-                                      emb[0] = emb[1].clone()
-                              self.trainer.log(">>> [MITOSIS] Completed. Blocker Embeddings Initialized from Runners. <<<")
+
 
                          # IMPORTANT: Sync to Vectorized Stack
                          self.trainer.sync_agents_to_vectorized()

@@ -78,7 +78,8 @@ export const ConfigPanel: React.FC = () => {
         // Stage 3 -> 4
         team_graduation_difficulty: 0.85,
         team_graduation_win_rate: 0.70,
-        team_graduation_checks: 5
+        team_graduation_checks: 5,
+        team_start_difficulty: 0.6
     })
 
     // Presets
@@ -295,6 +296,12 @@ export const ConfigPanel: React.FC = () => {
                                     onChange={(e) => setTransitions(prev => ({ ...prev, team_graduation_win_rate: parseFloat(e.target.value) }))} />
                                 <Slider label="CONSISTENCY CHECKS" min={1} max={10} step={1} value={transitions.team_graduation_checks}
                                     onChange={(e) => setTransitions(prev => ({ ...prev, team_graduation_checks: parseFloat(e.target.value) }))} />
+                            </div>
+
+                            <div className="p-2 border border-gray-700 rounded bg-gray-900/50 space-y-3 mt-2">
+                                <h4 className="text-[10px] text-neon-cyan mb-2">TRAINING CONFIG</h4>
+                                <Slider label="STARTING BOT DIFFICULTY" min={0.0} max={1.0} step={0.05} value={transitions.team_start_difficulty || 0.6} valueDisplay={transitions.team_start_difficulty?.toFixed(2)}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, team_start_difficulty: parseFloat(e.target.value) }))} />
                             </div>
                         </>
                     )}

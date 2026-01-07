@@ -354,7 +354,9 @@ class InterceptStage(Stage):
             if denial_rate > 0.60:
                  trainer.log(">>> Blocker Academy: HIGH PROFIENCY DETECTED (Denial > 60%) <<<")
                  # We can auto-graduate or just log. STAGE_TEAM is next.
-                 # return STAGE_TEAM, f"Denial Rate {denial_rate:.2f} > 0.60"
+                 if trainer.curriculum_mode == "auto":
+                     trainer.env.bot_difficulty = self.config.team_start_difficulty
+                 return STAGE_TEAM, f"Denial Rate {denial_rate:.2f} > 0.60"
 
         return None, ""
 
@@ -440,7 +442,7 @@ class TeamStage(Stage):
             metrics["recent_wins"] = 0
             metrics["recent_episodes"] = 0
             
-            trainer.log(f"Stage 3 (Team) Check: Recent WR {rec_wr*100:.1f}% | Diff: {trainer.env.bot_difficulty:.2f}")
+            trainer.log(f"Stage 4 (Team) Check: Recent WR {rec_wr*100:.1f}% | Diff: {trainer.env.bot_difficulty:.2f}")
             
             auto = (trainer.curriculum_mode == "auto")
             

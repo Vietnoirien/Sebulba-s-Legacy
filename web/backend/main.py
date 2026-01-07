@@ -144,7 +144,6 @@ class StartPayload(BaseModel):
     curriculum_mode: Optional[str] = "auto"
     curriculum_stage: Optional[int] = 0
     max_checkpoints: Optional[int] = 5
-    perform_mitosis: Optional[bool] = True # Default to True
     config: Optional[Dict[str, Any]] = None
 
 @app.post("/api/start")
@@ -154,7 +153,6 @@ async def start_training(payload: StartPayload = None):
     curr_stage = 0
     initial_config = None
     max_cp = 5
-    do_mitosis = True
     
     if payload:
         model_name = payload.model
@@ -162,17 +160,15 @@ async def start_training(payload: StartPayload = None):
         curr_stage = payload.curriculum_stage
         initial_config = payload.config
         max_cp = payload.max_checkpoints if payload.max_checkpoints else 5
-        do_mitosis = payload.perform_mitosis if payload.perform_mitosis is not None else True
 
-    print(f"Starting Training: {model_name} | Stage: {curr_stage} | Mitosis: {do_mitosis}")
+    print(f"Starting Training: {model_name} | Stage: {curr_stage}")
     try:
         session.start(
             model_name=model_name, 
             curriculum_mode=curr_mode, 
             curriculum_stage=curr_stage,
             config=initial_config,
-            max_checkpoints=max_cp,
-            perform_mitosis=do_mitosis
+            max_checkpoints=max_cp
         )
         return {"status": "started", "model": model_name, "curriculum": curr_mode, "stage": curr_stage}
     except Exception as e:

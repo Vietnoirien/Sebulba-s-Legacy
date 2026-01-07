@@ -13,8 +13,7 @@ export const ControlPanel: React.FC = () => {
     const [curriculumMode, setCurriculumMode] = useLocalStorage("spt2_control_curriculumMode", "auto")
     const [curriculumStage, setCurriculumStage] = useLocalStorage<number>("spt2_control_stage_v2", 0)
     const [maxCheckpoints, setMaxCheckpoints] = useLocalStorage("spt2_control_maxCheckpoints", 5)
-    // New: Mitosis Flag (Default true for safety)
-    const [performMitosis, setPerformMitosis] = useState<boolean>(true)
+
 
     const [generations, setGenerations] = useState<any[]>([])
 
