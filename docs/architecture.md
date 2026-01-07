@@ -1,13 +1,13 @@
 # System Architecture
 
 ## Overview
-Sebulba's Legacy is designed as a massive-scale reinforcement learning system running purely on the GPU. By bypassing the CPU bottleneck typically found in Python-based RL, we achieve **~66,000 Steps Per Second** on a single consumer GPU (RTX 5070).
+Sebulba's Legacy is designed as a massive-scale reinforcement learning system running purely on the GPU. By bypassing the CPU bottleneck typically found in Python-based RL, we achieve high-throughput training on a single consumer GPU (RTX 5070).
 
 The core philosophy is **"Sim-to-Tensor"**: the simulation state resides on the GPU as a PyTorch tensor, and the policy network inputs and outputs are consumed directly by the physics engine without ever moving memory to the CPU.
 
 ```mermaid
 graph TD
-    subgraph GPU_ACC ["GPU Acceleration (66k SPS)"]
+    subgraph GPU_ACC ["GPU Acceleration"]
         sim_vec["Vectorized Simulation (8192 Envs)"]
         physics_eng["Custom Physics Engine & Rewards"]
         

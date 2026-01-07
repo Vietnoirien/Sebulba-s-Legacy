@@ -4,7 +4,6 @@
 Unlike standard frameworks that use Box2D or CPU-based physics, Sebulba's Legacy implements a custom, fully differentiable-compatible physics engine directly in PyTorch tensors.
 
 ### Key Specs
-*   **Throughput**: 66,000+ Steps/Second (RTX 5070)
 *   **Capacity**: 8,192 Concurrent Environments
 *   **Precision**: Float32
 *   **Map Size**: 16,000 x 9,000 units

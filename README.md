@@ -1,13 +1,13 @@
 # Sebulba's Legacy (Pod Racer AI)
 
 ![Interface Preview](assets/interface_preview.png)
-*Training 8,192 agents in parallel at 66,000 steps per second.*
+*Massive-scale training of 8,192 agents in parallel.*
 
-## 🏎️ The 66k SPS Super-Learner
+## 🏎️ Vectorized PPO & Multi-Agent Evolution
 
 **Sebulba's Legacy** is a massive-scale Reinforcement Learning system inspired by **OpenAI Five**, designed to solve the *Mad Pod Racing* challenge on CodinGame.
 
-By moving the entire simulation and training pipeline to the GPU (**Sim-to-Tensor**), we bypass Python's CPU bottlenecks, achieving **~66,000 Steps Per Second** on a single consumer GPU (RTX 5070). This allows us to train 8,192 environments in parallel, evolving complex cooperative strategies in hours rather than weeks.
+By moving the entire simulation and training pipeline to the GPU (**Sim-to-Tensor**), we bypass Python's CPU bottlenecks, achieving high-throughput training on a single consumer GPU (RTX 5070). This allows us to train 8,192 environments in parallel, evolving complex cooperative strategies in hours rather than weeks.
 
 ### 📚 Documentation
 *   [**Architecture**](docs/architecture.md): The System Design, Split Backbone, and PPO implementation.

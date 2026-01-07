@@ -2275,7 +2275,7 @@ class PPOTrainer:
             global_step += self.current_num_steps
             elapsed = time.time() - start_time
             if elapsed > 1.0:
-                sps = global_step / elapsed
+                sps = self.current_num_steps / elapsed
             
             # Evolution Step
             if self.iteration % self.current_evolve_interval == 0:
