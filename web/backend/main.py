@@ -212,6 +212,16 @@ async def wipe_checkpoints():
                 os.makedirs(gen_folder, exist_ok=True)
             except Exception as e:
                 print(f"Failed to delete generations: {e}")
+
+        # 2b. Delete Stage-Specific Generations
+        base_dir = "data"
+        if os.path.exists(base_dir):
+            for item in os.listdir(base_dir):
+                if item.startswith("stage_") and os.path.isdir(os.path.join(base_dir, item)):
+                    try:
+                        shutil.rmtree(os.path.join(base_dir, item))
+                    except Exception as e:
+                        print(f"Failed to delete stage folder {item}: {e}")
         
         # 3. Clear Registry & Payoff (In-Memory)
         if session.trainer and session.trainer.league:

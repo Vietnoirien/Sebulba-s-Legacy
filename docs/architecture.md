@@ -13,14 +13,19 @@ graph TD
         
         subgraph agent_model ["Universal Agent"]
             obs_input["Observation"]
-            role_emb["Role Embedding"]
             
-            subgraph unified_brain ["Universal Actor"]
-                pilot_net["PilotNet (Shared Driving)"]
-                commander_net["CommanderNet (Tactics)"]
+            subgraph unified_brain ["Recurrent Split Backbone"]
+                pilot_feat["Pilot Stream (Sensory-Motor)"]
+                cmd_feat["Commander Stream (Contextual)"]
+                
+                lstm_core["LSTM Core (Memory)"]
+                
+                pilot_heads["Pilot Heads"]
+                cmd_heads["Commander Heads"]
             end
             
             enemy_encoder["DeepSets Enemy Encoder"]
+            role_emb["Role Embedding"]
         end
     end
     
@@ -30,13 +35,20 @@ graph TD
         league_mgr["League Manager (PFSP)"]
     end
     
-    sim_vec -- "Self+CP" --> pilot_net
+    sim_vec -- "Self+CP" --> pilot_feat
     sim_vec -- "Enemies" --> enemy_encoder 
-    enemy_encoder --> commander_net
-    sim_vec -- "Self+Team" --> commander_net
+    enemy_encoder --> cmd_feat
+    sim_vec -- "Self+Team" --> cmd_feat
+    role_emb --> cmd_feat
     
-    pilot_net -- "Thrust, Angle" --> sim_vec
-    commander_net -- "Bias, Shield, Boost" --> sim_vec
+    pilot_feat --> lstm_core
+    cmd_feat --> lstm_core
+    
+    lstm_core --> pilot_heads
+    lstm_core --> cmd_heads
+    
+    pilot_heads -- "Thrust, Angle" --> sim_vec
+    cmd_heads -- "Bias, Shield, Boost" --> sim_vec
     
     ppo_trainer -- "Gradients" --> unified_brain
     ga_ctrl -- "Mutations" --> ppo_trainer
@@ -49,23 +61,29 @@ graph TD
 *   **torch.vmap**: Leveraging PyTorch's `vmap` (Vectorizing Map), we compute forward passes and gradients for the entire population (e.g., 64-128 distinct agents) in a single kernels call. State is batched as `[Population, Batch, Features]`.
 *   **Vectorized Adam**: A custom optimizer implementation that updates the parameters of 128 unique neural networks in parallel, supporting per-agent learning rates and independent momentum buffers.
 
-### 2. Universal Actor (The "Split Backbone")
-To fit the 100k character submission limit while maintaining complex behaviors, we use a **True Parameter Sharing** architecture:
+### 2. Universal Actor (The "Recurrent Split Backbone")
+To fit complex team strategies and precise driving into a compact model, we use a **Recurrent Split Backbone** architecture. This design processes immediate sensory data and high-level tactical context separately before fusing them in a memory unit.
 
-*   **PilotNet (The Driver)**: A shared "backbone" network that handles the physics of driving (Thrust, Steering). Both the Runner and the Blocker use this same network.
-*   **CommanderNet (The Tactician)**: A higher-level network that modifies the inputs/outputs of the PilotNet based on the current role.
-*   **Role Embeddings**: A learned vector (`Size 16`) injected into the network.
-    *   `Role=0`: Blocker Mode
-    *   `Role=1`: Runner Mode
-    *   This allows the single brain to switch "mindsets" instantly without duplicating weights.
+*   **Pilot Stream (Reactive)**: A lightweight MLP processing immediate physical state (Velocity, Checkpoints). It focuses on the physics of driving.
+*   **Commander Stream (Tactical)**: A deeper stream processing context-heavy data (Teammates, Enemies, Role). It utilizes DeepSets for permutation-invariant enemy processing and Role Embeddings.
+*   **LSTM Core (Memory)**: Both streams merge into a specialized LSTM. This allows the agent to maintain temporal context (e.g., "I passed the blocker", "I am currently recovering from a collision").
+*   **Heads**:
+    *   **Pilot Heads**: Thrust, Angle.
+    *   **Commander Heads**: Shield, Boost, and Bias adjustments.
 
-### 3. DeepSets Enemy Encoder
+### 3. Role Embeddings
+Instead of training separate networks for different roles, we inject a learned **Role Embedding** (Size 16) into the Commander Stream.
+*   `Role=0`: Blocker Mode
+*   `Role=1`: Runner Mode
+This allows the single "Universal Brain" to switch its tactical behavior instantly based on its assigned role for the episode, while sharing the fundamental driving skills learned by the Pilot Stream. This replaces the legacy "Mitosis" approach, allowing for specialized behaviors without parameter cloning.
+
+### 4. DeepSets Enemy Encoder
 The game can have varying numbers of opponents. We use a **Permutation Invariant** encoder (DeepSets) to process enemy observations.
 1.  Each enemy is processed through an MLP to form a latent representation.
 2.  Latent vectors are summed (or max-pooled) to create a single fixed-size "Enemy Content Vector".
 3.  This vector describes the "threat level" of the race regardless of whether there are 1, 2, or 3 opponents.
 
-### 4. Intrinsic Curiosity (RND)
+### 5. Intrinsic Curiosity (RND)
 We incorporate **Random Network Distillation** to generate intrinsic rewards.
 *   **Target Network**: A fixed, randomly initialized network mapping states to a random output.
 *   **Predictor Network**: Tries to predict the Target Network's output.
