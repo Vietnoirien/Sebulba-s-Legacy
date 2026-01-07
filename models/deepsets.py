@@ -191,7 +191,7 @@ class PodActor(nn.Module):
         self.pilot_embed = nn.Sequential(
             layer_init(nn.Linear(21, 64)),
             nn.ReLU(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(64, 48)), # Reduced to 48
             nn.ReLU()
         )
         
@@ -210,15 +210,15 @@ class PodActor(nn.Module):
         )
         
         self.commander_backbone = nn.Sequential(
-            layer_init(nn.Linear(15 + 16 + 16 + 16 + 32, 128)), # Self+Team+Ctx+Role+Map
+            layer_init(nn.Linear(15 + 16 + 16 + 16 + 32, 96)), # Self+Team+Ctx+Role+Map
             nn.ReLU(),
-            layer_init(nn.Linear(128, 64)), # Output 64 to match Pilot
+            layer_init(nn.Linear(96, 48)), # Reduced to 48
             nn.ReLU()
         )
         
         # 2. LSTM Core
-        # Input: Pilot(64) + Commander(64) = 128
-        self.lstm = CustomLSTM(input_size=128, hidden_size=lstm_hidden)
+        # Input: Pilot(48) + Commander(48) = 96
+        self.lstm = CustomLSTM(input_size=96, hidden_size=lstm_hidden)
         
         # 3. Heads (From LSTM Output)
         # Pilot Heads

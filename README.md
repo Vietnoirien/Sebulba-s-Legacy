@@ -11,6 +11,7 @@ By moving the entire simulation and training pipeline to the GPU (**Sim-to-Tenso
 
 ### 📚 Documentation
 *   [**Architecture**](docs/architecture.md): The System Design, Split Backbone, and PPO implementation.
+*   [**Submission Architecture**](docs/submission.md): The optimizations and micro-inference engine for the 100K Chars export.
 *   [**Simulation**](docs/simulation.md): GPU Physics engine, Predefined Maps, and Constraints.
 *   [**Training**](docs/training.md): Curriculum Stages, PBT, and League mechanics.
 *   [**Research**](docs/research.md): Problem formulation and scholarly context.

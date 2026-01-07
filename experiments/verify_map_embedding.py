@@ -103,7 +103,7 @@ def verify_ppo_loop():
     # Reduced config for speed
     config.num_envs = 64
     config.num_steps = 64
-    config.pop_size = 4
+    config.pop_size = 16
     config.num_minibatches = 4
     config.update_epochs = 1
     
@@ -115,6 +115,14 @@ def verify_ppo_loop():
     print("Starting 1 iteration...")
     trainer.train_loop()
     print("SUCCESS: PPO Loop finished.")
+    
+    # Save checkpoint for export verification
+    os.makedirs("data/dummy", exist_ok=True)
+    save_path = "data/dummy/agent_0.pt"
+    # Need to save state dict of agent 0
+    # trainer.population is list of agents
+    torch.save(trainer.population[0].state_dict(), save_path)
+    print(f"Saved dummy checkpoint to {save_path}")
 
 if __name__ == "__main__":
     verify_map_embedding()
