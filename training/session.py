@@ -352,11 +352,21 @@ class TrainingSession:
                 # Update known keys
                 for k in ["solo_efficiency_threshold", "solo_consistency_threshold",
                           "duel_graduation_difficulty", "duel_graduation_win_rate", "duel_graduation_checks",
+                          "duel_graduation_difficulty", "duel_graduation_win_rate", "duel_graduation_checks",
+                          "duel_graduation_denial_rate", "duel_graduation_blocker_impact",
                           "team_graduation_difficulty", "team_graduation_win_rate", "team_graduation_checks"]:
                      if k in trans:
                          setattr(self.trainer.curriculum_config, k, float(trans[k]))
                 
             print(f"Trainer Config Updated: {self.trainer.reward_config}")
+            
+            if "bot_config" in config:
+                bot_cfg = config["bot_config"]
+                for k in ["intercept_offset_scale", "ramming_speed_scale", "difficulty_noise_scale", "thrust_scale"]:
+                     if k in bot_cfg:
+                         if hasattr(self.trainer.env, "bot_config"):
+                             setattr(self.trainer.env.bot_config, k, float(bot_cfg[k]))
+                print(f"Bot Config Updated: {self.trainer.env.bot_config}")
 
     async def _playback_loop(self):
         print("Starting Playback Loop...")

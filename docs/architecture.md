@@ -74,11 +74,12 @@ To fit complex team strategies and precise driving into a compact model, we use 
     *   **Pilot Heads**: Thrust, Angle.
     *   **Commander Heads**: Shield, Boost, and Bias adjustments.
 
-### 3. Role Embeddings
-Instead of training separate networks for different roles, we inject a learned **Role Embedding** (Size 16) into the Commander Stream.
-*   `Role=0`: Blocker Mode
-*   `Role=1`: Runner Mode
-This allows the single "Universal Brain" to switch its tactical behavior instantly based on its assigned role for the episode, while sharing the fundamental driving skills learned by the Pilot Stream. This replaces the legacy "Mitosis" approach, allowing for specialized behaviors without parameter cloning.
+### 3. Role Embeddings & Contextual Condition
+Instead of separate networks, we use a **Context-Conditioned** approach. A learned **Role Embedding** (Size 16) is concatenated with the core observations before entering the Commander Backbone.
+*   `Role=0`: **Blocker Mode**. Activates weights and behavioral patterns focused on intercepting and colliding with opponents.
+*   `Role=1`: **Runner Mode**. Activates patterns focused on optimal racing lines and speed.
+
+This design allows the "Universal Brain" to share driving fundamentals (via the Pilot Stream) while specializing tactical behavior (via the Commander Stream). Gradients flow back to the specific embedding for the active role, ensuring that "Blocker" successes only optimize the Blocker context.
 
 ### 4. DeepSets Enemy Encoder
 The game can have varying numbers of opponents. We use a **Permutation Invariant** encoder (DeepSets) to process enemy observations.

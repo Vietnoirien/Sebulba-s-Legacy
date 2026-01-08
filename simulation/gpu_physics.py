@@ -109,7 +109,7 @@ class GPUPhysics:
         self.pos += self.vel
         
         # 4. Resolve Collisions
-        collisions = self._resolve_collisions()
+        collisions, collision_vectors = self._resolve_collisions()
         
         # 5. Friction
         self.vel *= FRICTION
@@ -134,7 +134,7 @@ class GPUPhysics:
         # Update counters
         self.shield_cd = torch.clamp(self.shield_cd - 1, min=0)
         
-        return collisions
+        return collisions, collision_vectors
 
     def _resolve_collisions(self):
         K = 4
@@ -145,6 +145,8 @@ class GPUPhysics:
         # Track impacts: [Batch, 4, 4]
         # matrix[b, i, j] = accumulated impulse magnitude between i and j
         impacts = torch.zeros((self.num_envs, 4, 4), device=self.device)
+        # impact_vectors[b, i, j, :] = accumulated impulse vector J acting on i from j
+        impact_vectors = torch.zeros((self.num_envs, 4, 4, 2), device=self.device)
         
         for _ in range(K):
             # Gather P1, P2 [Batch, 6, 2]
@@ -212,6 +214,21 @@ class GPUPhysics:
                 val = curr_impact[:, k]
                 impacts[:, i1, i2] += val
                 impacts[:, i2, i1] += val
+                
+                # Accumulate vectors
+                # j is impulse on p1. -j is impulse on p2.
+                # j has shape [Batch, 6, 2]. Masked by mask_coll.
+                # We need to broadcast mask_coll to [Batch, 6, 2]? No, j is already calculated with mask logic conceptually
+                # (actually j calc used mask_coll.unsqueeze(-1)).
+                
+                # Vector for pair k: j[:, k, :]
+                vec_j = j[:, k, :] # [Batch, 2]
+                
+                # impact_vectors[b, i1, i2] += vec_j
+                impact_vectors[:, i1, i2, :] += vec_j
+                
+                # impact_vectors[b, i2, i1] += (-vec_j)
+                impact_vectors[:, i2, i1, :] -= vec_j
             
             # Separation
             overlap = min_dist - dist
@@ -250,4 +267,4 @@ class GPUPhysics:
             self.vel += d_vel
             self.pos += d_pos
             
-        return impacts
+        return impacts, impact_vectors

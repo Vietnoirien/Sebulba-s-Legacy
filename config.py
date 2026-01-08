@@ -21,10 +21,9 @@ MIN_CHECKPOINTS = 3
 # Curriculum Stages
 STAGE_NURSERY = 0 # Learn to drive (No penalties)
 STAGE_SOLO = 1    # Time Trial (Speed focus)
-STAGE_DUEL = 2    # 1v1
-STAGE_INTERCEPT = 3 # Blocker Academy (PvE Blocking)
-STAGE_TEAM = 4    # 2v2
-STAGE_LEAGUE = 5  # Competitive
+STAGE_DUEL_FUSED = 2 # Unified Duel (Running + Blocking)
+STAGE_TEAM = 3    # 2v2
+STAGE_LEAGUE = 4  # Competitive
 
 # Graduation Thresholds
 # Stage 0 (Nursery) -> 1 (Solo)
@@ -46,8 +45,10 @@ from typing import List, Optional, Dict
 @dataclass
 class BotConfig:
     difficulty_noise_scale: float = 30.0
-    thrust_base: float = 20.0
-    thrust_scale: float = 80.0
+    thrust_base: float = 40.0 # Increased from 20.0
+    thrust_scale: float = 60.0 # Reduced from 80.0 (Total max 100)
+    intercept_offset_scale: float = 500.0
+    ramming_speed_scale: float = 20.0
 
 @dataclass
 class SpawnConfig:
@@ -95,7 +96,7 @@ class TrainingConfig:
     
     # Batch Size Config (Per Agent)
     update_epochs: int = 4
-    num_minibatches: int = 128
+    num_minibatches: int = 256
     
     @property
     def envs_per_agent(self) -> int:
@@ -131,12 +132,15 @@ class CurriculumConfig:
     solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
     solo_min_win_rate: float = 0.90
     
-    # Stage 2 (Duel) -> 3 (Team) Graduation
-    # Graduation triggers when Bot Difficulty >= graduation_difficulty
-    # AND Win Rate >= graduation_win_rate for graduation_checks
-    duel_graduation_difficulty: float = 0.80
-    duel_graduation_win_rate: float = 0.65
+    # Stage 2 (Duel Fused) -> 3 (Team) Graduation
+    # Requires mastery of both Running (Win Rate) and Blocking (Denial Rate)
+    # OR just high win rate?
+    # Let's demand Win Rate primarily, but tracked Denials.
+    duel_graduation_difficulty: float = 0.85
+    duel_graduation_win_rate: float = 0.70
     duel_graduation_checks: int = 5
+    duel_graduation_denial_rate: float = 0.05
+    duel_graduation_blocker_impact: float = 1000.0
     
     # Stage 3 (Team) -> 4 (League) Graduation
     team_graduation_difficulty: float = 0.85
@@ -184,6 +188,7 @@ RW_MAGNET = 12 # Proximity Pull
 RW_RANK = 13 # Rank Improvement
 RW_LAP = 14 # Lap Completion
 RW_DENIAL = 15 # Deny Enemy Progress (Blocker Only)
+RW_ZONE = 16 # Zone Control (Blocker Position relative to Intercept Point)
 LAP_REWARD_MULTIPLIER = 1.5
 
 DEFAULT_REWARD_WEIGHTS = {
@@ -202,7 +207,8 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_MAGNET: 10.0, # Proximity Pull
     RW_RANK: 500.0, # Rank Change
     RW_LAP: 2000.0, # RW_LAP (New) - Index 14 manually assigned
-    RW_DENIAL: 0.5 # Deny Reward (New) - Balances with Collision (0.5 * 600u = 300/step => ~3000/sec)
+    RW_DENIAL: 10000.0, # Deny Reward (New) - Explicit Timeout Bonus for Blocker
+    RW_ZONE: 5.0 # Zone Control (Dense)
 }
 
 from typing import List, Optional

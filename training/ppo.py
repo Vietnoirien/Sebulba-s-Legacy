@@ -62,7 +62,7 @@ class PPOTrainer:
         
         # Reward Weights [TotalEnvs, 15] - Per environment weights
         # 15 = Win, Loss, CP, Scale, Progress, Runner, Blocker, StepPen, Orient, WrongWay, Mate, Prox, Magnet, Rank, Lap
-        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 16), device=self.device)
+        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 17), device=self.device)
         
         # Normalization
         self.rms_self = RunningMeanStd((15,), device=self.device)
@@ -121,6 +121,9 @@ class PPOTrainer:
                 'efficiency_score': 999.0,
                 'wins': 0,
                 'matches': 0,
+                'runner_matches': 0, # [NEW]
+                'blocker_matches': 0, # [NEW]
+                'denials': 0, # [NEW]
                 'max_streak': 0,
                 'total_cp_steps': 0,
                 'total_cp_hits': 0,
@@ -135,6 +138,7 @@ class PPOTrainer:
                 'ema_runner_vel': None,
                 'ema_blocker_dmg': None,
                 'ema_dist': None,
+                'ema_denials': None, # [NEW] Stage 3 Metric,
                 
                 'behavior_buffer': torch.zeros(4, device=self.device),
                 
@@ -218,8 +222,15 @@ class PPOTrainer:
         # Total batch dimension = Steps * EnvsPerAgent * NumActivePods
         num_active_per_agent_step = num_active_pods * self.config.envs_per_agent
         
+        # Check if buffers are valid (not consumed/popped)
+        buffers_valid = False
+        if hasattr(self, 'agent_batches') and len(self.agent_batches) > 0:
+             # Check for a critical key that gets popped
+             if 'actions' in self.agent_batches[0]: 
+                 buffers_valid = True
+
         # Log only if significantly changed or first run
-        if not hasattr(self, 'last_buffer_shape') or self.last_buffer_shape != (self.current_num_steps, num_active_per_agent_step):
+        if not buffers_valid or not hasattr(self, 'last_buffer_shape') or self.last_buffer_shape != (self.current_num_steps, num_active_per_agent_step):
              self.log(f"Allocating buffers for {self.current_num_steps} steps per iteration. Active Pods: {self.current_active_pods_count}")
              
              # [FIX] Explicit Memory Cleanup before Re-allocation
@@ -230,25 +241,29 @@ class PPOTrainer:
                  
              self.last_buffer_shape = (self.current_num_steps, num_active_per_agent_step)
         
-        self.agent_batches = []
-        for _ in range(self.config.pop_size):
-             self.agent_batches.append({
-                 'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 15), device=self.device),
-                 'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 14), device=self.device),
-                 'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 14), device=self.device),
-                 'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 10), device=self.device),
-                 'map_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, MAX_CHECKPOINTS, 2), device=self.device), # [B, MaxCP, 2]
-                 'actions': torch.zeros((self.current_num_steps, num_active_per_agent_step, 4), device=self.device),
-                 'rewards': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
-                 'dones': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
-                 'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
-                 'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
-                 # LSTM States [Chunks, Batch, Layers, Hidden] - Sparse Storage
-                 'actor_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
-                 'actor_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
-                 'critic_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
-                 'critic_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
-             })
+             self.agent_batches = []
+             gc.collect()
+             if self.device.type == 'cuda':
+                 torch.cuda.empty_cache()
+
+             for _ in range(self.config.pop_size):
+                  self.agent_batches.append({
+                      'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 15), device=self.device),
+                      'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 14), device=self.device),
+                      'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 14), device=self.device),
+                      'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 10), device=self.device),
+                      'map_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, MAX_CHECKPOINTS, 2), device=self.device), # [B, MaxCP, 2]
+                      'actions': torch.zeros((self.current_num_steps, num_active_per_agent_step, 4), device=self.device),
+                      'rewards': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                      'dones': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                      'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                      'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
+                      # LSTM States [Chunks, Batch, Layers, Hidden] - Sparse Storage
+                      'actor_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                      'actor_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                      'critic_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                      'critic_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                  })
 
         if self.nursery_metrics_buffer.shape[0] != self.config.pop_size:
              self.nursery_metrics_buffer = torch.zeros((self.config.pop_size, 2), device=self.device)
@@ -582,13 +597,32 @@ class PPOTrainer:
             
             # Extract other raw metrics
             wins = p['wins']
-            matches = p.get('matches', 0)
+            # We now use specific denominators
+            runner_matches = p.get('runner_matches', 0)
+            blocker_matches = p.get('blocker_matches', 0)
             
             # PBT Win Rate Calculation (Safe Division)
-            if matches > 0:
-                win_rate = float(wins) / float(matches)
+            if runner_matches > 0:
+                win_rate = float(wins) / float(runner_matches)
             else:
                 win_rate = 0.0
+            
+            # [NEW] Denial Rate Calculation
+            denials = p.get('denials', 0)
+            if blocker_matches > 0:
+                 denial_rate = denials / blocker_matches
+            else:
+                 denial_rate = 0.0
+            
+            p['win_rate'] = win_rate # Store for telemetry/logs if needed
+            p['denial_rate'] = denial_rate
+            
+            if p['ema_denials'] is None:
+                p['ema_denials'] = denial_rate
+            else:
+                p['ema_denials'] = p['ema_denials'] * 0.9 + denial_rate * 0.1
+
+            
             
             laps = p['laps_score']
             checkpoints = p['checkpoints_score']
@@ -731,9 +765,11 @@ class PPOTrainer:
              self.log(f"Pareto Fronts (Quality Gated > 20% WR): {[len(f) for f in fronts]}")
              self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
              
-             if self.env.curriculum_stage == STAGE_DUEL:
-                  # Duel: Wins & Novelty
-                  self.log(f"Elite (Crowded) Stats | Wins: {elites[0]['ema_wins']:.1%} | Nov: {elites[0]['novelty_score']:.2f}")
+             if self.env.curriculum_stage == STAGE_DUEL_FUSED:
+                  # Duel Fused: Wins, Denials, Novelty
+                  # Log top elite stats
+                  e = elites[0]
+                  self.log(f"Elite Stats | Wins: {e['ema_wins']:.1%} | Denials: {e['ema_denials']:.1%} | Nov: {e['novelty_score']:.2f}")
              elif self.env.curriculum_stage == STAGE_NURSERY:
                   # Fallback (Should not happen given if check above)
                   pass 
@@ -982,6 +1018,13 @@ class PPOTrainer:
         avg_win = np.mean(wins) if wins else 0.0
         avg_nov = np.mean(novs) if novs else 0.0
         
+        # Fused Stage Specific Scaling
+        if self.env.curriculum_stage == STAGE_DUEL_FUSED:
+             dens = [p.get('ema_denials', 0.0) for p in self.population if p.get('ema_denials') is not None]
+             avg_den = np.mean(dens) if dens else 0.0
+             l_den = leader.get('ema_denials', 0.0)
+             if l_den is None: l_den = 0.0
+        
         # Nursery Specific Logging
         if self.env.curriculum_stage == STAGE_NURSERY:
              nurs = [p.get('nursery_score', 0.0) for p in self.population]
@@ -1017,6 +1060,15 @@ class PPOTrainer:
                  eff = p.get('ema_efficiency', 999.0) if p.get('ema_efficiency') is not None else 999.0
                  return (wins, cons, -eff)
             best_agent = max(self.population, key=best_sorter)
+        elif stage == STAGE_DUEL_FUSED:
+            # Best is Max (Wins + Denials)
+            def best_sorter_fused(p):
+                 den = p.get('ema_denials', 0.0) if p.get('ema_denials') is not None else 0.0
+                 wins = p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0
+                 return (wins + den)
+            best_agent = max(self.population, key=best_sorter_fused)
+            b_den = best_agent.get('ema_denials', 0.0)
+            if b_den is None: b_den = 0.0
         else:
             # Best is Max Win Rate
             best_agent = max(self.population, key=lambda p: p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0)
@@ -1065,7 +1117,12 @@ class PPOTrainer:
         self.log("-" * 80)
         self.log(f" {'Efficiency':<15} | {l_eff:<10.1f} | {avg_eff:<10.1f} | {b_eff:<10.1f}")
         self.log(f" {'Consistency':<15} | {l_con:<10.1f} | {avg_con:<10.1f} | {b_con:<10.1f}")
-        self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1%} | {avg_win:<10.1%} | {b_win:<10.1%}")
+        
+        if self.env.curriculum_stage == STAGE_DUEL_FUSED:
+            self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1%} | {avg_win:<10.1%} | {b_win:<10.1%}")
+            self.log(f" {'Denials (EMA)':<15} | {l_den:<10.1%} | {avg_den:<10.1%} | {b_den:<10.1%}")
+        else:
+            self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1%} | {avg_win:<10.1%} | {b_win:<10.1%}")
         self.log(f" {'Novelty':<15} | {l_nov:<10.2f} | {avg_nov:<10.2f} | {b_nov:<10.2f}")
         
         if self.env.curriculum_stage == STAGE_NURSERY:
@@ -1126,6 +1183,10 @@ class PPOTrainer:
                  # [FIX] Memory Cleanup before intense transition logic
                  gc.collect()
                  torch.cuda.empty_cache()
+                 
+                 # [FIX] Force Buffer Reallocation (Shape might match but meaning changes or keys missing)
+                 if hasattr(self, 'last_buffer_shape'):
+                     delattr(self, 'last_buffer_shape')
                  
                  # --- Mitosis Strategy (Transition to Team Mode) ---
                  # If moving from Solo/Duel (Stage < 2) to Team (Stage 2),
@@ -1618,10 +1679,12 @@ class PPOTrainer:
                 current_tau = 0.0
                 if self.env.curriculum_stage == STAGE_SOLO:
                     current_tau = 0.25
-                elif self.env.curriculum_stage == STAGE_DUEL:
+                elif self.env.curriculum_stage == STAGE_DUEL_FUSED:
+                    # Fused Stage: Full Feedback (0.0) initially or blended?
+                    # Plan says "Blocker Bot" (Academy).
+                    # Let's align with STAGE_DUEL (0.5) or stricter?
+                    # Unified stage: 0.5 seems reasonable.
                     current_tau = 0.5
-                elif self.env.curriculum_stage == STAGE_INTERCEPT:
-                    current_tau = 0.0
                 elif self.env.curriculum_stage == STAGE_TEAM:
                     current_tau = 0.5
                 elif self.env.curriculum_stage == STAGE_LEAGUE:
@@ -1748,12 +1811,13 @@ class PPOTrainer:
                 # Or just accumulate into a 'metrics_buffer' tensor on self used for this loop?
                 
                 if not hasattr(self, '_iter_metrics'):
-                     # Allocate ONCE
-                     # [Pop, 10]
+                     # Metrics Buffer (Per iteration) on GPU
+                     # [Step, Count, ...]
                      # 0: RewardSum, 1: RewardCount, 2: Laps, 3: CPs, 4: Vel, 5: Dmg, 
-                     # 6: CP_Steps, 7: CP_Hits, 8: Wins, 9: Matches
-                     self._iter_metrics = torch.zeros((self.config.pop_size, 10), device=self.device)
-                     self._iter_max_streak = torch.zeros((self.config.pop_size,), device=self.device) # Keep max separate
+                     # 6: CP_Steps, 7: CP_Hits, 8: Wins, 9: Matches, 10: Denials
+                     # [NEW] 11: Runner Matches, 12: Blocker Matches
+                     self._iter_metrics = torch.zeros((self.config.pop_size, 13), device=self.device)
+                     self._iter_max_streak = torch.zeros(self.config.pop_size, device=self.device) # Keep max separate
                 
                 # 0. Rewards
                 # Sum over (Envs, ActivePods)
@@ -1838,8 +1902,54 @@ class PPOTrainer:
                 wins = (done_mask & (w_reshaped == 0)).float().sum(dim=1)
                 matches = done_mask.float().sum(dim=1)
                 
+                # [NEW] Denials (Done & Winner == -1)
+                denials = (done_mask & (w_reshaped == -1)).float().sum(dim=1)
+                
                 self._iter_metrics[:, 8] += wins
                 self._iter_metrics[:, 9] += matches
+                self._iter_metrics[:, 10] += denials
+                
+                # [NEW] Separation of Denominators
+                # We need to know: Was I a Runner? Was I a Blocker?
+                # self.env.is_runner is [TotalEnvs, 4]
+                # We need to map to [Pop, EnvsPerAgent]
+                # We take the "Active Pods" slice? No, we take "My Pod".
+                # Which pod am I?
+                # PPO assumes "Agent" controls ALL active pods.
+                # So if ANY active pod is a Runner, does it count as a Runner Match?
+                # Or do we sum up "Runner Episodes"?
+                # "Win Rate" = Wins / Runner Episodes.
+                # "Denial Rate" = Denials / Blocker Episodes.
+                
+                # Reshape is_runner [TotalEnvs, 4] -> [Pop, EnvsPerAgent, 4]
+                is_run_reshaped = self.env.is_runner.view(self.config.pop_size, self.config.envs_per_agent, 4)
+                
+                # We only care about ACTIVE pods for this agent.
+                # active_pods is a list of indices e.g. [0, 1]
+                # We want to know complexity: if I control multiple pods, I accumulate stats for all.
+                
+                # Runner Matches: Sum of Dones where I was Runner
+                # Blocker Matches: Sum of Dones where I was Blocker
+                
+                # Mask: Done & IsRunner (for active pods)
+                # We sum over Active Pods.
+                # If separate envs (Duel), I am Runner in Envs 0..N/2, Blocker in N/2..N
+                runner_matches = 0
+                blocker_matches = 0
+                
+                for pod_idx in active_pods:
+                    # is_run_reshaped[:, :, pod_idx] is 1 if runner, 0 if blocker
+                    is_r = is_run_reshaped[:, :, pod_idx].float()
+                    is_b = 1.0 - is_r
+                    
+                    # Matches for this pod
+                    # done_mask is [Pop, EnvsPerAgent]
+                    # If done, and this pod was Runner -> Runner Match ++
+                    runner_matches += (done_mask.float() * is_r).sum(dim=1)
+                    blocker_matches += (done_mask.float() * is_b).sum(dim=1)
+
+                self._iter_metrics[:, 11] += runner_matches
+                self._iter_metrics[:, 12] += blocker_matches
                 
                 
                 # --- Fill Batch Data (Vectorized) ---
@@ -2054,6 +2164,39 @@ class PPOTrainer:
                     
                     self.population[i]['wins'] += int(m[8])
                     self.population[i]['matches'] += int(m[9])
+                    self.population[i]['denials'] += int(m[10])
+                    self.population[i]['runner_matches'] += int(m[11])
+                    self.population[i]['blocker_matches'] += int(m[12])
+
+                    # Recalculate EMAs with correct denominators
+                    runner_matches_iter = int(m[11])
+                    blocker_matches_iter = int(m[12])
+                    wins_iter = int(m[8])
+                    denials_iter = int(m[10])
+                    
+                    alpha = 0.1
+                    
+                    # 1. Win Rate (Runner Only)
+                    if runner_matches_iter > 0:
+                        win_rate = wins_iter / runner_matches_iter
+                    else:
+                        win_rate = 0.0
+                    
+                    if self.population[i]['ema_wins'] is None:
+                        self.population[i]['ema_wins'] = win_rate
+                    else:
+                        self.population[i]['ema_wins'] = (1.0 - alpha) * self.population[i]['ema_wins'] + alpha * win_rate
+
+                    # 2. Denial Rate (Blocker Only)
+                    if blocker_matches_iter > 0:
+                         denial_rate = denials_iter / blocker_matches_iter
+                    else:
+                         denial_rate = 0.0
+                    
+                    if self.population[i]['ema_denials'] is None:
+                         self.population[i]['ema_denials'] = denial_rate
+                    else:
+                         self.population[i]['ema_denials'] = (1.0 - alpha) * self.population[i]['ema_denials'] + alpha * denial_rate
                 
                 # Reset Buffers
                 self._iter_metrics.zero_()
@@ -2100,6 +2243,12 @@ class PPOTrainer:
             all_next_vals = []
             all_rewards = []
             all_dones = []
+            
+            # --- Memory Cleanup Before Update (Critical for Stage 3) ---
+            gc.collect() 
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+
             # === VECTORIZED UPDATE PHASE ===
             bs_per_agent = self.config.envs_per_agent * len(active_pods)
             Pop = self.config.pop_size
@@ -2164,72 +2313,120 @@ class PPOTrainer:
             SeqLen = self.config.seq_length
             NumChunks = self.current_num_steps // SeqLen
 
-            def transform_seq(tensor_stack):
-                # tensor_stack: [Pop, Steps, BPA, ...]
-                # View as [Pop, Chunks, SeqLen, BPA, ...]
-                # Permute to [Pop, Chunks, BPA, SeqLen, ...]
-                # Flatten [Chunks, BPA] -> TotalSeqs
-                shape = tensor_stack.shape
-                new_shape = (Pop, NumChunks, SeqLen, -1) + shape[3:]
-                viewed = tensor_stack.view(*new_shape)
-                # Permute: [Pop, Chunks, BPA, SeqLen, ...]
-                # Original dims: 0=Pop, 1=Chunks, 2=SeqLen, 3=BPA
-                permuted = viewed.permute(0, 1, 3, 2, *range(4, viewed.ndim))
-                # Flatten Chunks*BPA
-                return permuted.flatten(1, 2) # [Pop, TotalSeqs, SeqLen, ...]
+            def stack_and_flatten(key):
+                """
+                Memory-efficient stacking and flattening.
+                Instead of stack() -> permute() -> flatten() which creates 3x copies,
+                we allocate target and fill it iteratively, deleting source as we go.
+                """
+                # 1. Inspect first to determine shape
+                ref = self.agent_batches[0][key] # [Steps, BPA, D...]
+                Steps, BPA = ref.shape[0], ref.shape[1]
+                ExtraDims = ref.shape[2:]
+                
+                # Check consistency
+                # Output: [Pop, Chunks*BPA, SeqLen, D...]
+                TotalSeqs = NumChunks * BPA
+                
+                out_shape = (self.config.pop_size, TotalSeqs, SeqLen) + ExtraDims
+                out = torch.empty(out_shape, device=self.device, dtype=ref.dtype)
+                
+                for i in range(self.config.pop_size):
+                    # Pop to release ref from list immediately
+                    if key in self.agent_batches[i]:
+                        t = self.agent_batches[i].pop(key)
+                        
+                        # Transform [Steps, BPA, D] -> [TotalSeqs, SeqLen, D]
+                        # Steps = Chunks * SeqLen
+                        # View [Chunks, SeqLen, BPA, D]
+                        # Permute [Chunks, BPA, SeqLen, D]
+                        # Reshape [Chunks*BPA, SeqLen, D]
+                        
+                        t_view = t.view(NumChunks, SeqLen, BPA, *ExtraDims)
+                        t_perm = t_view.permute(0, 2, 1, *range(3, t_view.ndim))
+                        t_flat = t_perm.reshape(TotalSeqs, SeqLen, *ExtraDims)
+                        
+                        out[i] = t_flat
+                        del t # Explicit cleanup
+                    else:
+                        # Should not happen if confirmed valid, but fill 0 safety?
+                        pass
+                
+                return out
 
+            # Note: transform_seq removed as stack_and_flatten replaces it efficiently
+            # We still need transform_state (which handles different dims). Can we unify?
+            # State: [Pop, Chunks+1, BPA, L, H]
             # Helper for States: [Pop, Chunks+1, BPA, ...] -> [Pop, TotalSeqs, ...]
-            def transform_state(tensor_stack):
-                # tensor_stack: [Pop, Chunks+1, BPA, L, H]
-                # Take only first NumChunks
-                valid = tensor_stack[:, :NumChunks]
-                # Flatten [Chunks, BPA] -> TotalSeqs
-                return valid.flatten(1, 2) # [Pop, TotalSeqs, L, H]
-
+            def stack_and_flatten_state(key):
+                 # Ref
+                 ref = self.agent_batches[0][key] # [Chunks+1, BPA, L, H]
+                 BPA = ref.shape[1]
+                 ExtraDims = ref.shape[2:]
+                 TotalSeqs = NumChunks * BPA
+                 
+                 out_shape = (self.config.pop_size, TotalSeqs) + ExtraDims
+                 out = torch.empty(out_shape, device=self.device, dtype=ref.dtype)
+                 
+                 for i in range(self.config.pop_size):
+                     if key in self.agent_batches[i]:
+                         t = self.agent_batches[i].pop(key)
+                         # Take valid chunks: [NumChunks, BPA, L, H]
+                         valid = t[:NumChunks] 
+                         # Flatten [NumChunks*BPA, L, H]
+                         out[i] = valid.flatten(0, 1)
+                         del t
+                         
+                 return out
+                 
+            # Helper for simple seq transform (used for GAE tensors which are already stacked)
+            def transform_seq_tensor(tensor):
+                 # tensor: [Pop, Steps, BPA] -> [Pop, TotalSeqs, SeqLen]
+                 # Steps = Chunks * SeqLen
+                 # BPA = BatchPerAgent
+                 # TotalSeqs = Chunks * BPA
+                 
+                 P, S, B = tensor.shape
+                 # View [P, Chunks, SeqLen, B]
+                 t_view = tensor.view(P, NumChunks, SeqLen, B)
+                 # Permute [P, Chunks, B, SeqLen]
+                 t_perm = t_view.permute(0, 1, 3, 2)
+                 # Reshape [P, TotalSeqs, SeqLen]
+                 return t_perm.reshape(P, NumChunks * B, SeqLen)
+                 
             # Transformation
-            # Stack Data: [Pop, Steps, BPA, D]
-            flat_s = transform_seq(torch.stack([b.pop('self_obs') for b in self.agent_batches]))
-            flat_tm = transform_seq(torch.stack([b.pop('teammate_obs') for b in self.agent_batches]))
-            flat_en = transform_seq(torch.stack([b.pop('enemy_obs') for b in self.agent_batches]))
-            flat_cp = transform_seq(torch.stack([b.pop('cp_obs') for b in self.agent_batches]))
-            flat_mp = transform_seq(torch.stack([b.pop('map_obs') for b in self.agent_batches]))
-            flat_act = transform_seq(torch.stack([b.pop('actions') for b in self.agent_batches]))
-            flat_old_logp = transform_seq(torch.stack([b.pop('logprobs') for b in self.agent_batches]))
+            # Stack Data: [Pop, TotalSeqs, SeqLen, D]
+            flat_s = stack_and_flatten('self_obs')
+            flat_tm = stack_and_flatten('teammate_obs')
+            flat_en = stack_and_flatten('enemy_obs')
+            flat_cp = stack_and_flatten('cp_obs')
+            flat_mp = stack_and_flatten('map_obs')
+            flat_act = stack_and_flatten('actions')
+            flat_old_logp = stack_and_flatten('logprobs')
             
             # transform_seq works on s_val reference too? No, s_val was consumed/deleted.
+
             # We need to reshape G_ADV and G_RET.
             # g_adv is [Steps, TotalBatch]. TotalBatch = Pop * BPA.
             # We need [Pop, Steps, BPA].
             g_adv_reshaped = g_adv.view(self.current_num_steps, Pop, -1).permute(1, 0, 2)
             g_ret_reshaped = g_returns.view(self.current_num_steps, Pop, -1).permute(1, 0, 2)
-            # Reconstruct Old Value (Optional?) - No, we popped it. 
-            # But we can reconstruct logic or store? 
-            # Actually we typically need Old Value for Clip Range.
-            # Let's assume we don't have it unless we stored it in 'values' buffer which we popped.
-            # Wait, s_val was popped on 1930. We can't reuse it.
-            # We should have kept a copy or transformed it.
-            # Since we deleted s_val, we rely on g_values from line 1935? 
-            # g_values was also deleted on 1955!
-            # CRITICAL MISS: We need old_values for PPO loss.
-            # FIX: Do not delete g_values until transformed.
-            # But g_values is [Steps, TotalBatch].
             
-            # Let's assume we missed saving g_values. 
+            # Reconstruct Old Value (Optional?)
             # PPO Value Clip relies on it. 
-            # Re-calculating...
-            # We can recover Old Value from g_returns - g_adv?
             # Returns = Adv + Value -> Value = Returns - Adv.
             g_values_recovered = g_returns - g_adv # Exact reconstruction
             
-            flat_old_val = transform_seq(g_values_recovered.view(self.current_num_steps, Pop, -1).permute(1, 0, 2).unsqueeze(-1)).squeeze(-1)
-            flat_adv = transform_seq(g_adv_reshaped.unsqueeze(-1)).squeeze(-1)
-            flat_ret = transform_seq(g_ret_reshaped.unsqueeze(-1)).squeeze(-1)
+            # Transform GAE Tensors (Result: [Pop, TotalSeqs, SeqLen])
+            flat_old_val = transform_seq_tensor(g_values_recovered.view(self.current_num_steps, Pop, -1).permute(1, 0, 2))
+            flat_adv = transform_seq_tensor(g_adv_reshaped)
+            flat_ret = transform_seq_tensor(g_ret_reshaped)
             
-            # Transform States
-            flat_ah = transform_state(torch.stack([b.pop('actor_h') for b in self.agent_batches]))
-            flat_ac = transform_state(torch.stack([b.pop('actor_c') for b in self.agent_batches]))
-            flat_ch = transform_state(torch.stack([b.pop('critic_h') for b in self.agent_batches]))
-            flat_cc = transform_state(torch.stack([b.pop('critic_c') for b in self.agent_batches]))
+            # Transform States using efficient stacker
+            flat_ah = stack_and_flatten_state('actor_h')
+            flat_ac = stack_and_flatten_state('actor_c')
+            flat_ch = stack_and_flatten_state('critic_h')
+            flat_cc = stack_and_flatten_state('critic_c')
 
             # Config Tensors
             t_ent = torch.tensor([p.get('ent_coef', self.config.ent_coef) for p in self.population], device=self.device)
@@ -2313,6 +2510,18 @@ class PPOTrainer:
             
             self.log_iteration_summary(global_step, sps, current_tau, avg_loss, avg_pg, avg_v, avg_ent, avg_div)
             
+            # [FIX] Explicit cleanup of large optimization tensors to prevent OOM in next iteration allocation
+            del flat_s, flat_tm, flat_en, flat_cp, flat_mp, flat_act, flat_old_logp
+            del flat_ah, flat_ac, flat_ch, flat_cc
+            del flat_old_val, flat_adv, flat_ret
+            del g_adv, g_returns, g_adv_reshaped, g_ret_reshaped, g_values_recovered
+            
+            # Additional cleanup of intermediates if defined
+            if 'm_s' in locals(): del m_s, m_tm, m_en, m_cp, m_mp, m_act, m_lp, m_v, m_adv, m_ret
+            
+            gc.collect()
+            torch.cuda.empty_cache()
+            
             # Construct simple line for telemetry log/frontend if needed (backward compat)
             leader = self.population[self.leader_idx]
             l_eff = leader.get('ema_efficiency')
@@ -2327,7 +2536,6 @@ class PPOTrainer:
 
             # --- Memory Optimization ---
             # Explicitly clear cache after heavy update loop
-            import gc
             gc.collect()
             if self.device.type == 'cuda':
                 torch.cuda.empty_cache()

@@ -10,10 +10,9 @@ class Stage(ABC):
         self.name = name
         self.config = config # CurriculumConfig
 
-    @abstractmethod
     def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
         """Deprecated: Use update() instead."""
-        pass
+        return False, ""
 
     def update(self, trainer: Any) -> Tuple[Any, str]:
         """

@@ -176,10 +176,9 @@ export const ControlPanel: React.FC = () => {
                     >
                         <option value={0}>Stage 0: Nursery (Safe Mode)</option>
                         <option value={1}>Stage 1: Solo Time Trial</option>
-                        <option value={2}>Stage 2: 1v1 Duel</option>
-                        <option value={3}>Stage 3: Blocker Academy (PvE)</option>
-                        <option value={4}>Stage 4: 2v2 Team</option>
-                        <option value={5}>Stage 5: League</option>
+                        <option value={2}>Stage 2: Unified Duel (1v1)</option>
+                        <option value={3}>Stage 3: Team (2v2)</option>
+                        <option value={4}>Stage 4: League</option>
                     </select>
                 </div>
             </div>

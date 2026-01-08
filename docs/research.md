@@ -36,13 +36,13 @@ Standard PPO implementations suffer from CPU-GPU bandwidth bottlenecks. We imple
 
 To solve the "100k Character Limit" constraint while retaining complex multi-modal behavior (Racing vs Blocking), we utilize a **True Parameter Sharing** architecture with a Recurrent Core.
 
-### The "Universal Brain"
+### The "Universal Brain" (~58k Parameters)
 We define our policy $\pi_\theta(a | s, z)$ where $z \in \{0, 1\}$ is a **Role Embedding**.
-*   **Pilot Stream**: A lightweight MLP ($15 \rightarrow 64 \rightarrow 48$) processes "Reactive" features (Velocity, Next Checkpoint).
-*   **Commander Stream**: A deeper path ($48 \rightarrow 48$) processes "Tactical" features (Teammates, Enemies).
+*   **Pilot Stream**: A lightweight MLP ($25 \rightarrow 64 \rightarrow 48$) processes "Reactive" features (Self Vector + Next Checkpoint).
+*   **Commander Stream**: A structured path ($95 \rightarrow 96 \rightarrow 48$) processes "Tactical" features (Teammates, Enemies, Map embedding).
     *   **DeepSets**: Enemies are processed via a permutation-invariant encoder $g(x) = \max_i(f(x_i))$.
-    *   **Map Transformer**: A sequence of future checkpoints is encoded via Self-Attention to provide track foresight.
-*   **LSTM Core**: Both streams fuse into an LSTM ($H=64$), allowing the agent to maintain temporal context (e.g., "I just crashed", "I am waiting for a boost").
+    *   **Map Transformer**: A **Nano-Transformer** (1 layer, 2 heads, $d_{model}=32, ~8.6k$ params) encodes the sequence of future checkpoints via Self-Attention to provide track foresight.
+*   **LSTM Core**: Both streams fuse into an LSTM ($H=48, ~28k$ params), allowing the agent to maintain temporal context (e.g., "I just crashed", "I am waiting for a boost").
 
 By conditioning the Commander Stream on $z$, the network learns two distinct behavioral manifolds (Runner/Blocker) that share the same underlying physics understanding (Pilot Stream).
 

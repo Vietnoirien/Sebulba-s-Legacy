@@ -6,7 +6,7 @@ from simulation.env import (
     RW_WIN, RW_LOSS, RW_CHECKPOINT, RW_CHECKPOINT_SCALE, 
     RW_PROGRESS, RW_MAGNET, RW_COLLISION_RUNNER, RW_COLLISION_BLOCKER, 
     RW_STEP_PENALTY, RW_ORIENTATION, RW_WRONG_WAY, RW_COLLISION_MATE,
-    STAGE_NURSERY, STAGE_SOLO, STAGE_DUEL, STAGE_INTERCEPT, STAGE_TEAM, STAGE_LEAGUE
+    STAGE_NURSERY, STAGE_SOLO, STAGE_DUEL_FUSED, STAGE_TEAM, STAGE_LEAGUE
 )
 
 class NurseryStage(Stage):
@@ -35,10 +35,6 @@ class NurseryStage(Stage):
             p.get('nursery_score', 0.0), 
             p.get('novelty_score', 0.0) * 100.0
         ]
-        
-    def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
-        # Deprecated
-        return False, ""
 
     def update(self, trainer) -> Tuple[Optional[int], str]:
         # Goal: Learn to navigate (Consistency). No speed requirement.
@@ -117,25 +113,21 @@ class SoloStage(Stage):
                 # trainer.reward_weights_tensor[:, RW_CHECKPOINT] = 2000.0
                 # trainer.log("Config Update: Resetting RW_CHECKPOINT to 2000.0 for Stage 1+")
                 # REMOVED: Respect Global Config (RW_CHECKPOINT=500, RW_LAP=2000)
-                trainer.log("Config Update: Entering Duel Stage (Difficulty Reset).")
+                trainer.log("Config Update: Entering Unified Duel Stage (Difficulty Reset).")
                 
-                return STAGE_DUEL, f"Eff {avg_eff:.1f} < {self.config.solo_efficiency_threshold}"
+                return STAGE_DUEL_FUSED, f"Eff {avg_eff:.1f} < {self.config.solo_efficiency_threshold}"
         
         return None, ""
         
-    def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
-        return False, ""
-
-    def update_step_penalty(self, base_penalty: float) -> float:
-        return base_penalty
-
-class DuelStage(Stage):
+class UnifiedDuelStage(Stage):
     def __init__(self, config: CurriculumConfig):
-        super().__init__("Duel", config)
+        super().__init__("UnifiedDuel", config)
         self.failure_streak = 0
         self.grad_consistency_counter = 0
 
     def get_active_pods(self) -> List[int]:
+        # Only Pod 0 is the Learner. Pod 2 is the Bot.
+        # We should NOT collect/train on Pod 2 observations.
         return [0]
 
     def get_env_config(self) -> EnvConfig:
@@ -146,71 +138,89 @@ class DuelStage(Stage):
             use_bots=True, 
             bot_pods=[2],
             step_penalty_active_pods=[0, 2],
+            # fixed_roles=None -> Let env.py handle 50/50 split
             orientation_active_pods=[0, 2]
         )
 
     def get_objectives(self, p: Dict[str, Any]) -> List[float]:
-        # Quality Gate: Novelty only counts if agent is competitive (> 5% Win Rate)
-        # This prevents "Safe Losers" (consistent but slow) from crowding the front.
-        nov = p.get('novelty_score', 0.0) * 100.0
-        if p.get('ema_wins', 0.0) < 0.20:
-            nov = 0.0
-
-        # Objectives: Win Rate, Efficiency (Speed), Novelty
-        eff = p.get('ema_efficiency', 999.0); eff = eff if eff is not None else 999.0
+        # Objectives: Win Rate, Denial Rate, Novelty
+        # We prefer high Win Rate AND high Denial Rate.
+        # NSGA-II maximizes all objectives.
         
+        wins = p.get('ema_wins', 0.0)
+        denials = p.get('ema_denials', 0.0)
+        
+        # Quality Gate: Novelty only matters if agent is competent in at least one role
+        competence = max(wins, denials)
+        nov = p.get('novelty_score', 0.0) * 100.0
+        if competence < 0.10:
+            nov = 0.0
+            
+        # [EVO FIX] Use Blocker Damage (Impact) as dense signal for blocking
+        # This helps evolution find the sparse 'Denial' event.
+        impact = p.get('ema_blocker_dmg', 0.0)
+
         return [
-            p.get('ema_wins', 0.0),
-            -eff,
+            wins,
+            denials,
+            impact,
+            -p.get('ema_efficiency', 999.0),
             nov
         ]
-        
-    def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
-        return False, ""
 
     def update(self, trainer) -> Tuple[Optional[int], str]:
-        # Dynamic Difficulty
+        # Dynamic Difficulty based on Win Rate (Primary) due to difficulty capping/floor logic
         metrics = trainer.env.stage_metrics
         rec_episodes = metrics.get("recent_episodes", 0)
         if rec_episodes == 0:
-             rec_episodes = metrics.get("recent_games", 0)
+             rec_episodes = metrics.get("recent_games", 0) # Fallback
 
         if rec_episodes > 1000: 
             rec_wins = metrics["recent_wins"]
-            rec_games = metrics["recent_games"] # Valid finished games
+            rec_games = metrics["recent_games"] # Finished games
             
-            if rec_episodes > 0:
-                rec_wr = rec_wins / rec_episodes
-            else:
-                rec_wr = 0.0
+            # Rec WR = Wins / Total Episodes (assuming Wins are subset of Episodes)
+            # Actually, metrics track wins globally.
+            rec_wr = rec_wins / rec_episodes if rec_episodes > 0 else 0.0
+            
+            # Rec Denial Rate = Denials / Total Episodes
+            # Timeouts = Episodes - Games
+            # Denial Rate & Blocker Impact
+            rec_denials = metrics["recent_denials"]
+            rec_dr = rec_denials / rec_episodes if rec_episodes > 0 else 0.0
+            
+            rec_impact = metrics.get("blocker_impact", 0)
+            avg_impact = rec_impact / rec_games if rec_games > 0 else 0.0
             
             trainer.current_win_rate = rec_wr
             
             # Reset Recent
             metrics["recent_games"] = 0
             metrics["recent_wins"] = 0
+            metrics["recent_denials"] = 0
+            metrics["blocker_impact"] = 0
             metrics["recent_episodes"] = 0
             
-            rec_losses = rec_games - rec_wins
-            rec_timeouts = rec_episodes - rec_games
-            
-            trainer.log(f"Stage 2 (Duel) Check: Recent WR {rec_wr*100:.1f}% | Wins: {rec_wins} | Losses: {rec_losses} | Timeouts: {rec_timeouts} | Diff: {trainer.env.bot_difficulty:.2f}")
+            trainer.log(f"Stage 2 (Unified Duel) Check: WR {rec_wr*100:.1f}% | DR {rec_dr*100:.1f}% | AvgImp {avg_impact:.0f} | Diff: {trainer.env.bot_difficulty:.2f}")
             
             auto = (trainer.curriculum_mode == "auto")
+            
+            # Difficulty Adjustment (Based on WR for now, as Denial is harder)
+            # Or use average of both?
+            # Let's use WR strictly for difficulty scaling to ensure strong Runner skills.
+            # Runner skills translate to Blocker skills (driving).
             
             if rec_wr < self.config.wr_critical:
                 # Critical Failure
                 if auto:
                     trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - self.config.diff_step_decrease)
                     trainer.log(f"-> Critical Regression (WR < {self.config.wr_critical:.2f}): Decreasing Bot Difficulty to {trainer.env.bot_difficulty:.2f}")
-                
                 self.failure_streak = 0
                 
             elif rec_wr < self.config.wr_warning:
-                # Warning Zone
+                # Warning
                 self.failure_streak += 1
                 trainer.log(f"-> Warning Zone (WR < {self.config.wr_warning:.2f}): Streak {self.failure_streak}/4")
-                
                 if self.failure_streak >= 4:
                     if auto:
                         trainer.env.bot_difficulty = max(0.0, trainer.env.bot_difficulty - self.config.diff_step_decrease)
@@ -223,6 +233,7 @@ class DuelStage(Stage):
                 new_diff = trainer.env.bot_difficulty
                 msg = None
                 
+                # Turbo Logic
                 if rec_wr > self.config.wr_progression_insane_turbo:
                     new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_insane_turbo); msg = "Insane Turbo"
                 elif rec_wr > self.config.wr_progression_super_turbo:
@@ -238,17 +249,27 @@ class DuelStage(Stage):
                     if msg and auto:
                          trainer.env.bot_difficulty = new_diff
                          trainer.log(f"-> {msg}: Increasing Bot Difficulty to {trainer.env.bot_difficulty:.2f} (Capped at {max_diff})")
-                else:
-                     # Max difficulty reached
-                     pass
             
             # Graduation Check
-            # Relaxed Constraint: Use Configurable Difficulty Threshold (e.g. 0.8) instead of 1.0
             if trainer.env.bot_difficulty >= self.config.duel_graduation_difficulty:
                 min_wr = self.config.duel_graduation_win_rate
-                checks = self.config.duel_graduation_checks
                 
-                if rec_wr >= min_wr:
+                # Dual Proficiency Gate
+                # 1. Racing Competence
+                passed_racing = (rec_wr >= min_wr)
+                
+                # 2. Blocker Competence (Denial Rate OR Impact)
+                min_dr = self.config.duel_graduation_denial_rate
+                min_impact = self.config.duel_graduation_blocker_impact
+                passed_blocking = (rec_dr >= min_dr) or (avg_impact >= min_impact)
+                
+                passed = passed_racing and passed_blocking
+                
+                if not passed:
+                    if passed_racing and not passed_blocking:
+                         trainer.log(f"-> Graduation Stalled: Good Racing ({rec_wr:.2f}) but Weak Blocking (DR {rec_dr:.2f} < {min_dr} & Imp {avg_impact:.0f} < {min_impact})")
+                
+                if passed:
                     self.grad_consistency_counter += 1
                 else:
                     self.grad_consistency_counter = 0
@@ -258,105 +279,18 @@ class DuelStage(Stage):
                 
                 if self.grad_consistency_counter >= checks:
                     should_graduate = True
-                    reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} (Diff {trainer.env.bot_difficulty:.2f}) for {checks} checks"
+                    reason = f"Competence: WR {rec_wr:.2f} & Blocker (DR {rec_dr:.2f}/Imp {avg_impact:.0f}) for {checks} checks"
                     
                 if should_graduate:
-                     trainer.log(f">>> UPGRADING TO STAGE 3: INTERCEPT (BLOCKER ACADEMY) ({reason}) <<<")
+                     trainer.log(f">>> UPGRADING TO STAGE 3: TEAM ({reason}) <<<")
                      if auto:
-                         trainer.env.bot_difficulty = 0.8 # Fixed difficulty for Academy
+                         trainer.env.bot_difficulty = self.config.team_start_difficulty
                          trainer.env.stage_metrics["recent_games"] = 0
                          trainer.env.stage_metrics["recent_wins"] = 0
+                         trainer.env.stage_metrics["recent_denials"] = 0
+                         trainer.env.stage_metrics["blocker_impact"] = 0
                          trainer.env.stage_metrics["recent_episodes"] = 0
-                         return STAGE_INTERCEPT, reason
-
-        return None, ""
-
-    def update_step_penalty(self, base_penalty: float) -> float:
-        return base_penalty
-
-
-    @property
-    def target_evolve_interval(self) -> int:
-        return 5 # Slow Evolution for Duel
-
-
-class InterceptStage(Stage):
-    def __init__(self, config: CurriculumConfig):
-        super().__init__("Intercept", config)
-        self.grad_consistency_counter = 0
-
-    def get_active_pods(self) -> List[int]:
-        # Agent: 0 (Blocker)
-        # Bot: 2 (Runner)
-        return [0, 2]
-
-    def get_env_config(self) -> EnvConfig:
-        return EnvConfig(
-            mode_name="intercept",
-            track_gen_type="max_entropy",
-            active_pods=[0, 2],
-            use_bots=True, 
-            bot_pods=[2],
-            step_penalty_active_pods=[0], # Penalty only for agent
-            # No orientation penalty for blocker?
-            # Actually, let's keep it to encourage basic driving competence
-            orientation_active_pods=[0],
-            fixed_roles={0: 0, 2: 1} # 0=Blocker, 1=Runner
-        )
-
-    def get_objectives(self, p: Dict[str, Any]) -> List[float]:
-        # Objectives: Damage (Primary), Proximity (Secondary), Novelty
-        # We assume ema_blocker_dmg is tracked.
-        # We also want to MINIMIZE Runner Progress? Hard to track per agent.
-        return [
-            p.get('ema_blocker_dmg', 0.0), # Maximize Collision Damage
-            p.get('ema_wins', 0.0), # If we can win?
-            p.get('novelty_score', 0.0)
-        ]
-        
-    def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
-        return False, ""
-
-    def update(self, trainer) -> Tuple[Optional[int], str]:
-        # --- Enforce Difficulty ---
-        # We want a competent runner (0.8 ~ 0.9) to practice against.
-        TARGET_DIFFICULTY = 0.85
-        if trainer.env.bot_difficulty != TARGET_DIFFICULTY:
-            trainer.env.bot_difficulty = TARGET_DIFFICULTY
-        
-        # --- Graduation Logic ---
-        # Goal: DENIAL. The Blocker wins if the Runner fails to finish (Timeout).
-        # We track "Timeouts" as a proxy for Blocker Success.
-        
-        metrics = trainer.env.stage_metrics
-        rec_episodes = metrics.get("recent_episodes", 0)
-        
-        if rec_episodes > 500:
-            rec_games = metrics["recent_games"] # Finished by someone
-            rec_wins = metrics["recent_wins"]   # Agent (Blocker) Wins (Rare)
-            
-            # Timeouts = Episodes - Games
-            # (Note: In some env logic, Timeout counts as game? No, typically 'dones' are set on timeout. 
-            # But 'recent_games' usually counts 'winners != -1'. Timeout has winner=-1.)
-            rec_timeouts = rec_episodes - rec_games
-            
-            denial_rate = rec_timeouts / rec_episodes
-            
-            # Reset Metrics
-            metrics["recent_games"] = 0
-            metrics["recent_wins"] = 0
-            metrics["recent_episodes"] = 0
-            
-            trainer.log(f"Stage 3 (Academy) Status: Denial Rate {denial_rate*100:.1f}% | Timeouts: {rec_timeouts} / {rec_episodes}")
-            
-            # Graduation Threshold: > 50% Denial? (Subject to tuning)
-            # User suggested manual, but let's provide a hint.
-            if denial_rate > 0.60:
-                 trainer.log(">>> Blocker Academy: HIGH PROFIENCY DETECTED (Denial > 60%) <<<")
-                 # We can auto-graduate or just log. STAGE_TEAM is next.
-                 if trainer.curriculum_mode == "auto":
-                     trainer.env.bot_difficulty = self.config.team_start_difficulty
-                 return STAGE_TEAM, f"Denial Rate {denial_rate:.2f} > 0.60"
+                         return STAGE_TEAM, reason
 
         return None, ""
 
@@ -365,7 +299,7 @@ class InterceptStage(Stage):
 
     @property
     def target_evolve_interval(self) -> int:
-        return 5
+        return 5 # Unified stage needs more time for pairing variations
 
 
 class TeamStage(Stage):
@@ -415,12 +349,11 @@ class TeamStage(Stage):
         eff = p.get('ema_efficiency', 999.0); eff = eff if eff is not None else 999.0
         return [
             p.get('ema_wins', 0.0),
+            p.get('ema_denials', 0.0), # Carry over Blocker skills
+            p.get('ema_blocker_dmg', 0.0), # Carry over Aggression
             p.get('team_spirit', 0.0),
             -eff
         ]
-        
-    def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
-        return False, ""
 
     def update(self, trainer) -> Tuple[Optional[int], str]:
         # Dynamic Difficulty
@@ -515,9 +448,6 @@ class LeagueStage(Stage):
             p.get('ema_laps', 0.0),
             -p.get('ema_efficiency', 999.0)
         ]
-        
-    def check_graduation(self, metrics: Dict[str, Any], env: Any) -> Tuple[bool, str]:
-        return False, "End Game"
 
     def update(self, trainer) -> Tuple[Optional[int], str]:
         # League logic: Just monitor?

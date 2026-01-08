@@ -20,7 +20,9 @@ const RW = {
     PROXIMITY: 11,
     MAGNET: 12,
     RANK: 13,
-    DENIAL: 15
+    LAP: 14,
+    DENIAL: 15,
+    ZONE: 16
 }
 
 interface ConfigPreset {
@@ -33,7 +35,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v11', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v14', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -49,7 +51,8 @@ export const ConfigPanel: React.FC = () => {
             [RW.STEP_PENALTY]: 10.0,
             [RW.PROXIMITY]: 5.0,
             [RW.RANK]: 500.0,
-            [RW.DENIAL]: 0.5
+            [RW.LAP]: 2000.0,
+            [RW.DENIAL]: 10000.0
         },
         tau: 0.0,
         team_spirit: 0.0
@@ -79,7 +82,19 @@ export const ConfigPanel: React.FC = () => {
         team_graduation_difficulty: 0.85,
         team_graduation_win_rate: 0.70,
         team_graduation_checks: 5,
-        team_start_difficulty: 0.6
+        team_start_difficulty: 0.6,
+
+        // New Phase 3
+        duel_graduation_denial_rate: 0.05,
+        duel_graduation_blocker_impact: 1000.0
+    })
+
+    // Bot Config
+    const [botConfig, setBotConfig] = useLocalStorage('spt2_config_bot_v1', {
+        intercept_offset_scale: 500.0,
+        ramming_speed_scale: 20.0,
+        difficulty_noise_scale: 30.0,
+        thrust_scale: 80.0
     })
 
     // Presets
@@ -109,7 +124,8 @@ export const ConfigPanel: React.FC = () => {
                 rewards: rewards,
                 curriculum: curriculum,
                 hyperparameters: hyperparams,
-                transitions: transitions
+                transitions: transitions,
+                bot_config: botConfig
             }
         }
         sendMessage(JSON.stringify(payload))
@@ -120,7 +136,8 @@ export const ConfigPanel: React.FC = () => {
             rewards: rewards,
             curriculum: curriculum,
             hyperparameters: hyperparams,
-            transitions: transitions
+            transitions: transitions,
+            bot_config: botConfig
         }
 
         try {
@@ -150,7 +167,8 @@ export const ConfigPanel: React.FC = () => {
             rewards: rewards,
             curriculum: curriculum,
             hyperparameters: hyperparams,
-            transitions: transitions
+            transitions: transitions,
+            bot_config: botConfig
         }
 
         try {
@@ -177,6 +195,7 @@ export const ConfigPanel: React.FC = () => {
         if (d.curriculum) setCurriculum(prev => ({ ...prev, ...d.curriculum }))
         if (d.hyperparameters) setHyperparams(prev => ({ ...prev, ...d.hyperparameters }))
         if (d.transitions) setTransitions(prev => ({ ...prev, ...d.transitions }))
+        if (d.bot_config) setBotConfig(prev => ({ ...prev, ...d.bot_config }))
     }
 
     const handleDeletePreset = async (name?: string) => {
@@ -222,18 +241,16 @@ export const ConfigPanel: React.FC = () => {
                     <h4 className="text-neon-cyan text-xs font-bold uppercase mb-1">
                         {st === 0 && "Stage 0: Nursery"}
                         {st === 1 && "Stage 1: Solo Time Trial"}
-                        {st === 2 && "Stage 2: Duel (1v1)"}
-                        {st === 3 && "Stage 3: Blocker Academy"}
-                        {st === 4 && "Stage 4: Team (2v2)"}
-                        {st === 5 && "Stage 5: League"}
+                        {st === 2 && "Stage 2: Unified Duel (1v1)"}
+                        {st === 3 && "Stage 3: Team (2v2)"}
+                        {st === 4 && "Stage 4: League"}
                     </h4>
                     <p className="text-gray-400 text-[10px]">
                         {st === 0 && "Goal: Learn basic navigation. Simple tracks, no bots. Graduate by reaching Consistency threshold."}
                         {st === 1 && "Goal: Speed & Efficiency. Complex tracks, no bots. Penalties for slow transitions."}
-                        {st === 2 && "Goal: Beating a Rival. 1v1 against a bot. Win Rate matters."}
-                        {st === 3 && "Goal: Denial of Service. 1v1 (Blocker Only) vs Runner Bot. Focus on Collision & Blocking."}
-                        {st === 4 && "Goal: Team Coordination. 2v2. Work with teammate to win."}
-                        {st === 5 && "Goal: Self-Play Supremacy. No explicit graduation."}
+                        {st === 2 && "Goal: Unified Duel. 1v1 against Bot. Play 50% Runner / 50% Blocker."}
+                        {st === 3 && "Goal: Team Coordination. 2v2v2v2? No, 2v2. Work with teammate to win."}
+                        {st === 4 && "Goal: Self-Play Supremacy. No explicit graduation."}
                     </p>
                 </div>
 
@@ -242,6 +259,13 @@ export const ConfigPanel: React.FC = () => {
                         <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mb-2">Bot Settings</h3>
                         <Slider label="BOT DIFFICULTY" min={0} max={1} step={0.01} value={curriculum.difficulty} valueDisplay={curriculum.difficulty.toFixed(2)}
                             onChange={(e) => setCurriculum(prev => ({ ...prev, difficulty: parseFloat(e.target.value) }))} />
+
+                        <div className="mt-2 pt-2 border-t border-gray-700">
+                            <Slider label="INTERCEPT OFFSET (GUARD)" min={0} max={2000} step={50} value={botConfig.intercept_offset_scale}
+                                onChange={(e) => setBotConfig(prev => ({ ...prev, intercept_offset_scale: parseFloat(e.target.value) }))} />
+                            <Slider label="RAMMING AGGRESSION" min={0} max={100} step={1} value={botConfig.ramming_speed_scale}
+                                onChange={(e) => setBotConfig(prev => ({ ...prev, ramming_speed_scale: parseFloat(e.target.value) }))} />
+                        </div>
                     </div>
                 )}
 
@@ -270,6 +294,10 @@ export const ConfigPanel: React.FC = () => {
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_difficulty: parseFloat(e.target.value) }))} />
                                 <Slider label="MIN WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.duel_graduation_win_rate} valueDisplay={(transitions.duel_graduation_win_rate * 100).toFixed(0) + "%"}
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_win_rate: parseFloat(e.target.value) }))} />
+                                <Slider label="MIN DENIAL RATE" min={0.0} max={0.5} step={0.01} value={transitions.duel_graduation_denial_rate || 0.05} valueDisplay={((transitions.duel_graduation_denial_rate || 0.05) * 100).toFixed(0) + "%"}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_denial_rate: parseFloat(e.target.value) }))} />
+                                <Slider label="BLOCKER IMPACT THRESHOLD" min={0} max={5000} step={100} value={transitions.duel_graduation_blocker_impact || 1000}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_blocker_impact: parseFloat(e.target.value) }))} />
                                 <Slider label="CONSISTENCY CHECKS" min={1} max={10} step={1} value={transitions.duel_graduation_checks}
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_checks: parseFloat(e.target.value) }))} />
                             </div>
@@ -277,16 +305,6 @@ export const ConfigPanel: React.FC = () => {
                     )}
 
                     {st === 3 && (
-                        <div className="p-2 border border-yellow-700/50 rounded bg-yellow-900/10">
-                            <h4 className="text-[10px] text-yellow-500 mb-1">EXPERIMENTAL CURRICULUM</h4>
-                            <p className="text-[10px] text-gray-400">
-                                This stage focuses on training the Blocker role.
-                                Graduation is currently <strong>MANUAL</strong> based on observed behavior (Ramming/Camping).
-                            </p>
-                        </div>
-                    )}
-
-                    {st === 4 && (
                         <>
                             <div className="p-2 border border-gray-700 rounded bg-gray-900/50 space-y-3">
                                 <h4 className="text-[10px] text-neon-cyan mb-2">COMPETENCE STANDARD</h4>
@@ -336,10 +354,9 @@ export const ConfigPanel: React.FC = () => {
                             >
                                 <option value={0}>0: NURSERY</option>
                                 <option value={1}>1: SOLO TRIAL</option>
-                                <option value={2}>2: DUEL (1v1)</option>
-                                <option value={3}>3: BLOCKER ACADEMY</option>
-                                <option value={4}>4: TEAM (2v2)</option>
-                                <option value={5}>5: LEAGUE</option>
+                                <option value={2}>2: UNIFIED DUEL</option>
+                                <option value={3}>3: TEAM (2v2)</option>
+                                <option value={4}>4: LEAGUE</option>
                             </select>
                         </div>
 
@@ -368,6 +385,12 @@ export const ConfigPanel: React.FC = () => {
 
                             <Slider label="RANK (OVERTAKE)" min={0} max={2000} step={50} value={rewards.weights[RW.RANK]}
                                 onChange={(e) => setWeight(RW.RANK, parseFloat(e.target.value))} />
+
+                            <Slider label="CHECKPOINT SCALE" min={0} max={200} step={5} value={rewards.weights[RW.CHECKPOINT_SCALE]}
+                                onChange={(e) => setWeight(RW.CHECKPOINT_SCALE, parseFloat(e.target.value))} />
+
+                            <Slider label="LAP COMPLETION" min={0} max={5000} step={100} value={rewards.weights[RW.LAP]}
+                                onChange={(e) => setWeight(RW.LAP, parseFloat(e.target.value))} />
                         </div>
 
                         {/* Penalties */}
@@ -388,8 +411,14 @@ export const ConfigPanel: React.FC = () => {
                                 onChange={(e) => setWeight(RW.LOSS, parseFloat(e.target.value))} />
                             <Slider label="HUMILIATION (BLOCKER)" min={0} max={50} step={0.5} value={rewards.weights[RW.COLLISION_BLOCKER]}
                                 onChange={(e) => setWeight(RW.COLLISION_BLOCKER, parseFloat(e.target.value))} />
-                            <Slider label="DENIAL (ZONE/PRESS)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.DENIAL]}
+                            <Slider label="COLLISION (RUNNER)" min={0} max={10} step={0.1} value={rewards.weights[RW.COLLISION_RUNNER]}
+                                onChange={(e) => setWeight(RW.COLLISION_RUNNER, parseFloat(e.target.value))} />
+                            <Slider label="FRIENDLY FIRE" min={0} max={20} step={0.5} value={rewards.weights[RW.COLLISION_MATE]}
+                                onChange={(e) => setWeight(RW.COLLISION_MATE, parseFloat(e.target.value))} />
+                            <Slider label="DENIAL (TIMEOUT BONUS)" min={0} max={20000} step={100} value={rewards.weights[RW.DENIAL]}
                                 onChange={(e) => setWeight(RW.DENIAL, parseFloat(e.target.value))} />
+                            <Slider label="ZONE CONTROL (DENSE)" min={0} max={100} step={1.0} value={rewards.weights[RW.ZONE] || 5.0}
+                                onChange={(e) => setWeight(RW.ZONE, parseFloat(e.target.value))} />
                             <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit}
                                 onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />
                         </div>
