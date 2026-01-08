@@ -11,21 +11,21 @@ graph TD
         sim_vec["Vectorized Simulation (8192 Envs)"]
         physics_eng["Custom Physics Engine & Rewards"]
         
-        subgraph agent_model ["Universal Agent"]
+        subgraph agent_model ["Universal Agent (~58k Params)"]
             obs_input["Observation"]
             
             subgraph unified_brain ["Recurrent Split Backbone"]
-                pilot_feat["Pilot Stream (Sensory-Motor)"]
-                cmd_feat["Commander Stream (Contextual)"]
+                pilot_feat["Pilot Stream (Sensory-Motor)<br/>~4.8k params"]
+                cmd_feat["Commander Backbone (Contextual)<br/>~14k params"]
                 
-                lstm_core["LSTM Core (Memory)"]
+                lstm_core["LSTM Core (Memory)<br/>~28k params"]
                 
                 pilot_heads["Pilot Heads"]
                 cmd_heads["Commander Heads"]
             end
             
-            enemy_encoder["DeepSets Enemy Encoder"]
-            map_encoder["Map Transformer"]
+            enemy_encoder["DeepSets Enemy Encoder<br/>~1k params"]
+            map_encoder["Map Transformer<br/>~8.6k params"]
             role_emb["Role Embedding"]
         end
     end
@@ -98,3 +98,15 @@ We incorporate **Random Network Distillation** to generate intrinsic rewards.
 *   **Predictor Network**: Tries to predict the Target Network's output.
 *   **Reward**: The error (MSE) between the Predictor and Target.
 *   **Effect**: The agent gets "bored" of states it has seen often (low error) and seeks novel states (high error), crucial for discovering complex racing lines or blocking strategies.
+
+### 7. Model Complexity
+Despite the deep reinforcement learning capability, the model remains highly efficient to ensure high SPS (Steps Per Second).
+
+*   **Total Trainable Parameters**: ~155,449
+    *   **Actor Network**: ~57,672 (Lightweight for fast inference)
+    *   **Critic Network**: ~97,777 (Larger capacity for accurate value estimation)
+*   **Key Component sizes**:
+    *   **LSTM Core**: ~28k params
+    *   **Map Transformer**: ~8.6k params
+    *   **DeepSets Encoders**: ~1k params each
+

@@ -52,28 +52,28 @@ graph TD
     end
 
     subgraph "Pilot Network"
-    S & CP --> PE[Pilot Embed]
+    S & CP --> PE[Pilot Embed<br/>~4.8k params]
     PE --> P_Feat(Pilot Features)
     end
 
     subgraph "Commander Network"
-    TM & EN --> EE[Shared Enemy Encoder]
+    TM & EN --> EE[Shared Enemy Encoder<br/>~1k params]
     EE --> E_Feat(Entity Features)
     E_Feat --> GMP[Global Max Pool]
     GMP --> C_Feat(Context Features)
     
-    Map --> MT[Map Transformer]
+    Map --> MT[Map Transformer<br/>~8.6k params]
     MT --> M_Feat(Map Features)
     
     R --> RE[Role Embedding]
     RE --> R_Feat(Role Features)
     
     P_Feat & C_Feat & M_Feat & R_Feat --> Concat[Concatenate]
-    Concat --> CB[Commander Backbone]
+    Concat --> CB[Commander Backbone<br/>~14k params]
     end
 
     subgraph "Recurrent Core"
-    CB --> LSTM[LSTM Cell]
+    CB --> LSTM[LSTM Cell<br/>~28k params]
     LSTM --> H((Hidden State))
     H -.-> LSTM
     end
@@ -96,6 +96,19 @@ graph TD
     Select --> Out_Ang(Action: Angle)
     Select --> Out_Misc(Action: Shield/Boost)
 ```
+
+## Model Complexity
+
+The submission model is a direct export of the trained `PodAgent` (Actor), highly optimized for size and speed.
+
+*   **Total Parameters**: ~58k (Actor only)
+*   **Key Component Breakdown**:
+    *   **LSTM Core**: ~28k params (Maintains temporal context)
+    *   **Commander Backbone**: ~14k params (Tactical decision making)
+    *   **Map Transformer**: ~8.6k params (Track analysis)
+    *   **Pilot Stream**: ~4.8k params (Basic driving skills)
+    *   **Enemy/Team Encoders**: ~1k params each (Entity processing)
+
 
 ## Neural-Guided Local Search
 
