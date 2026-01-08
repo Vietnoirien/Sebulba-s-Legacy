@@ -105,12 +105,12 @@ def main():
     
     print("System running. Press Ctrl+C to stop.")
     
-    # Open Browser
-    import webbrowser
-    print("Opening browser...")
+    # Open Browser (Disabled)
+    # import webbrowser
+    # print("Opening browser...")
     # Give a moment for services to bind
     time.sleep(1.5) 
-    webbrowser.open("http://localhost:5173")
+    # webbrowser.open("http://localhost:5173")
     
     try:
         while True:

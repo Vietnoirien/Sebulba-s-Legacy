@@ -12,12 +12,12 @@ class PilotNet(nn.Module):
     """
     Pilot: Robust Driving (Self + CP).
     Small capacity, focused on path following.
-    Input: Self(15) + CP(6) = 21
+    Input: Self(15) + CP(10) = 25
     Output: Thrust(1), Angle(1)
     """
     def __init__(self, hidden_dim=64):
         super().__init__()
-        self.input_dim = 15 + 6
+        self.input_dim = 15 + 10
         self.hidden_dim = hidden_dim
         
         self.net = nn.Sequential(
@@ -187,9 +187,10 @@ class PodActor(nn.Module):
         super().__init__()
         
         # 1. Feature Extractors (No Heads yet)
-        # Pilot Features: Self(15) + CP(6) = 21 -> 64
+        # 1. Feature Extractors (No Heads yet)
+        # Pilot Features: Self(15) + CP(10) = 25 -> 64
         self.pilot_embed = nn.Sequential(
-            layer_init(nn.Linear(21, 64)),
+            layer_init(nn.Linear(25, 64)),
             nn.ReLU(),
             layer_init(nn.Linear(64, 48)), # Reduced to 48
             nn.ReLU()
@@ -201,10 +202,18 @@ class PodActor(nn.Module):
         # Commander Features
         self.role_embedding = nn.Embedding(2, 16)
         # CommanderNet (modified to be an embedder)
-        # Input: Self(15) + Team(16) + Enemy(16) + Role(16) + Map(32) = 95
+        # 2. Teammate Encoder (DeepSet, permutation invariant? actually just one)
+        # Input: [B, 4, 1, 14] -> Squeeze -> [B, 4, 14]
+        self.teammate_encoder = nn.Sequential(
+            layer_init(nn.Linear(14, 32)),
+            nn.ReLU(),
+            layer_init(nn.Linear(32, 16))
+        )
         
+        # 3. Enemy Encoder (DeepSet)
+        # Input: [B, 4, 2, 14] -> Process each -> Sum/Max
         self.enemy_encoder = nn.Sequential(
-            layer_init(nn.Linear(13, 32)),
+            layer_init(nn.Linear(14, 32)),
             nn.ReLU(),
             layer_init(nn.Linear(32, 16))
         )
@@ -336,7 +345,7 @@ class PodCritic(nn.Module):
         # Simplified feature extraction for Critic (MLP -> LSTM)
         # Simplified feature extraction for Critic (MLP -> LSTM)
         self.encoder = nn.Sequential(
-            layer_init(nn.Linear(15 + 13 + 13 + 6 + 32, 256)), # Self+Team+Enemy(Mean)+CP+Map(32)
+            layer_init(nn.Linear(15 + 14 + 14 + 10 + 32, 256)), # Self+Team+Enemy(Mean)+CP(10)+Map(32) = 85
             nn.ReLU(),
             layer_init(nn.Linear(256, 128)),
             nn.ReLU()

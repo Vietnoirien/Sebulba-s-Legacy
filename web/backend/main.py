@@ -83,7 +83,8 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
         # Convert to JSON string
@@ -412,9 +413,9 @@ async def export_submission():
 DEFAULT_CONFIG = {
     "rewards": {
          "weights": {
-             "0": 10000.0, "1": 5000.0, "2": 2000.0, "3": 50.0, "4": 0.2,
-             "5": 0.5, "6": 5.0, "7": 10.0, "8": 1.0, "9": 10.0, "10": 2.0,
-             "11": 5.0, "12": 10.0, "13": 500.0
+             "0": 10000.0, "1": 2000.0, "2": 500.0, "3": 50.0, "4": 0.2,
+             "5": 0.5, "6": 5.0, "7": 10.0, "8": 1.0, "9": 10.0, "10": 5.0,
+             "11": 5.0, "12": 10.0, "13": 500.0, "15": 0.5
          },
          "tau": 0.0,
          "team_spirit": 0.0
@@ -422,14 +423,16 @@ DEFAULT_CONFIG = {
     "curriculum": {"stage": 0, "difficulty": 0.0},
     "hyperparameters": {"lr": 1e-4, "ent_coef": 0.01},
     "transitions": {
-         "solo_efficiency_threshold": 30.0,
-         "solo_consistency_threshold": 2000.0,
+         "nursery_consistency_threshold": 500.0,
+         "solo_efficiency_threshold": 40.0,
+         "solo_consistency_threshold": 3000.0,
          "duel_graduation_difficulty": 0.80,
          "duel_graduation_win_rate": 0.65,
          "duel_graduation_checks": 5,
          "team_graduation_difficulty": 0.85,
          "team_graduation_win_rate": 0.70,
-         "team_graduation_checks": 5
+         "team_graduation_checks": 5,
+         "team_start_difficulty": 0.6
     }
 }
 

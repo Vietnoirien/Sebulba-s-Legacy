@@ -14,6 +14,7 @@ import uuid
 from typing import List, Tuple, Dict, Optional
 import copy
 import shutil
+import gc
 
 # Import Env and Constants
 from simulation.env import (
@@ -65,8 +66,8 @@ class PPOTrainer:
         
         # Normalization
         self.rms_self = RunningMeanStd((15,), device=self.device)
-        self.rms_ent = RunningMeanStd((13,), device=self.device)
-        self.rms_cp = RunningMeanStd((6,), device=self.device)
+        self.rms_ent = RunningMeanStd((14,), device=self.device)
+        self.rms_cp = RunningMeanStd((10,), device=self.device)
         
         # RND Intrinsic Curiosity
         # Input: Normalized Self Obs (14)
@@ -220,15 +221,22 @@ class PPOTrainer:
         # Log only if significantly changed or first run
         if not hasattr(self, 'last_buffer_shape') or self.last_buffer_shape != (self.current_num_steps, num_active_per_agent_step):
              self.log(f"Allocating buffers for {self.current_num_steps} steps per iteration. Active Pods: {self.current_active_pods_count}")
+             
+             # [FIX] Explicit Memory Cleanup before Re-allocation
+             if hasattr(self, 'agent_batches'):
+                 self.agent_batches = []
+                 gc.collect()
+                 torch.cuda.empty_cache()
+                 
              self.last_buffer_shape = (self.current_num_steps, num_active_per_agent_step)
         
         self.agent_batches = []
         for _ in range(self.config.pop_size):
              self.agent_batches.append({
                  'self_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 15), device=self.device),
-                 'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 13), device=self.device),
-                 'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 13), device=self.device),
-                 'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 6), device=self.device),
+                 'teammate_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 14), device=self.device),
+                 'enemy_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 2, 14), device=self.device),
+                 'cp_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, 10), device=self.device),
                  'map_obs': torch.zeros((self.current_num_steps, num_active_per_agent_step, MAX_CHECKPOINTS, 2), device=self.device), # [B, MaxCP, 2]
                  'actions': torch.zeros((self.current_num_steps, num_active_per_agent_step, 4), device=self.device),
                  'rewards': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
@@ -1115,6 +1123,10 @@ class PPOTrainer:
             if self.env.curriculum_stage != prev_stage:
                  self.log(f"Config: Stage Transition {prev_stage} -> {self.env.curriculum_stage}. Resetting Environment...")
                  
+                 # [FIX] Memory Cleanup before intense transition logic
+                 gc.collect()
+                 torch.cuda.empty_cache()
+                 
                  # --- Mitosis Strategy (Transition to Team Mode) ---
                  # If moving from Solo/Duel (Stage < 2) to Team (Stage 2),
                  # Clone Runner Brain to Blocker Brain to avoid "Dead Weight".
@@ -1141,6 +1153,10 @@ class PPOTrainer:
                       # Reset Vectorized Optimizer State (Critical to break old momentum)
                       self.log(">>> [MITOSIS] Resetting Vectorized Optimizer State to clear Stage 2 momentum. <<<")
                       self.vectorized_adam.reset_state()
+                      
+                 # [FIX] Memory Cleanup after transition
+                 gc.collect()
+                 torch.cuda.empty_cache()
                       
                  
                  # GENERATE NEW MATCH ID (Forces Frontend Reset)
@@ -1272,9 +1288,9 @@ class PPOTrainer:
                 # It copies and stacks them. Since all_self[i] is [self.config.num_envs, 14] contiguous, this is fast.
                 
                 raw_self = all_self[active_pods].view(-1, 15) # [N_Active * self.config.num_envs, 15]
-                raw_tm = all_tm[active_pods].view(-1, 13)
-                raw_en = all_en[active_pods].view(-1, 2, 13)
-                raw_cp = all_cp[active_pods].view(-1, 6)
+                raw_tm = all_tm[active_pods].view(-1, 14)
+                raw_en = all_en[active_pods].view(-1, 2, 14)
+                raw_cp = all_cp[active_pods].view(-1, 10)
                 raw_map = all_map[active_pods].view(-1, MAX_CHECKPOINTS, 2)
                 
                 # Normalize & Update Stats
@@ -1338,9 +1354,9 @@ class PPOTrainer:
                 # Previous logic: norm_self = self.rms_self(raw_self) -> [N*T, D].
                 
                 v_s = norm_self.view(N_A, Pop, EPA, 15).permute(1, 0, 2, 3).reshape(Pop, -1, 15)
-                v_tm = norm_tm.view(N_A, Pop, EPA, 13).permute(1, 0, 2, 3).reshape(Pop, -1, 13)
-                v_en = norm_en.view(N_A, Pop, EPA, 2, 13).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 13)
-                v_cp = norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
+                v_tm = norm_tm.view(N_A, Pop, EPA, 14).permute(1, 0, 2, 3).reshape(Pop, -1, 14)
+                v_en = norm_en.view(N_A, Pop, EPA, 2, 14).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 14)
+                v_cp = norm_cp.view(N_A, Pop, EPA, 10).permute(1, 0, 2, 3).reshape(Pop, -1, 10)
                 v_mp = norm_map.view(N_A, Pop, EPA, MAX_CHECKPOINTS, 2).permute(1, 0, 2, 3, 4).reshape(Pop, -1, MAX_CHECKPOINTS, 2)
 
                 # Initialize Current States if first step
@@ -1436,7 +1452,7 @@ class PPOTrainer:
                     batch['cp_obs'][step] = v_cp[i].detach()
                     batch['map_obs'][step] = v_mp[i].detach()
                     
-                    batch['actions'][step] = v_act[i].detach().reshape(self.config.envs_per_agent * 1, 4)
+                    batch['actions'][step] = v_act[i].detach().reshape(num_active_per_agent, 4)
                     batch['logprobs'][step] = v_lp[i].detach().flatten()
                     batch['values'][step] = v_val[i].detach().flatten()
                     
@@ -1596,15 +1612,20 @@ class PPOTrainer:
                 # Stage 0: 0.0
                 # Stage 1: 0.5
                 # Stage 2: 0.9
+                # Stage 3: 0.0 (Intercept - Academy, Full Feedback)
+                # Stage 4: 0.5 (Team - Safety Net, 50% Feedback)
+                # Stage 5: 0.85 (League - High Sparse)
                 current_tau = 0.0
                 if self.env.curriculum_stage == STAGE_SOLO:
                     current_tau = 0.25
                 elif self.env.curriculum_stage == STAGE_DUEL:
                     current_tau = 0.5
+                elif self.env.curriculum_stage == STAGE_INTERCEPT:
+                    current_tau = 0.0
                 elif self.env.curriculum_stage == STAGE_TEAM:
-                    current_tau = 0.75
+                    current_tau = 0.5
                 elif self.env.curriculum_stage == STAGE_LEAGUE:
-                    current_tau = 0.9
+                    current_tau = 0.85
                 
                 # STEP
                 # Pass Global Reward Tensor
@@ -2051,9 +2072,9 @@ class PPOTrainer:
             # Source: [4, self.config.num_envs, ...]
             
             next_raw_self = all_self[active_pods].view(-1, 15)
-            next_raw_tm = all_tm[active_pods].view(-1, 13)
-            next_raw_en = all_en[active_pods].view(-1, 2, 13)
-            next_raw_cp = all_cp[active_pods].view(-1, 6)
+            next_raw_tm = all_tm[active_pods].view(-1, 14)
+            next_raw_en = all_en[active_pods].view(-1, 2, 14)
+            next_raw_cp = all_cp[active_pods].view(-1, 10)
             
             next_norm_self = self.rms_self(next_raw_self, fixed=True)
             
@@ -2065,9 +2086,9 @@ class PPOTrainer:
             
             # View as [N_Act, self.config.num_envs, ...]
             next_norm_self = next_norm_self.view(len(active_pods), self.config.num_envs, 15)
-            next_norm_tm = next_norm_tm.view(len(active_pods), self.config.num_envs, 13)
-            next_norm_en = next_norm_en.view(len(active_pods), self.config.num_envs, 2, 13)
-            next_norm_cp = next_norm_cp.view(len(active_pods), self.config.num_envs, 6)
+            next_norm_tm = next_norm_tm.view(len(active_pods), self.config.num_envs, 14)
+            next_norm_en = next_norm_en.view(len(active_pods), self.config.num_envs, 2, 14)
+            next_norm_cp = next_norm_cp.view(len(active_pods), self.config.num_envs, 10)
             
             # Map Norm (Reuse same logic as rollout)
             next_raw_map = all_map[active_pods].view(-1, MAX_CHECKPOINTS, 2)
@@ -2088,9 +2109,9 @@ class PPOTrainer:
             # 1. Next Values (Vectorized)
             # Reshape next_norm_* [N_A, TotalEnvs, D] -> [Pop, Batch, D]
             v_n_s = next_norm_self.view(N_A, Pop, EPA, 15).permute(1, 0, 2, 3).reshape(Pop, -1, 15)
-            v_n_tm = next_norm_tm.view(N_A, Pop, EPA, 13).permute(1, 0, 2, 3).reshape(Pop, -1, 13)
-            v_n_en = next_norm_en.view(N_A, Pop, EPA, 2, 13).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 13)
-            v_n_cp = next_norm_cp.view(N_A, Pop, EPA, 6).permute(1, 0, 2, 3).reshape(Pop, -1, 6)
+            v_n_tm = next_norm_tm.view(N_A, Pop, EPA, 14).permute(1, 0, 2, 3).reshape(Pop, -1, 14)
+            v_n_en = next_norm_en.view(N_A, Pop, EPA, 2, 14).permute(1, 0, 2, 3, 4).reshape(Pop, -1, 2, 14)
+            v_n_cp = next_norm_cp.view(N_A, Pop, EPA, 10).permute(1, 0, 2, 3).reshape(Pop, -1, 10)
             v_n_mp = next_norm_map.view(N_A, Pop, EPA, MAX_CHECKPOINTS, 2).permute(1, 0, 2, 3, 4).reshape(Pop, -1, MAX_CHECKPOINTS, 2)
             
             with torch.no_grad():

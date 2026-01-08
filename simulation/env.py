@@ -1159,7 +1159,8 @@ class PodRacerEnv:
             
             blocker_damage_metric[:, i] = bonus * is_block.float()
             
-            blocker_reward = w_col_block * bonus
+            # [FIX] Apply Tau (dense_mult) to Blocker Rewards
+            blocker_reward = w_col_block * bonus * dense_mult
             rewards_indiv[:, i] += blocker_reward * is_block.float()
         
             # 3. Teammate Collision Penalty
@@ -1199,7 +1200,8 @@ class PodRacerEnv:
                       condition = is_block & is_e_run
                       prox_rew[condition] += bonus[condition]
                  
-                 rewards_indiv[:, i] += prox_rew * w_prox * is_block.float()
+                 # [FIX] Apply Tau (dense_mult)
+                 rewards_indiv[:, i] += prox_rew * w_prox * dense_mult * is_block.float()
 
         # --- RW_DENIAL (Blocker -> Deny Enemy Progress) ---
         # "The Doorman Reward": Stop enemy from moving to CP.
@@ -1212,68 +1214,76 @@ class PodRacerEnv:
         w_denial = reward_weights[:, 15] if reward_weights.shape[1] > 15 else torch.zeros(self.num_envs, device=self.device)
         
         if self.curriculum_stage >= STAGE_DUEL and w_denial.sum() > 0:
-             for i in range(4):
-                 is_block = ~self.is_runner[:, i]
-                 if not is_block.any(): continue
-                 
-                 team = i // 2
-                 enemy_team = 1 - team
-                 # Get Enemy Runner Index
-                 e_indices = torch.tensor([2*enemy_team, 2*enemy_team+1], device=self.device)
-                 is_e_run_mask = self.is_runner[:, e_indices] # [B, 2]
-                 
-                 denial_rew = torch.zeros(self.num_envs, device=self.device)
-                 p_pos = self.physics.pos[:, i]
+            for i in range(4):
+                is_block = ~self.is_runner[:, i]
+                if not is_block.any(): continue
+                
+                team = i // 2
+                enemy_team = 1 - team
+                # Get Enemy Runner Index
+                e_indices = torch.tensor([2*enemy_team, 2*enemy_team+1], device=self.device)
+                is_e_run_mask = self.is_runner[:, e_indices] # [B, 2]
+                
+                denial_rew = torch.zeros(self.num_envs, device=self.device)
+                p_pos = self.physics.pos[:, i]
 
-                 for idx_in_team in range(2):
-                      real_e_idx = e_indices[idx_in_team]
-                      is_target = is_e_run_mask[:, idx_in_team] # Bool [B]
-                      
-                      # Only process if this enemy is a runner and I am a blocker
-                      valid_pair = is_block & is_target
-                      if not valid_pair.any(): continue
-                      
-                      # Rank Scaling
-                      # e_rank = rank_norm[:, real_e_idx, 0]
-                      # scale = 1.0 + (1.0 - e_rank)
-                      
-                      e_rank = rank_norm[:, real_e_idx, 0]
-                      rank_scale = 1.0 + (1.0 - e_rank)
-                      
-                      # 1. Check Distance (Doorman Constraint)
-                      e_pos = self.physics.pos[:, real_e_idx]
-                      dist = torch.norm(e_pos - p_pos, dim=1)
-                      
-                      # Interact only if < 3000u (Visible range)
-                      close_mask = valid_pair & (dist < 3000.0)
-                      if not close_mask.any(): continue
-                      
-                      # 2. Calculate Enemy Progress Velocity
-                      # Vector to Enemy's Next CP
-                      e_next_cp = self.next_cp_id[:, real_e_idx]
-                      # Gather CP Pos
-                      batch_idx = torch.arange(self.num_envs, device=self.device)
-                      cp_pos = self.checkpoints[batch_idx, e_next_cp] # [B, 2]
-                      
-                      vec_to_cp = cp_pos - e_pos
-                      d_cp = torch.norm(vec_to_cp, dim=1, keepdim=True) + 1e-6
-                      dir_to_cp = vec_to_cp / d_cp # Normalized [B, 2]
-                      
-                      e_vel = self.physics.vel[:, real_e_idx] # [B, 2]
-                      
-                      # Dot Product: Velocity component towards CP
-                      # Positive = Going to CP (Bad for Blocker)
-                      # Negative = Going away (Good for Blocker)
-                      progress_speed = (e_vel * dir_to_cp).sum(dim=1)
-                      
-                      # Reward = -Progress
-                      # If enemy speed 600 -> Reward -600 (Penalty)
-                      # If enemy speed -200 (Bounced) -> Reward +200
-                      # Scaling: w_denial is usually ~0.5. 
-                      # So -300 to +100 range per step.
-                      denial_rew[close_mask] += (-progress_speed[close_mask]) * rank_scale[close_mask]
-                 
-                 rewards_indiv[:, i] += denial_rew * w_denial * is_block.float()
+                for idx_in_team in range(2):
+                    real_e_idx = e_indices[idx_in_team]
+                    is_target = is_e_run_mask[:, idx_in_team] # Bool [B]
+                    
+                    # Only process if this enemy is a runner and I am a blocker
+                    valid_pair = is_block & is_target
+                    if not valid_pair.any(): continue
+                    
+                    e_rank = rank_norm[:, real_e_idx, 0]
+                    rank_scale = 1.0 + (1.0 - e_rank)
+                    
+                    # 1. Check Distance (Doorman Constraint)
+                    e_pos = self.physics.pos[:, real_e_idx]
+                    dist = torch.norm(e_pos - p_pos, dim=1)
+                    
+                    # Interact only if < 3000u (Visible range)
+                    close_mask = valid_pair & (dist < 3000.0)
+                    if not close_mask.any(): continue
+                    
+                    # 2. Calculate Enemy Progress Speed (Doorman)
+                    # Vector to Enemy's Next CP
+                    e_next_cp = self.next_cp_id[:, real_e_idx]
+                    batch_idx = torch.arange(self.num_envs, device=self.device)
+                    cp_pos = self.checkpoints[batch_idx, e_next_cp] # [B, 2]
+                    
+                    vec_to_cp = cp_pos - e_pos
+                    d_cp = torch.norm(vec_to_cp, dim=1, keepdim=True) + 1e-6
+                    dir_to_cp = vec_to_cp / d_cp # Normalized [B, 2]
+                    
+                    e_vel = self.physics.vel[:, real_e_idx] # [B, 2]
+                    
+                    # Dot Product: Velocity component towards CP
+                    progress_speed = (e_vel * dir_to_cp).sum(dim=1)
+                    
+                    # 3. Zone Control (Intercept)
+                    # Project Vector(Enemy->Me) onto Vector(Enemy->CP)
+                    # If positive, I am "ahead" in their path.
+                    vec_e_me = p_pos - e_pos
+                    proj_pos = (vec_e_me * dir_to_cp).sum(dim=1)
+                    
+                    # Max reward if I am ~1000-3000 units ahead.
+                    # If proj_pos > 0: reward = proj_pos / 1000.0 (Clipped)
+                    zone_reward = torch.clamp(proj_pos / 3000.0, 0.0, 1.0)
+                    
+                    # 4. Timeout Pressure
+                    # If Enemy Timeout < 25, their desperation is high.
+                    # Multiplier for all denial actions.
+                    e_timeout = self.timeouts[:, real_e_idx]
+                    pressure_mult = torch.where(e_timeout < 25, 2.0, 1.0)
+                    
+                    # Combine:
+                    base_denial = (-progress_speed) + (zone_reward * 200.0)
+                    
+                    denial_rew[close_mask] += base_denial[close_mask] * rank_scale[close_mask] * pressure_mult[close_mask]
+                
+                # [FIX] Apply Tau (dense_mult)
+                rewards_indiv[:, i] += denial_rew * w_denial * dense_mult * is_block.float()
                  
         # Decrement Role Timer
         self.role_lock_timer = torch.clamp(self.role_lock_timer - 1, min=0)
@@ -1553,32 +1563,77 @@ class PodRacerEnv:
         # We gather it for others
         o_rank = rank_norm[:, other_indices] # [B, 4, 3, 1]
         
+        # o_timeout gathering (New for Tier 2)
+        # timeout is [B, 4, 1] (Already normalized)
+        # Gather [B, 4, 3, 1]
+        o_timeout = timeout[:, other_indices]
+        
         # Concat Entity
-        # dp(2), dv(2), cos(1), sin(1), dist(1), mate(1), shield(1), ot(2), is_runner(1), rank(1) -> 13
+        # dp(2), dv(2), cos(1), sin(1), dist(1), mate(1), shield(1), ot(2), is_runner(1), rank(1), timeout(1) -> 14
         entity_obs = torch.cat([
-            dp_local, dv_local, rel_cos, rel_sin, dist, is_mate, o_shield_f, ot_vec_l, o_is_runner, o_rank
-        ], dim=-1) # [B, 4, 3, 13]
+            dp_local, dv_local, rel_cos, rel_sin, dist, is_mate, o_shield_f, ot_vec_l, o_is_runner, o_rank, o_timeout
+        ], dim=-1) # [B, 4, 3, 14]
         
-        # --- CP Features (6) ---
-        # Next (CP1) -> Next+1 (CP2)
-        # Vector CP1->CP2 in My Body Frame
+        # --- CP Features (10) ---
+        # Next (CP1) -> Next+1 (CP2) -> Next+2 (CP3)
+        # Vector CP1->CP2 and CP2->CP3 in My Body Frame
         # CP1 is target_pos [B, 4, 2]
-        # t_vec_l is CP1 relative to Me [B, 4, 2]
         
-        # Get CP2
+        # Get Checkpoints
         cp1_ids = self.next_cp_id.long()
         cp2_ids = (cp1_ids + 1) % self.num_checkpoints.unsqueeze(1)
-        cp2_pos = self.checkpoints[batch_idx, cp2_ids] # [B, 4, 2]
+        cp3_ids = (cp1_ids + 2) % self.num_checkpoints.unsqueeze(1)
         
+        cp2_pos = self.checkpoints[batch_idx, cp2_ids] # [B, 4, 2]
+        cp3_pos = self.checkpoints[batch_idx, cp3_ids] # [B, 4, 2]
+        
+        # 1. Vector CP1->CP2
         v12_g = cp2_pos - target_pos # [B, 4, 2]
         v12_l = rotate_vec(v12_g, angle) * S_POS
         
-        pad_cp = torch.zeros((B, 4, 2), device=device)
+        # 2. Vector CP2->CP3
+        v23_g = cp3_pos - cp2_pos
+        v23_l = rotate_vec(v23_g, angle) * S_POS
         
-        # t_vec_l (CP relative to Me), v12_l (CP1->CP2 relative to Me), Pad
+        # 3. Global Progress (Num CPs Left)
+        # Total to do = Laps * NumCPs
+        # Done = LapsDone * NumCPs + NextID (approx)
+        # Left = Total - Done
+        # Normalized by e.g. 18 (3 laps * 6 cps)
+        n_cps = self.num_checkpoints.unsqueeze(1).float() # [B, 1]
+        total_cps = MAX_LAPS * n_cps
+        done_cps = self.laps.float() * n_cps + self.next_cp_id.float()
+        left_cps = total_cps - done_cps # [B, 4]
+        
+        # Scale: 0.0 to 1.0 (18.0 is typical max)
+        cps_left_norm = (left_cps / 20.0).unsqueeze(-1) # [B, 4, 1]
+        
+        # 4. Corner Angle (Cos)
+        # Angle between Me->CP1 and CP1->CP2
+        # t_vec_g is Me->CP1
+        # v12_g is CP1->CP2
+        # Normalize
+        def normalize(v):
+            n = torch.norm(v, dim=-1, keepdim=True) + 1e-6
+            return v / n
+        
+        dir_01 = normalize(t_vec_g)
+        dir_12 = normalize(v12_g)
+        corner_cos = (dir_01 * dir_12).sum(dim=-1, keepdim=True) # [B, 4, 1]
+        
+        # 5. Max Speed Heuristic (1 / Curvature?)
+        # Simple heuristic: If corner is sharp (cos < 0), max speed is low.
+        # If straight (cos ~ 1), max speed is high.
+        # Map -1..1 to 0..1
+        max_speed_factor = (corner_cos + 1.0) * 0.5 
+        
+        # Assemble [B, 4, 10]
+        # t_vec_l(2), v12_l(2), v23_l(2), Left(1), Corner(1), Speed(1), Pad(1)
+        pad_cp = torch.zeros((B, 4, 1), device=device)
+        
         cp_obs = torch.cat([
-            t_vec_l, v12_l, pad_cp
-        ], dim=-1) # [B, 4, 6]
+            t_vec_l, v12_l, v23_l, cps_left_norm, corner_cos, max_speed_factor, pad_cp
+        ], dim=-1) # [B, 4, 10]
         
         # Permute to [4, B, ...] for contiguous memory access per Pod
         # self_obs: [B, 4, 14] -> [4, B, 14]

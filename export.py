@@ -35,7 +35,7 @@ def fuse_normalization_pilot(pilot, rms_stats):
     b = layer.bias.data.cpu().numpy()
     
     W_self = W[:, 0:15]
-    W_cp   = W[:, 15:21]
+    W_cp   = W[:, 15:25]
     
     W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
     W_cp_new, shift_cp = fuse_layer_section(W_cp, mean_c, std_c)
@@ -296,13 +296,13 @@ class N:
         return [max(r[j] for r in n2) for j in range(32)] if n2 else [0.0]*32
     def f(self,s,tm,en,cp,mo,rv,d):
         self.c=0
-        pe=self.l(s+cp,21,64,r=True); pe=self.l(pe,64,48,r=True)
-        ew1,eb1=self.gw(416),self.gw(32); ew2,eb2=self.gw(512),self.gw(16)
+        pe=self.l(s+cp,25,64,r=True); pe=self.l(pe,64,48,r=True)
+        ew1,eb1=self.gw(448),self.gw(32); ew2,eb2=self.gw(512),self.gw(16)
         def ec(x):
             h=[]
             for k in range(32):
                 a=eb1[k]
-                for j in range(13): a+=x[j]*ew1[k*13+j]
+                for j in range(14): a+=x[j]*ew1[k*14+j]
                 h.append(max(0.0,a))
             o=[]
             for k in range(16):
@@ -334,10 +334,9 @@ def tl(vx,vy,a):
     return vx*c+vy*s, -vx*s+vy*c
 def solve():
     b=N(blob,scale)
-    if sys.version_info.minor>=0: 
-        try: input() 
-        except: pass
-    try: C=int(input())
+    try: 
+        input() # laps
+        C=int(input()) # checkpoint_count
     except: C=3
     cps=[list(map(int,input().split())) for _ in range(C)]
     lps,pnc,to,scd,avl=[0]*4,[1]*4,[100]*4,[0]*4,[True,True]
@@ -394,17 +393,37 @@ def solve():
                 ornk=0
                 for s in scrs:
                     if s>scrs[j]: ornk+=1
-                ft=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dst,mt,0.0,otf*SP,otr*SP,orn,ornk/3.0]
+                ft=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dst,mt,0.0,otf*SP,otr*SP,orn,ornk/3.0,o['to']/100.0]
                 if o['tm']==p['tm']: ot.extend(ft)
                 else: oe.append(ft)
-            if not ot: ot=[0.0]*13
+            if not ot: ot=[0.0]*14
             om=[]
             cn=len(cps); sn=p['n']
             for k in range(cn):
                  idx=(sn+k)%cn; cx,cy=cps[idx][0]-p['x'],cps[idx][1]-p['y']
                  cf,cr=tl(cx,cy,p['a']); om.append([cf*SP,cr*SP])
             rv=1.0 if run[i] else 0.0
-            ocp=[tf*SP,tr*SP,0.0,0.0,1.0,0.0] 
+            # CP Obs (10 dim)
+            cn=len(cps); sn=p['n']
+            cp1=cps[sn]; cp2=cps[(sn+1)%cn]; cp3=cps[(sn+2)%cn]
+            # v12
+            g12x,g12y=cp2[0]-cp1[0],cp2[1]-cp1[1]; v12f,v12r=tl(g12x,g12y,p['a'])
+            # v23
+            g23x,g23y=cp3[0]-cp2[0],cp3[1]-cp2[1]; v23f,v23r=tl(g23x,g23y,p['a'])
+            # Heuristics
+            # Corner Cos
+            # t_vec is (gx, gy) from line 374. Need normalized.
+            # t_vec local is (tf, tr).
+            ga=math.sqrt(gx**2+gy**2)+1e-5; g12d=math.sqrt(g12x**2+g12y**2)+1e-5
+            d01x,d01y=gx/ga,gy/ga; d12x,d12y=g12x/g12d,g12y/g12d
+            # Dot product independent of frame, use global
+            ccos=d01x*d12x+d01y*d12y
+            msp=(ccos+1.0)*0.5
+            # Left
+            done=lps[i]*cn+sn; tot=3*cn; left=tot-done
+            lft=left/20.0
+             
+            ocp=[tf*SP,tr*SP, v12f*SP,v12r*SP, v23f*SP,v23r*SP, lft, ccos, msp, 0.0] 
             r_th,r_ang,r_sh,r_bo=b.f(os,ot,oe,ocp,om,rv,False)
             rl_th=int(r_th*100); rl_ang=r_ang*18.0; rl_sh=(r_sh==1)
             c_ang=pds[i]['a']; r_abs=c_ang+rl_ang; bst=(rl_th,r_abs,rl_sh,False)

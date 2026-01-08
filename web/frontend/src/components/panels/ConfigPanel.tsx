@@ -33,7 +33,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v9', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v11', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -45,7 +45,7 @@ export const ConfigPanel: React.FC = () => {
             [RW.WRONG_WAY]: 10.0,
             [RW.COLLISION_BLOCKER]: 5.0,
             [RW.COLLISION_RUNNER]: 0.5,
-            [RW.COLLISION_MATE]: 2.0,
+            [RW.COLLISION_MATE]: 5.0,
             [RW.STEP_PENALTY]: 10.0,
             [RW.PROXIMITY]: 5.0,
             [RW.RANK]: 500.0,
@@ -55,20 +55,20 @@ export const ConfigPanel: React.FC = () => {
         team_spirit: 0.0
     })
 
-    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v3', {
+    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v4', {
         stage: 0,
         difficulty: 0.0
     })
 
-    const [hyperparams, setHyperparams] = useLocalStorage('spt2_config_hyperparams', {
+    const [hyperparams, setHyperparams] = useLocalStorage('spt2_config_hyperparams_v2', {
         lr: 1e-4,
         ent_coef: 0.01
     })
 
-    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v10', {
+    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v12', {
         nursery_consistency_threshold: 500.0,
-        solo_efficiency_threshold: 45.0,
-        solo_consistency_threshold: 1500.0,
+        solo_efficiency_threshold: 40.0,
+        solo_consistency_threshold: 3000.0,
 
         // Stage 2 -> 3
         duel_graduation_difficulty: 0.80,
@@ -257,7 +257,7 @@ export const ConfigPanel: React.FC = () => {
                         <>
                             <Slider label="EFFICIENCY SCORE (LOWER IS BETTER)" min={10} max={60} step={1} value={transitions.solo_efficiency_threshold}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_efficiency_threshold: parseFloat(e.target.value) }))} />
-                            <Slider label="CONSISTENCY" min={1000} max={3000} step={50} value={transitions.solo_consistency_threshold}
+                            <Slider label="CONSISTENCY" min={1000} max={5000} step={50} value={transitions.solo_consistency_threshold}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_consistency_threshold: parseFloat(e.target.value) }))} />
                         </>
                     )}
@@ -373,7 +373,7 @@ export const ConfigPanel: React.FC = () => {
                         {/* Penalties */}
                         <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
                             <h3 className="text-[10px] text-red-400/70 font-bold uppercase tracking-widest">Penalties</h3>
-                            <Slider label="STEP COST (TIME)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.STEP_PENALTY]}
+                            <Slider label="STEP COST (TIME)" min={0} max={20.0} step={0.1} value={rewards.weights[RW.STEP_PENALTY]}
                                 onChange={(e) => setWeight(RW.STEP_PENALTY, parseFloat(e.target.value))} />
                             <Slider label="WRONG WAY" min={0} max={20.0} step={1} value={rewards.weights[RW.WRONG_WAY]}
                                 onChange={(e) => setWeight(RW.WRONG_WAY, parseFloat(e.target.value))} />
@@ -388,7 +388,7 @@ export const ConfigPanel: React.FC = () => {
                                 onChange={(e) => setWeight(RW.LOSS, parseFloat(e.target.value))} />
                             <Slider label="HUMILIATION (BLOCKER)" min={0} max={50} step={0.5} value={rewards.weights[RW.COLLISION_BLOCKER]}
                                 onChange={(e) => setWeight(RW.COLLISION_BLOCKER, parseFloat(e.target.value))} />
-                            <Slider label="DENIAL (DOORMAN)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.DENIAL]}
+                            <Slider label="DENIAL (ZONE/PRESS)" min={0} max={5.0} step={0.1} value={rewards.weights[RW.DENIAL]}
                                 onChange={(e) => setWeight(RW.DENIAL, parseFloat(e.target.value))} />
                             <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit}
                                 onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />
