@@ -428,7 +428,7 @@ function drawPod(
     pod: {
         x: number, y: number, vx: number, vy: number, angle: number,
         lap?: number, next_checkpoint?: number, reward?: number, thrust?: number,
-        team?: number, collision?: number
+        team?: number, collision?: number, shield?: number
     },
     color: 'red' | 'white',
     images: Record<string, HTMLImageElement>,
@@ -451,18 +451,31 @@ function drawPod(
     ctx.save()
     ctx.rotate(angle)
 
-    // Draw Shield (Underneath or On Top? Underneath implies "Shield bubble")
-    if ((pod as any).collision > 0.5) {
+    // Draw Collision Circle (Blue Transparent) - Only if NOT shielded
+    if (pod.collision && pod.collision > 0.5 && (!pod.shield || pod.shield <= 0.5)) {
+        ctx.save()
+        ctx.beginPath()
+        ctx.arc(0, 0, 450, 0, Math.PI * 2) // Radius slightly larger than hitbox (400)
+        ctx.fillStyle = 'rgba(0, 191, 255, 0.3)' // DeepSkyBlue with alpha
+        ctx.fill()
+        ctx.strokeStyle = 'rgba(0, 191, 255, 0.6)'
+        ctx.lineWidth = 10
+        ctx.stroke()
+        ctx.restore()
+    }
+
+    // Draw Shield (Sprite)
+    if (pod.shield && pod.shield > 0.5) {
         const shieldImg = pod.team === 0 ? images.redShield : images.whiteShield
         if (shieldImg) {
-            // Scale shield to cover pod. Pod parts are scaled by 4.0.
-            // Shield asset should be drawn relative to that.
-            // Let's assume shield asset is roughly same resolution as cabins.
-            // We use scale 5.0 to be slightly larger than 4.0
-            const sScale = 5.0
+            ctx.save()
+            // Shield sprite is normally oriented, but we want it to encompass the pod
+            // Pod parts are scaled by 4.0.
+            const sScale = 5.5
             const sw = shieldImg.width * sScale
             const sh = shieldImg.height * sScale
             ctx.drawImage(shieldImg, -sw / 2, -sh / 2, sw, sh)
+            ctx.restore()
         }
     }
 
