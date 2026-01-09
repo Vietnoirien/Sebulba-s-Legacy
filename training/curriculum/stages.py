@@ -186,11 +186,15 @@ class UnifiedDuelStage(Stage):
             # Rec Denial Rate = Denials / Total Episodes
             # Timeouts = Episodes - Games
             # Denial Rate & Blocker Impact
-            rec_denials = metrics["recent_denials"]
+            # Rec Denial Rate = Denials / Total Episodes
+            # Timeouts = Episodes - Games
+            # Denial Rate & Blocker Collisions
+            rec_denials = metrics.get("recent_denials", 0)
             rec_dr = rec_denials / rec_episodes if rec_episodes > 0 else 0.0
             
-            rec_impact = metrics.get("blocker_impact", 0)
-            avg_impact = rec_impact / rec_games if rec_games > 0 else 0.0
+            # [FIX] Blocker Hits (Collisions)
+            rec_hits = metrics.get("blocker_collisions", 0)
+            avg_hits = rec_hits / rec_games if rec_games > 0 else 0.0
             
             trainer.current_win_rate = rec_wr
             
@@ -198,10 +202,10 @@ class UnifiedDuelStage(Stage):
             metrics["recent_games"] = 0
             metrics["recent_wins"] = 0
             metrics["recent_denials"] = 0
-            metrics["blocker_impact"] = 0
+            metrics["blocker_collisions"] = 0
             metrics["recent_episodes"] = 0
             
-            trainer.log(f"Stage 2 (Unified Duel) Check: WR {rec_wr*100:.1f}% | DR {rec_dr*100:.1f}% | AvgImp {avg_impact:.0f} | Diff: {trainer.env.bot_difficulty:.2f}")
+            trainer.log(f"Stage 2 (Unified Duel) Check: WR {rec_wr*100:.1f}% | DR {rec_dr*100:.1f}% | AvgHits {avg_hits:.1f} | Diff: {trainer.env.bot_difficulty:.2f}")
             
             auto = (trainer.curriculum_mode == "auto")
             
@@ -258,16 +262,24 @@ class UnifiedDuelStage(Stage):
                 # 1. Racing Competence
                 passed_racing = (rec_wr >= min_wr)
                 
-                # 2. Blocker Competence (Denial Rate OR Impact)
+                # 2. Blocker Competence (Denial Rate OR Collision Steps)
                 min_dr = self.config.duel_graduation_denial_rate
-                min_impact = self.config.duel_graduation_blocker_impact
-                passed_blocking = (rec_dr >= min_dr) or (avg_impact >= min_impact)
+                
+                # [FIXUP] Changed Impact to Collision Steps (Duration)
+                # Note: 'blocker_impact' key in metrics maps to 'blocker_collisions' now in env.py (stage_metrics)
+                # Wait, I updated env.py to use "blocker_collisions" as key in stage_metrics.
+                # I must update here to read "blocker_collisions".
+                rec_hits = metrics.get("blocker_collisions", 0)
+                avg_hits = rec_hits / rec_games if rec_games > 0 else 0.0
+                
+                min_hits = self.config.duel_graduation_collision_steps
+                passed_blocking = (rec_dr >= min_dr) or (avg_hits >= min_hits)
                 
                 passed = passed_racing and passed_blocking
                 
                 if not passed:
                     if passed_racing and not passed_blocking:
-                         trainer.log(f"-> Graduation Stalled: Good Racing ({rec_wr:.2f}) but Weak Blocking (DR {rec_dr:.2f} < {min_dr} & Imp {avg_impact:.0f} < {min_impact})")
+                         trainer.log(f"-> Graduation Stalled: Good Racing ({rec_wr:.2f}) but Weak Blocking (DR {rec_dr:.2f} < {min_dr} & Hits {avg_hits:.1f} < {min_hits})")
                 
                 if passed:
                     self.grad_consistency_counter += 1
@@ -277,6 +289,7 @@ class UnifiedDuelStage(Stage):
                 should_graduate = False
                 reason = ""
                 
+                checks = self.config.duel_graduation_checks
                 if self.grad_consistency_counter >= checks:
                     should_graduate = True
                     reason = f"Competence: WR {rec_wr:.2f} & Blocker (DR {rec_dr:.2f}/Imp {avg_impact:.0f}) for {checks} checks"

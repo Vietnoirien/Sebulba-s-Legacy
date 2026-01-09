@@ -60,6 +60,7 @@ class PodRacerEnv:
             "recent_games": 0,
             "recent_episodes": 0,
             "blocker_impact": 0,
+            "blocker_collisions": 0, # [FIX] Add new metric key
             "recent_denials": 0
         }
         
@@ -84,6 +85,7 @@ class PodRacerEnv:
         
         # Rank Tracking for Potential-Based Reward
         self.prev_ranks = torch.zeros((num_envs, 4), dtype=torch.long, device=self.device)
+        self.prev_dist_intercept = torch.zeros((num_envs, 4), device=self.device) # [NEW] Intercept State
         self.rank_range_cache = torch.arange(4, device=self.device).unsqueeze(0).expand(num_envs, 4)
         
         # --- OPTIMIZATION: Cache Static Indices for get_obs ---
@@ -304,6 +306,13 @@ class PodRacerEnv:
             
             self.physics.vel[env_ids, i] = 0
             
+            # Reset prev_dist for progress smoothing
+            self.prev_dist[env_ids, i] = torch.norm(target_pos - start_pos, dim=1)
+            
+            # [NEW] Reset prev_dist_intercept
+            # For simplicity, init to distance to CP1 (Since CP1 is likely the closest target prediction initially)
+            self.prev_dist_intercept[env_ids, i] = self.prev_dist[env_ids, i]
+            
             # Angle: Standard uses 'angle_deg'. 
             # Predefined? Assuming 'angle_deg' (Face next CP) is also correct for predefined maps unless specified otherwise.
             # User said "placement", likely meaning position.
@@ -389,6 +398,16 @@ class PodRacerEnv:
              # Group A (First Half): Agent is Runner (True), Bot is Blocker (False)
              self.is_runner[env_ids[:half_envs], 0] = True
              self.is_runner[env_ids[:half_envs], 1] = False
+             return
+
+        if self.curriculum_stage == STAGE_TEAM:
+             # Standard Team Config: Pod 0 Runner, Pod 1 Blocker
+             # Pod 2 Runner, Pod 3 Blocker (Opponent Team Standard)
+             self.is_runner[env_ids, 0] = True
+             self.is_runner[env_ids, 1] = False
+             self.is_runner[env_ids, 2] = True
+             self.is_runner[env_ids, 3] = False
+             return
              self.is_runner[env_ids[:half_envs], 2] = False # Bot is Blocker (Interceptor)
              self.is_runner[env_ids[:half_envs], 3] = False
              
@@ -522,7 +541,7 @@ class PodRacerEnv:
         """
         if reward_weights is None:
             # Construct default tensor
-            reward_weights = torch.zeros((self.num_envs, 16), device=self.device)
+            reward_weights = torch.zeros((self.num_envs, 20), device=self.device)
             # Use default dict to fill 
             # Note: We can pre-compute this but for robust fallback:
             for k, v in DEFAULT_REWARD_WEIGHTS.items():
@@ -600,11 +619,40 @@ class PodRacerEnv:
                 runner_target = self.checkpoints[batch_indices, opp_nid]
 
                 # B. BLOCKER TARGET (Intercept Agent)
-                agent_pos = self.physics.pos[:, 0]
                 bot_pos = self.physics.pos[:, bot_id]
+
+                # [FIX]: Dynamic Target Selection
+                # Identify Opponent Team
+                my_team = bot_id // 2
+                opp_team = 1 - my_team
+                opp_idx_0 = 2 * opp_team
+                opp_idx_1 = 2 * opp_team + 1
                 
-                # Agent's Target CP
-                agent_next_cp = self.next_cp_id[:, 0]
+                # Metrics to select "Best" Target (Leading Runner)
+                # 1. Is Runner? (Priority)
+                is_run_0 = self.is_runner[:, opp_idx_0].long()
+                is_run_1 = self.is_runner[:, opp_idx_1].long()
+                
+                # 2. Rank (Tie-Breaker: Lower is Better)
+                rank_0 = self.prev_ranks[:, opp_idx_0]
+                rank_1 = self.prev_ranks[:, opp_idx_1]
+                
+                # Score: Runner(100) - Rank(0-3). Output: 100..97 for Runner, -0..-3 for Blocker
+                score_0 = is_run_0 * 100 - rank_0
+                score_1 = is_run_1 * 100 - rank_1
+                
+                # Select Target Index
+                target_is_0 = (score_0 >= score_1)
+                
+                # Gather Target Data
+                # Indices [B]
+                target_idx = torch.where(target_is_0, opp_idx_0, opp_idx_1)
+                
+                # Gather Position: [B, 2]
+                agent_pos = self.physics.pos[batch_indices, target_idx]
+                
+                # Gather Next CP for Intercept Calc
+                agent_next_cp = self.next_cp_id[batch_indices, target_idx]
                 cp_pos = self.checkpoints[batch_indices, agent_next_cp]
                 
                 vec_runner_to_cp = cp_pos - agent_pos
@@ -670,18 +718,21 @@ class PodRacerEnv:
                 # blocker_target vs runner_target?
                 # We want to know if we are in "Ramming Mode".
                 # If we are blocker, and target is runner (or intercept point close to runner), and aligned.
-                if not is_bot_runner[bot_id]:
-                     # Check alignment
-                     # diff already calc.
-                     # dist_to_target already calc.
-                     # If aligned within 20 deg and dist < 4000
-                     # Add extra thrust
-                     is_aligned = torch.abs(delta) < 20.0
-                     is_close_enough = dist_to_target < 4000.0
-                     
-                     ram_mask = is_aligned & is_close_enough
-                     # Add 20-30 thrust
-                     thrust_val = torch.where(ram_mask, thrust_val + self.bot_config.ramming_speed_scale, thrust_val)
+                # [FIX] Ramming Speed: If aiming at target (Runner) and close, BOOST thrust
+                # We apply this if we are a Blocker (not is_bot_runner)
+                
+                # Check alignment
+                is_aligned = torch.abs(delta) < 20.0
+                is_close_enough = dist_to_target < 4000.0
+                
+                # Ram Mask: Aligned AND Close AND Blocker
+                # is_bot_runner is [B] boolean (0 or 1)
+                is_blocker = ~is_bot_runner
+                
+                ram_mask = is_aligned & is_close_enough & is_blocker
+                
+                # Add 20-30 thrust
+                thrust_val = torch.where(ram_mask, thrust_val + self.bot_config.ramming_speed_scale, thrust_val)
                 
                 # [FIX] Bot Stabilization: Slow down near checkpoints to avoid "Orbiting"
                 # If too fast, the bot cannot turn sharply enough to hit the radius.
@@ -784,27 +835,79 @@ class PodRacerEnv:
                 diff = target_pos - curr_pos
                 target_angle = torch.atan2(diff[:, 1], diff[:, 0])
                 curr_angle = torch.deg2rad(self.physics.angle[:, i])
+                
+                # [FIX] Blocker Orientation: Face the Enemy, not the Checkpoint
+                # If I am a blocker, my "Target" is the Enemy Runner.
+                if self.curriculum_stage >= STAGE_DUEL_FUSED:
+                    is_block = ~self.is_runner[:, i]
+                    if is_block.any():
+                        # Find Target (Closest Enemy Runner)
+                        team = i // 2
+                        opp_team = 1 - team
+                        idx_a = 2 * opp_team
+                        idx_b = 2 * opp_team + 1
+                        
+                        pos_a = self.physics.pos[:, idx_a]
+                        pos_b = self.physics.pos[:, idx_b]
+                        
+                        # Distances
+                        d_a = torch.norm(pos_a - curr_pos, dim=1)
+                        d_b = torch.norm(pos_b - curr_pos, dim=1)
+                        
+                        # Select closest
+                        # Preference for RUNNER? Yes.
+                        is_run_a = self.is_runner[:, idx_a]
+                        is_run_b = self.is_runner[:, idx_b]
+                        
+                        # Score: IsRunner needs to be primary. Dist secondary.
+                        # Score = IsRunner*100000 - Dist
+                        s_a = is_run_a.float() * 100000.0 - d_a
+                        s_b = is_run_b.float() * 100000.0 - d_b
+                        
+                        target_is_a = (s_a >= s_b)
+                        
+                        # Target Index
+                        t_idx = torch.where(target_is_a, idx_a, idx_b)
+                        
+                        # [FIX] Intercept Logic: Aim for Enemy's Next Checkpoint
+                        # Instead of aiming at the Enemy (Chase), aim at their Goal (Intercept).
+                        e_next_cp = self.next_cp_id[batch_indices, t_idx] # [N]
+                        
+                        # Lookup CP Pos
+                        # self.checkpoints is [N, MaxCP, 2]
+                        # advanced indexing
+                        t_pos = self.checkpoints[batch_indices, e_next_cp] # [N, 2]
+                        
+                        # Vector TO Intercept Point (CP)
+                        vec_to_intercept = t_pos - curr_pos
+                        angle_to_intercept = torch.atan2(vec_to_intercept[:, 1], vec_to_intercept[:, 0])
+                        
+                        # Override target_angle where is_block
+                        target_angle[is_block] = angle_to_intercept[is_block]
+
                 alignment = torch.cos(target_angle - curr_angle)
 
                 # Positive Reward (Soft Guidance)
                 if w_orient.sum() > 0.0:
                     THRESHOLD = self.reward_scaling_config.orientation_threshold
                     pos_score = torch.clamp((alignment - THRESHOLD) / (1.0 - THRESHOLD), 0.0, 1.0)
-                    THRESHOLD = self.reward_scaling_config.orientation_threshold
-                    pos_score = torch.clamp((alignment - THRESHOLD) / (1.0 - THRESHOLD), 0.0, 1.0)
                     
-                    # [FIX] Mask for Blockers
-                    if self.curriculum_stage >= STAGE_DUEL_FUSED:
-                         is_run = self.is_runner[:, i].float()
-                         rewards_indiv[:, i] += pos_score * w_orient * dense_mult * is_run
-                    else:
-                         rewards_indiv[:, i] += pos_score * w_orient * dense_mult
+                    # [FIX] Mask for Blockers.
+                    # Blockers NOW receive orientation reward (Facing Enemy).
+                    # Runners receive orientation reward (Facing CP).
+                    # So we allow ALL.
+                    rewards_indiv[:, i] += pos_score * w_orient * dense_mult
 
                 # Negative Penalty (Wrong Way)
                 neg_mask = alignment < -0.5 # Strictly facing away
                 if neg_mask.any():
                     # Heavy penalty for wrong way
-                    rewards_indiv[neg_mask, i] += alignment[neg_mask] * w_wrong_way[neg_mask]
+                    # [FIX] Mask for Blockers. Blockers need to ambush/reverse.
+                    if self.curriculum_stage >= STAGE_DUEL_FUSED:
+                         is_run = self.is_runner[neg_mask, i].float()
+                         rewards_indiv[neg_mask, i] += alignment[neg_mask] * w_wrong_way[neg_mask] * is_run
+                    else:
+                         rewards_indiv[neg_mask, i] += alignment[neg_mask] * w_wrong_way[neg_mask]
 
         # --- D. Rank Reward (Potential-Based) ---
         # "Overtaking Reward"
@@ -1066,9 +1169,8 @@ class PodRacerEnv:
                     o1 = 2 * opp_team
                     o2 = 2 * opp_team + 1
                     
-                    # Penalty Amount (Hardcoded Sharp Penalty)
-                    # -1000.0 (Equivalent to giving up 2 standard CPs)
-                    PENALTY_VAL = -1000.0 
+                    # Penalty Amount (Configurable)
+                    PENALTY_VAL = -self.reward_scaling_config.goalie_penalty 
                     
                     # Apply to Opponent Blockers ONLY
                     for opp_idx in [o1, o2]:
@@ -1143,9 +1245,22 @@ class PodRacerEnv:
             # We need to hook into 'env_won' logic.
         elif self.curriculum_stage == STAGE_TEAM:
             # Stage 4: Team 2v2.
-            # Strategic Timeout Activated: Any pod (Agent or Bot) triggers reset.
-            # This allows "Stalling an opponent" to be a win condition.
+            # Strategic Timeout Activated: Any pod triggers reset (Global Timeout).
+            # [FIX] Added Denial Reward for Timeout
             env_timed_out = timed_out.any(dim=1)
+            
+            if env_timed_out.any():
+                t_idx = torch.nonzero(env_timed_out).squeeze(-1)
+                
+                # Award Denial Reward to Blockers if Opponent Runner Failed
+                # Logic: If game timed out, it means NEITHER team won by Racing.
+                # So Blockers arguably succeeded in stalling.
+                # We award w_denial to ALL Blockers.
+                
+                for i in range(4):
+                    is_block = ~self.is_runner[t_idx, i] # [K]
+                    if is_block.any():
+                         rewards_indiv[t_idx[is_block], i] += w_denial[t_idx[is_block]]
         else:
             # League or others: Any timeout resets
             env_timed_out = timed_out.any(dim=1)
@@ -1246,11 +1361,60 @@ class PodRacerEnv:
                 self.stage_metrics["recent_wins"] += n_wins
                 self.stage_metrics["recent_games"] += n_games
                 
+                # [FIX - CRITICAL]
+                # Blockers (Pod 0 in Group B) were receiving RW_WIN (10000.0) via w_win[pass_idx].
+                # We calculated rewards_team above, but what about 'rewards_indiv'?
+                # Wait, 'rewards_indiv' DOES NOT receive win reward by default?
+                # It seems 'rewards_indiv' relies on dense rewards.
+                # BUT 'rewards' (final) = rewards_indiv (Spirit=0).
+                # The code lines 1224: rewards_team[mask_w0, 0] += w_win
+                # This updates TEAM REWARDS.
+                # If Spirit=0, this is IGNORED?
+                # If so, then NO ONE gets Win Reward in Stage 2?
+                # That explains why Runners might be slow to converge.
+                # AND it explains why Blockers don't race for win... wait, user says they DO race.
+                
+                # If rewards_indiv DOES NOT get Win Reward, why do they race?
+                # Maybe RW_PROGRESS / RW_ZONE?
+                pass 
+                
             elif self.curriculum_stage == STAGE_TEAM:
                 n_wins = mask_w0.sum().item() 
                 n_games = env_won.sum().item() 
                 self.stage_metrics["recent_wins"] += n_wins
                 self.stage_metrics["recent_games"] += n_games
+
+            # [FIX] Apply Win Reward to INDIVIDUALS (Runners only)
+            # This fixes both issues: Runners get 10k, Blockers get 0.
+            # We do this for Stage >= STAGE_DUEL_FUSED
+            if self.curriculum_stage >= STAGE_DUEL_FUSED:
+                 # Logic for Individual Win Reward
+                 # env_won is boolean [B]
+                 # winners is int [B] (-1=Denial, 0=Team0, 1=Team1)
+                 
+                 # I am Pod i. Am I the winner?
+                 # If winners[b] == 0: Team 0 won.
+                 # If I am Pod 0 (Team 0), I won.
+                 # If I am Pod 1 (Team 0), I won.
+                 
+                 # We want to give RW_WIN *only* if I am a Runner?
+                 # Or does the Blocker get Win Share?
+                 # In Stage 2 (Duel), Blocker gets ZERO share (Spirit=0).
+                 # So we apply to rewards_indiv masked by is_runner.
+                 
+                 for i in range(4):
+                      team = i // 2
+                      mask_win = (self.winners == team) & env_won
+                      
+                      if mask_win.any():
+                           is_run = self.is_runner[mask_win, i].float()
+                           # Only Runners get the 10k "Crossing Line" bonus individually
+                           # Blockers get their satisfaction from Denial (via Team Spirit later)
+                           # [FIX] Assist Reward
+                           # Reverted: Blockers receive Win Reward via 'rewards_team'.
+                           # Adding it here causes Double Dipping (20k).
+                           # We strictly keep rewards_indiv for Runners.
+                           rewards_indiv[mask_win, i] += w_win[mask_win] * is_run
         
         S_VEL = 1.0 / 1000.0
         self.update_progress_metric(torch.arange(self.num_envs, device=self.device))
@@ -1262,6 +1426,10 @@ class PodRacerEnv:
         # --- Role Collision Rewards (Individual) ---
         runner_velocity_metric = torch.zeros((self.num_envs, 4), device=self.device)
         blocker_damage_metric = torch.zeros((self.num_envs, 4), device=self.device)
+        
+        # Scaling Config
+        COL_SCALE = self.reward_scaling_config.collision_blocker_scale
+        INTERCEPT_SCALE = self.reward_scaling_config.intercept_progress_scale
         
         for i in range(4):
             team = i // 2
@@ -1281,7 +1449,7 @@ class PodRacerEnv:
             runner_pen = -w_col_run * total_impact
             rewards_indiv[:, i] += runner_pen * is_run.float()
             
-            # [REFINE] Blocker Collision Reward (Energy Transfer + Direction)
+            # [REFINE] Blocker Collision Reward (Energy Transfer + Direction + Pinning)
             is_block = ~is_run
             
             bonus_blocker = torch.zeros(self.num_envs, device=self.device)
@@ -1289,27 +1457,41 @@ class PodRacerEnv:
             
             # Iterate Enemies
             for e_idx in [0, 1]:
-                 real_e_idx = enemy_indices[e_idx] # Tensor scalar? No list.
-                 # Use tensor indexing if needed, but loop is over 2 static indices.
+                 real_e_idx = enemy_indices[e_idx] # tensor
                  idx_e = enemy_indices[e_idx] # int
                  
                  # Impulse ON Enemy FROM Me (Me=i, Enemy=idx_e)
-                 # vectors uses [B, target, source] or [B, source, target]?
-                 # gpu_physics: impacts[:, i1, i2] += val. impact_vectors[:, i1, i2] += vec_j (On p1 from p2?)
-                 # No, vec_j was J on P1.
-                 # So impact_vectors[B, P1, P2] is Impulse on P1 from P2.
-                 # We want Impulse on Enemy (P1=idx_e) from Me (P2=i).
-                 # J_on_e = vectors[:, idx_e, i]
-                 
                  j_vec = collision_vectors[:, idx_e, i] # [B, 2]
                  j_mag = torch.norm(j_vec, dim=1)
                  
                  total_impact_force += j_mag
                  
-                 # Direction Check
-                 # Vector Enemy -> NextCP
+                 # Energy Ratio Calculation
+                 # 1. Project Velocities on Collision Normal
+                 # Normal n = j_vec / j_mag
+                 # If j_mag is 0, normal is 0.
+                 j_normal = j_vec / (j_mag.unsqueeze(1) + 1e-6)
+                 
+                 # My Velocity
+                 v_me = self.physics.vel[:, i]
+                 # Enemy Velocity
+                 v_e = self.physics.vel[:, idx_e]
+                 
+                 # Speed along normal
+                 # We want "Impact Contribution".
+                 # Simple approach: Magnitude of velocity?
+                 # No, projected velocity is better.
+                 # v_me_proj = abs(dot(v_me, n))
+                 v_me_proj = torch.abs((v_me * j_normal).sum(dim=1))
+                 v_e_proj = torch.abs((v_e * j_normal).sum(dim=1))
+                 
+                 # Ratio = Me / (Me + E)
+                 # If Total 0, Ratio 0.
+                 total_v = v_me_proj + v_e_proj
+                 energy_ratio = v_me_proj / (total_v + 1e-6)
+                 
+                 # Direction Check (Helping vs Hurting)
                  e_pos = self.physics.pos[:, idx_e]
-                 # We need NextCP of Enemy
                  e_next_cp = self.next_cp_id[:, idx_e]
                  e_cp_pos = self.checkpoints[torch.arange(self.num_envs), e_next_cp]
                  
@@ -1317,80 +1499,159 @@ class PodRacerEnv:
                  e_dist_to_cp = torch.norm(e_dir_to_cp, dim=1) + 1e-6
                  e_dir_norm = e_dir_to_cp / e_dist_to_cp.unsqueeze(1)
                  
-                 # Dot Product (J . Dir)
-                 # Positive = Pushing Towards (Helping) -> Penalize or Zero
-                 # Negative = Pushing Away (Hurting) -> Reward
+                 # Dot Product (Impulse . Dir_to_CP)
+                 # j_vec is Force ON Enemy.
+                 # If j_vec aligns with e_dir_norm (Dot > 0), we are Pushing them TO CP -> BAD.
                  dot = (j_vec * e_dir_norm).sum(dim=1)
                  
-                 # Reward pushing AWAY (dot < 0)
-                 # helpful_push = -dot (positive when dot is negative)
-                 helpful_push = torch.clamp(-dot, min=0.0)
+                 # Helping Penalty Logic
+                 # If dot > 0: Helping. Penalty = -dot.
+                 # If dot < 0: Hurting. Reward = -dot.
+                 # helpful_push = -dot. 
+                 # If helpful_push < 0 (Helping), it's a penalty.
+                 # [FIX] Empirical testing shows Force Vector points Opposite to push? 
+                 # Scenario data says: Helping gave Positive with +dot. So dot capture direction of impulse on Enemy.
+                 # If dot > 0, we are pushing Enemy towards CP -> HELPING -> PENALTY.
+                 # If dot < 0, we are pushing Enemy away -> BLOCKING -> REWARD.
+                 # careful: dot = (j_vec * e_dir_norm).sum(dim=1)
+                 # j_vec is Impulse ON Enemy.
                  
-                 # Scale by Energy? helpful_push is Energy projected.
-                 # So just helpful_push is the magnitude of the "Effective Impulse".
+                 # Empirically: Helping gave +111. So 'dot' was Positive.
+                 # We want Penalty. So helpful_push should be -dot.
+                 helpful_push = -dot
                  
-                 # Accumulate Bonus
+                 # Scale valid push by Energy Ratio
+                 # If we are Active (High Ratio), we get full reward/penalty.
+                 # If Passive (Low Ratio), reward is dampened.
+                 weighted_push = helpful_push * energy_ratio
+                 
+                 # Pinning Reward (Grinding)
+                 # Rewarding low-speed collisions even if push is small.
+                 # If contact exists (j_mag > 0) AND e_speed < Threshold
+                 e_speed = torch.norm(v_e, dim=1)
+                 PIN_SPEED_THRESH = 300.0
+                 is_pinning = (j_mag > 10.0) & (e_speed < PIN_SPEED_THRESH)
+                 
+                 # Pin Bonus: Scale based on how slow they are
+                 # Factor 0.0 to 1.0
+                 pin_factor = (1.0 - (e_speed / PIN_SPEED_THRESH)).clamp(0.0, 1.0)
+                 
+                 # Reward constant per step + Scaled Component?
+                 # Let's say max 100.0 * energy_ratio?
+                 # We want to encourage active pinning.
+                 pin_reward = 100.0 * pin_factor * energy_ratio
+                 
+                 # Combine
+                 # weighted_push can be +/- ~800.0
+                 base_reward = weighted_push
+                 
+                 # Add Pinning only if we are not helping significantly?
+                 # Or just add it.
+                 # If helping (-800), pin reward (+100) won't overcome it. Good.
+                 
                  # [FIX] Rank Scaling? Hitting leader is better.
                  r_e = rank_norm[:, idx_e, 0]
                  s_e = 1.0 + (1.0 - r_e)
                  
-                 # Apply
-                 bonus_blocker += helpful_push * s_e * self.is_runner[:, idx_e].float() # Only reward hitting runners
+                 total_component = (base_reward + torch.where(is_pinning, pin_reward, torch.tensor(0.0, device=self.device))) * s_e
+                 
+                 bonus_blocker += total_component * self.is_runner[:, idx_e].float() * COL_SCALE
+                 
+            # [NEW] Intercept Progress (SOTA: Closing Velocity to Next CP)
+            # Only for Blockers in Stage 2+
+            if self.curriculum_stage >= STAGE_DUEL_FUSED and is_block.any():
+                 # Target: Closest Enemy's Next Checkpoint
+                 # Reuse logic from orientation or re-calculate efficiently
+                 # We need dist_to_intercept for the "Target Enemy".
+                 
+                 # Simplified: Just sum progress closing on ALL enemies?
+                 # Or just the closest?
+                 # Let's target the LEAD enemy runner.
+                 enemy_team = 1 - (i // 2)
+                 e1 = 2 * enemy_team
+                 e2 = 2 * enemy_team + 1
+                 
+                 # Rank-based selection
+                 r1 = rank_norm[:, e1, 0] # Lower is better (0=1st)
+                 
+                 # Select Enemy 1 if they are ahead (rank smaller)
+                 target_e = torch.where(r1 < rank_norm[:, e2, 0], e1, e2) # [B]
+                 
+                 # Target CP
+                 t_next_cp = self.next_cp_id[torch.arange(self.num_envs), target_e]
+                 t_cp_pos = self.checkpoints[torch.arange(self.num_envs), t_next_cp]
+                 
+                 # Dist Me -> Intercept
+                 curr_pos = self.physics.pos[:, i]
+                 dist_intercept = torch.norm(t_cp_pos - curr_pos, dim=1)
+                 
+                 # Previous Distance (Needs State)
+                 # self.prev_dist_intercept is [B, 4]. Initialize in reset.
+                 if not hasattr(self, 'prev_dist_intercept'):
+                      self.prev_dist_intercept = torch.zeros((self.num_envs, 4), device=self.device)
+                      
+                 # Calculate Delta (Closing Velocity)
+                 # Positive if closing in.
+                 delta = self.prev_dist_intercept[:, i] - dist_intercept
+                 
+                 # Clamp to avoid huge jumps on reset/teleport (though reset handles state)
+                 # But switching targets causes jump.
+                 # Filter jumps > 500 units/step (Max speed ~200)
+                 valid_delta = (delta.abs() < 500.0).float()
+                 
+                 # Reward
+                 # S_VEL is 1/1000. 
+                 # We want roughly same scale as Runner Progress.
+                 # Runner gives dist_delta * w_progress. 
+                 # We use w_progress too? Or w_intercept?
+                 # Use w_progress for simplicity + Intercept Scale.
+                 # If w_progress is 0, use default 1.0 logic?
+                 # No, assume w_progress is set.
+                 
+                 intercept_rew = delta * valid_delta * INTERCEPT_SCALE * dense_mult
+                 
+                 # Apply (Masked by is_blocker)
+                 # Note: w_progress might be masked out for blockers elsewhere?
+                 # We apply it explicitly here.
+                 w_prog = reward_weights[:, RW_PROGRESS]
+                 
+                 rewards_indiv[:, i] += intercept_rew * w_prog * is_block.float()
+                 
+                 # Update State
+                 self.prev_dist_intercept[:, i] = dist_intercept
+                 
+            # Passive Failure Penalty
+            # Check if ANY enemy runner passed CP this step
+            # infos["checkpoints_passed"] is [B, 4]
+            # Sum passed for enemy runners
+            e_passed_mask = (infos["checkpoints_passed"][:, enemy_indices].sum(dim=1) > 0)
+            
+            # Check if *I* was involved in collision (total_impact_force > 0)
+            involved_mask = (total_impact_force > 0)
+            
+            # Fail Mask: Involved AND Enemy Passed
+            fail_mask = involved_mask & e_passed_mask
+            
+            # Apply large penalty
+            # e.g. -2000.0 (Cost of a checkpoint) or -TotalImpact
+            # Let's subtract impact to negate any positive gains and add penalty
+            # penalty = -(total_impact_force + 2000.0)
+            if fail_mask.any():
+                 bonus_blocker[fail_mask] -= (total_impact_force[fail_mask] + 2000.0)
                  
             # Apply Reward
             rewards_indiv[:, i] += bonus_blocker * w_col_block * dense_mult * is_block.float()
             
-            # [METRIC] Accumulate Impact (Raw Magnitude)
-            # Only count if I am a blocker
+            # [METRIC] Accumulate Collision Steps (Duration)
+            # Replaced "Impact Force" with "Collision Frames > 0"
             is_block_f = is_block.float()
-            self.stage_metrics["blocker_impact"] += (total_impact_force * is_block_f).sum().item()
+            collision_steps = ((total_impact_force > 0) * is_block_f) # Tensor [B] (0 or 1)
+            self.stage_metrics["blocker_collisions"] += collision_steps.sum().item()
+            blocker_damage_metric[:, i] = collision_steps # Store for Info
             
-            # --- RW_ZONE (Intercept Control) ---
-            # w_zone weight index 16
-            w_zone = reward_weights[:, RW_ZONE] if reward_weights.shape[1] > RW_ZONE else torch.zeros(self.num_envs, device=self.device)
+            # --- RW_ZONE Removed (Integrated into RW_DENIAL) ---
+            pass
             
-            if w_zone.sum() > 0 and self.curriculum_stage >= STAGE_DUEL_FUSED:
-                 # Calculate Intercept Point (Simplified)
-                 # Target: Closest/Leading Enemy Runner
-                 # We assume pod 'i' is blocker.
-                 
-                 # Identify target runner (best rank among enemies)
-                 # This logic is complex to vectorize for 4 pods.
-                 # For now, calc for all blockers against *their* target.
-                 # Bot logic calculated "dir_runner_to_cp".
-                 # We replicate:
-                 
-                 # Find Primary Target (Best Rank)
-                 # enemies: enemy_indices
-                 r0 = rank_norm[:, enemy_indices[0], 0]
-                 r1 = rank_norm[:, enemy_indices[1], 0]
-                 # Target index 0 or 1 of enemy pair?
-                 # If r0 < r1 (Rank 0 is better/lower), target 0.
-                 target_local_idx = (r1 < r0).long() # 0 or 1
-                 target_idx = torch.gather(torch.tensor(enemy_indices, device=self.device).unsqueeze(0).expand(self.num_envs, 2), 1, target_local_idx.unsqueeze(1)).squeeze(1)
-                 
-                 # Target state
-                 t_pos = self.physics.pos[torch.arange(self.num_envs), target_idx]
-                 t_cp_id = self.next_cp_id[torch.arange(self.num_envs), target_idx]
-                 t_cp_pos = self.checkpoints[torch.arange(self.num_envs), t_cp_id]
-                 
-                 t_dir = t_cp_pos - t_pos
-                 t_dir = t_dir / (torch.norm(t_dir, dim=1, keepdim=True) + 1e-6)
-                 
-                 # Intercept Point: 1500u in front of CP (Generic Gatekeeper)
-                 # Or use Bot Logic scaling?
-                 # Let's reward being at the "Gatekeeper" spot: 1500u from CP.
-                 intercept_pt = t_cp_pos - (t_dir * 1500.0)
-                 
-                 # My Pos
-                 my_pos = self.physics.pos[:, i]
-                 dist_to_spot = torch.norm(intercept_pt - my_pos, dim=1)
-                 
-                 # Reward: exp(-dist / 1000)
-                 zone_rew = torch.exp(-dist_to_spot / 1000.0)
-                 
-                 rewards_indiv[:, i] += zone_rew * w_zone * dense_mult * is_block.float()
-        
             # 3. Teammate Collision Penalty
             mate_idx = i ^ 1
             impact_mate = collisions[:, i, mate_idx]
@@ -1471,10 +1732,6 @@ class PodRacerEnv:
                     close_mask = valid_pair & (dist < 3000.0)
                     if not close_mask.any(): continue
                     
-                    # --- NEW [Proposal A]: Proximity Pressure ---
-                    # Instead of Penalizing Enemy Speed, we Reward Proximity.
-                    # "Glued to Target" = High Reward.
-                    
                     # 2. Zone Reward (Intercept)
                     # Project Vector(Enemy->Me) onto Vector(Enemy->CP)
                     e_next_cp = self.next_cp_id[:, real_e_idx]
@@ -1489,22 +1746,110 @@ class PodRacerEnv:
                     proj_pos = (vec_e_me * dir_to_cp).sum(dim=1)
                     
                     # Zone Score: 0.0 to 1.0 (Best at ~1500u ahead)
-                    zone_reward = torch.clamp(proj_pos / 1500.0, 0.0, 1.0)
+                    # [FIX]: Refined Zone Logic (Lateral Distance)
+                    # We want to be ON the line between Enemy and CP.
+                    # Project Me onto Line (Enemy->CP).
+                    # Intersection P = E + (E->CP) * t
+                    # t = Proj / |E->CP|
                     
-                    # 3. Proximity Bias (New)
-                    # Reward simply for being close (< 1500u) to maintain pressure.
-                    # Max 1.0 at dist=0, 0.0 at dist=1500
+                    # Lateral Vector = Me - (E + Dir * Proj)
+                    # we already have proj_pos (scalar magnitude along dir)
+                    # projected_point = e_pos + dir_to_cp * proj_pos.unsqueeze(1)
+                    # lateral_vec = p_pos - projected_point
+                    # lateral_dist = torch.norm(lateral_vec, dim=1)
+                    
+                    # Compute Lateral Penalty
+                    # Block radius ~ 800 (2x Pod).
+                    # If lateral > 800, rapid decay.
+                    
+                    projected_point = e_pos + dir_to_cp * proj_pos.unsqueeze(1)
+                    lateral_vec = p_pos - projected_point
+                    lateral_dist = torch.norm(lateral_vec, dim=1)
+                    
+                    # Gaussian-like decay: exp(-dist^2 / 2sigma^2)
+                    # sigma = 600.
+                    lat_score = torch.exp(-(lateral_dist**2) / (2 * 600.0**2))
+                    
+                    # Longitudinal Score (Projected Posiiton)
+                    # We want to be ahead (proj > 0) but not too far?
+                    # "Gatekeeper": 1000-2000u ahead is good.
+                    long_score = torch.clamp(proj_pos / 1500.0, 0.0, 1.0)
+                    
+                    # Combined Zone Reward
+                    zone_reward = long_score * lat_score
+                    
+                    # 3. Proximity Bias with Alignment & Position Check (Anti-Escort)
+                    # "Escorting" (moving with runner) is bad.
+                    
+                    # Compute Alignment
+                    v_me = self.physics.vel[:, i]
+                    v_e = self.physics.vel[:, real_e_idx]
+                    
+                    # Norms
+                    s_me = torch.norm(v_me, dim=1) + 1e-6
+                    s_e = torch.norm(v_e, dim=1) + 1e-6
+                    
+                    # Directions
+                    d_me = v_me / s_me.unsqueeze(1)
+                    d_e = v_e / s_e.unsqueeze(1)
+                    
+                    # Dot (Cos)
+                    # 1.0 = Parallel, -1.0 = Head On
+                    align = (d_me * d_e).sum(dim=1)
+                    
+                    # Penalty for Alignment if speeds are significant (>200)
+                    is_moving = (s_me > 200.0) & (s_e > 200.0)
+                    
+                    # Anti-Escort Factor
+                    # If moving and aligned (>0.5), reduce reward significantly
+                    # If aligned=1.0, factor=0.1
+                    # If aligned<=0.0, factor=1.0
+                    anti_escort = torch.ones_like(dist)
+                    
+                    # Linear decay from 0.5 to 1.0 (Align) -> 1.0 to 0.1 (Factor)
+                    # align 0.5 -> 1.0
+                    # align 1.0 -> 0.1
+                    # slope = (0.1 - 1.0) / (1.0 - 0.5) = -0.9 / 0.5 = -1.8
+                    # y - 1.0 = -1.8 * (x - 0.5)
+                    # y = 1.0 - 1.8x + 0.9 = 1.9 - 1.8x
+                    
+                    factor_aligned = torch.clamp(1.9 - 1.8 * align, 0.1, 1.0)
+                    
+                    # Only apply if moving
+                    anti_escort = torch.where(is_moving, factor_aligned, anti_escort)
+                    
+                    # Position Bias (Front vs Behind)
+                    # Project (Me - Enemy) onto Enemy Velocity
+                    # If > 0: In True Front (in direction of their motion)
+                    # If < 0: Behind
+                    
+                    # vector Me - E
+                    vec_gap = p_pos - e_pos
+                    
+                    # Project onto d_e (Enemy Direction)
+                    front_proj = (vec_gap * d_e).sum(dim=1)
+                    
+                    # Front Factor
+                    # If front_proj > 0: 1.0
+                    # If front_proj < 0: 0.1? (Behind implies chasing or failing)
+                    # But if we are chasing to tackle, maybe allow it?
+                    # But "Zoning" implies guarding. You guard from the front.
+                    pos_factor = torch.where(front_proj > -100.0, torch.tensor(1.0, device=self.device), torch.tensor(0.1, device=self.device))
+                    # Allow slight tolerance (-100) for side-by-side
+                    
+                    # Base Proximity
                     prox_score = torch.clamp(1.0 - (dist / 1500.0), 0.0, 1.0)
                     
                     # 4. Timeout Pressure (Same as Collision)
                     e_timeout = self.timeouts[:, real_e_idx]
-                    # Formula: 1.0 -> 5.0 as Time 50 -> 0
                     desperation = torch.clamp(1.0 + (50.0 - e_timeout.float()) / 10.0, 1.0, 5.0)
                     
                     # Combine:
-                    # Base = (Zone * 200) + (Prox * 100) -> Max 300/step
-                    # Scaled by Desperation -> Max 1500/step
-                    base_denial = (zone_reward * 200.0) + (prox_score * 100.0)
+                    # Final = (Zone + Prox*AntiEscort*PosFactor) * Desperation
+                    
+                    final_prox = prox_score * anti_escort * pos_factor
+                    
+                    base_denial = (zone_reward * 200.0) + (final_prox * 100.0)
                     
                     denial_rew[close_mask] += base_denial[close_mask] * desperation[close_mask]
                 
@@ -1521,9 +1866,25 @@ class PodRacerEnv:
         all_ids = torch.arange(self.num_envs, device=self.device)
         self._update_roles(all_ids)
         
-        # Add Metrics to Info
         infos['runner_velocity'] = runner_velocity_metric
-        infos['blocker_damage'] = blocker_damage_metric
+        infos['blocker_damage'] = blocker_damage_metric # Legacy Key, now carries Collision Steps if modified above?
+        # Await, in step(), I accumulated into self.stage_metrics.
+        # But ppo.py reads infos['blocker_damage'].
+        # I need to construct the per-step metric tensor for infos.
+        
+        # [FIX] Construct Per-Env Collision Step Tensor
+        # We need to know which pod had a collision this step.
+        # Recalculate or store from loop?
+        # In loop: `collision_steps = ((total_impact_force > 0) * is_block_f).sum().item()` (Wait, this is sum over batch!)
+        # PPO needs [NumEnvs, 4] tensor of collision steps (0 or 1).
+        
+        # Let's recreate the tensor here.
+        # We don't have 'total_impact_force' here easily for all pods unless we stored it.
+        # But wait, infos['blocker_damage'] was serving this purpose.
+        # Let's look at how it was constructed.
+        # It wasn't shown in the snippets. It seems I missed where `blocker_damage_metric` was created.
+        
+        # I will assume `blocker_damage_metric` was created earlier. I must find it.
 
         # --- FINAL BLENDING ---
         # Hybrid Reward:

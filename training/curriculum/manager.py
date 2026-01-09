@@ -62,8 +62,8 @@ class CurriculumManager:
          trainer.log(f"*** Reason: {reason} ***")
          
          
-         # Reset Environment or trigger Mitosis handled by Trainer?
-         # Trainer checks (prev != current) loop start and resets.
+         
+         # Reset Environment handled by Trainer.
          # So we just set the state here.
 
 

@@ -11,14 +11,18 @@ graph TD
         sim_vec["Vectorized Simulation (8192 Envs)"]
         physics_eng["Custom Physics Engine & Rewards"]
         
-        subgraph agent_model ["Universal Agent (~58k Params)"]
+        subgraph agent_model ["Gen 2 MoE Actor (~56k Params)"]
             obs_input["Observation"]
             
-            subgraph unified_brain ["Recurrent Split Backbone"]
-                pilot_feat["Pilot Stream (Sensory-Motor)<br/>~4.8k params"]
-                cmd_feat["Commander Backbone (Contextual)<br/>~14k params"]
+            subgraph moe_brain ["Hard-Gated MoE Backbone"]
+                pilot_feat["Pilot Stream (Sensory-Motor)<br/>~3.7k params"]
                 
-                lstm_core["LSTM Core (Memory)<br/>~28k params"]
+                subgraph experts ["Specialized Experts"]
+                    run_exp["Runner Expert (Navigation)<br/>~20k params"]
+                    blk_exp["Blocker Expert (Combat)<br/>~20k params"]
+                end
+                
+                pred_head["Trajectory Prediction<br/>(Auxiliary)"]
                 
                 pilot_heads["Pilot Heads"]
                 cmd_heads["Commander Heads"]
@@ -26,7 +30,7 @@ graph TD
             
             enemy_encoder["DeepSets Enemy Encoder<br/>~1k params"]
             map_encoder["Map Transformer<br/>~8.6k params"]
-            role_emb["Role Embedding"]
+            role_emb["Role Selection"]
         end
     end
     
@@ -38,22 +42,26 @@ graph TD
     
     sim_vec -- "Self+CP" --> pilot_feat
     sim_vec -- "Enemies" --> enemy_encoder 
-    enemy_encoder --> cmd_feat
-    sim_vec -- "Self+Team" --> cmd_feat
+    enemy_encoder --> run_exp
+    enemy_encoder --> blk_exp
+    enemy_encoder --> pred_head
+    
+    sim_vec -- "Self+Team" --> run_exp
+    sim_vec -- "Self+Team" --> blk_exp
+    
     sim_vec -- "Map (Next CPs)" --> map_encoder
-    map_encoder --> cmd_feat
-    role_emb --> cmd_feat
+    map_encoder --> run_exp
+    map_encoder --> blk_exp
     
-    pilot_feat --> lstm_core
-    cmd_feat --> lstm_core
+    role_emb -- "Switch" --> experts
     
-    lstm_core --> pilot_heads
-    lstm_core --> cmd_heads
+    pilot_feat --> experts
+    run_exp --> pilot_heads
+    run_exp --> cmd_heads
+    blk_exp --> pilot_heads
+    blk_exp --> cmd_heads
     
-    pilot_heads -- "Thrust, Angle" --> sim_vec
-    cmd_heads -- "Bias, Shield, Boost" --> sim_vec
-    
-    ppo_trainer -- "Gradients" --> unified_brain
+    ppo_trainer -- "Gradients" --> moe_brain
     ga_ctrl -- "Mutations" --> ppo_trainer
 ```
 
@@ -65,14 +73,14 @@ graph TD
 *   **Vectorized Adam**: A custom optimizer implementation that updates the parameters of 128 unique neural networks in parallel, supporting per-agent learning rates and independent momentum buffers.
 
 ### 2. Universal Actor (The "Recurrent Split Backbone")
-To fit complex team strategies and precise driving into a compact model, we use a **Recurrent Split Backbone** architecture. This design processes immediate sensory data and high-level tactical context separately before fusing them in a memory unit.
+Instead of a monolithic network, we use a **Hard-Gated Mixture of Experts (MoE)** architecture. This allows the model to switch between entirely different behavioral "brains" depending on its assigned role.
 
-*   **Pilot Stream (Reactive)**: A lightweight MLP processing immediate physical state (Velocity, Checkpoints). It focuses on the physics of driving.
-*   **Commander Stream (Tactical)**: A deeper stream processing context-heavy data (Teammates, Enemies, Role). It utilizes DeepSets for permutation-invariant enemy processing and Role Embeddings.
-*   **LSTM Core (Memory)**: Both streams merge into a specialized LSTM. This allows the agent to maintain temporal context (e.g., "I passed the blocker", "I am currently recovering from a collision").
-*   **Heads**:
-    *   **Pilot Heads**: Thrust, Angle.
-    *   **Commander Heads**: Shield, Boost, and Bias adjustments.
+*   **Pilot Stream (Reactive)**: A lightweight shared MLP processing immediate physical state. It provides a common sensory foundation for both experts.
+*   **Mixture of Experts (MoE)**:
+    *   **Runner Expert**: A specialized backbone and LSTM optimized for high-speed racing and obstacle avoidance.
+    *   **Blocker Expert**: A specialized backbone and LSTM optimized for interception physics and "wrestler" combat.
+*   **Trajectory Prediction (Auxiliary)**: A prediction head that attempts to forecast the next position of the nearest enemy. Training this head via an auxiliary loss forces the enemy encoder to learn relevant physical features of opponents.
+*   **Selection Head**: Gating logic that activates the corresponding expert based on the `role_id`. During inference, both streams can run in parallel (masked) or sparsely to optimize compute.
 
 ### 3. Role Embeddings & Contextual Condition
 Instead of separate networks, we use a **Context-Conditioned** approach. A learned **Role Embedding** (Size 16) is concatenated with the core observations before entering the Commander Backbone.
@@ -103,11 +111,12 @@ We incorporate **Random Network Distillation** to generate intrinsic rewards.
 ### 7. Model Complexity
 Despite the deep reinforcement learning capability, the model remains highly efficient to ensure high SPS (Steps Per Second).
 
-*   **Total Trainable Parameters**: ~155,449
-    *   **Actor Network**: ~57,672 (Lightweight for fast inference)
-    *   **Critic Network**: ~97,777 (Larger capacity for accurate value estimation)
+*   **Total Trainable Parameters**: ~140,523
+    *   **Actor Network**: ~56,202 (Inference model)
+    *   **Critic Network**: ~84,321 (Accurate value estimation)
 *   **Key Component sizes**:
-    *   **LSTM Core**: ~28k params
+    *   **MoE Experts**: ~20k params each (Backbone + LSTM)
     *   **Map Transformer**: ~8.6k params
+    *   **Pilot Stream**: ~3.7k params
     *   **DeepSets Encoders**: ~1k params each
 

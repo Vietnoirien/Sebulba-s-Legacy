@@ -178,159 +178,6 @@ class MapTransformer(nn.Module):
         emb, _ = torch.max(x, dim=1) # [B, d_model]
         return emb
 
-class PodActor(nn.Module):
-    """
-    Recurrent Actor.
-    Flow: Features -> LSTM -> Heads.
-    """
-    def __init__(self, hidden_dim=64, lstm_hidden=64): 
-        super().__init__()
-        
-        # 1. Feature Extractors (No Heads yet)
-        # 1. Feature Extractors (No Heads yet)
-        # Pilot Features: Self(15) + CP(10) = 25 -> 64
-        self.pilot_embed = nn.Sequential(
-            layer_init(nn.Linear(25, 64)),
-            nn.ReLU(),
-            layer_init(nn.Linear(64, 48)), # Reduced to 48
-            nn.ReLU()
-        )
-        
-        # Map Encoder (New)
-        self.map_encoder = MapTransformer(input_dim=2, d_model=32, nhead=2, num_layers=1)
-        
-        # Commander Features
-        self.role_embedding = nn.Embedding(2, 16)
-        # CommanderNet (modified to be an embedder)
-        # 2. Teammate Encoder (DeepSet, permutation invariant? actually just one)
-        # Input: [B, 4, 1, 14] -> Squeeze -> [B, 4, 14]
-        self.teammate_encoder = nn.Sequential(
-            layer_init(nn.Linear(14, 32)),
-            nn.ReLU(),
-            layer_init(nn.Linear(32, 16))
-        )
-        
-        # 3. Enemy Encoder (DeepSet)
-        # Input: [B, 4, 2, 14] -> Process each -> Sum/Max
-        self.enemy_encoder = nn.Sequential(
-            layer_init(nn.Linear(14, 32)),
-            nn.ReLU(),
-            layer_init(nn.Linear(32, 16))
-        )
-        
-        self.commander_backbone = nn.Sequential(
-            layer_init(nn.Linear(15 + 16 + 16 + 16 + 32, 96)), # Self+Team+Ctx+Role+Map
-            nn.ReLU(),
-            layer_init(nn.Linear(96, 48)), # Reduced to 48
-            nn.ReLU()
-        )
-        
-        # 2. LSTM Core
-        # Input: Pilot(48) + Commander(48) = 96
-        self.lstm = CustomLSTM(input_size=96, hidden_size=lstm_hidden)
-        
-        # 3. Heads (From LSTM Output)
-        # Pilot Heads
-        self.head_thrust = layer_init(nn.Linear(lstm_hidden, 1), std=0.01)
-        self.head_angle = layer_init(nn.Linear(lstm_hidden, 1), std=0.01)
-        
-        # Commander Heads
-        self.head_shield = layer_init(nn.Linear(lstm_hidden, 2), std=0.01)
-        self.head_boost = layer_init(nn.Linear(lstm_hidden, 2), std=0.01)
-        
-        # LogStd (Learnable)
-        self.actor_logstd = nn.Parameter(torch.zeros(2))
-        
-    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, lstm_state=None, done=None):
-        # self_obs: [B, 15]
-        # map_obs: [B, MaxCP, 2]
-        
-        has_seq = (self_obs.ndim == 3)
-        if not has_seq:
-            self_obs = self_obs.unsqueeze(1)
-            teammate_obs = teammate_obs.unsqueeze(1)
-            enemy_obs = enemy_obs.unsqueeze(1)
-            next_cp_obs = next_cp_obs.unsqueeze(1)
-            map_obs = map_obs.unsqueeze(1) # [B, 1, MaxCP, 2]
-            role_ids = role_ids.unsqueeze(1)
-            if done is not None: done = done.unsqueeze(1)
-            
-        B, S, _ = self_obs.shape
-        
-        # --- 1. Features ---
-        # Flatten for MLP: [B*S, F]
-        flat_self = self_obs.reshape(B*S, -1)
-        flat_cp = next_cp_obs.reshape(B*S, -1)
-        flat_tm = teammate_obs.reshape(B*S, -1)
-        flat_en = enemy_obs.reshape(B*S, enemy_obs.shape[2], -1)
-        flat_role = role_ids.reshape(B*S)
-        
-        # Flatten Map for processing: [B*S, MaxCP, 2]
-        # map_obs is [B, S, MaxCP, 2]
-        bs_map, s_map, max_cp, dim_map = map_obs.shape
-        flat_map = map_obs.reshape(bs_map * s_map, max_cp, dim_map)
-        
-        # A. Pilot Embed
-        pilot_in = torch.cat([flat_self, flat_cp], dim=1)
-        p_emb = self.pilot_embed(pilot_in) # [B*S, 64]
-        
-        # B. Map Embed
-        m_emb = self.map_encoder(flat_map) # [B*S, 32]
-        
-        # C. Commander Embed
-        # Encode Teammate
-        tm_lat = self.enemy_encoder(flat_tm) # [B*S, 16]
-        # Encode Enemies
-        # flat_en is [B*S, N, 13]
-        bs_en, n_en, dim_en = flat_en.shape
-        en_flat_flat = flat_en.reshape(bs_en * n_en, dim_en)
-        en_lat = self.enemy_encoder(en_flat_flat).view(bs_en, n_en, -1)
-        en_ctx, _ = torch.max(en_lat, dim=1) # [B*S, 16]
-        
-        r_emb = self.role_embedding(flat_role) # [B*S, 16]
-        
-        cmd_in = torch.cat([flat_self, tm_lat, en_ctx, r_emb, m_emb], dim=1)
-        c_emb = self.commander_backbone(cmd_in) # [B*S, 64]
-        
-        # --- 2. LSTM ---
-        # Combine [B, S, 128]
-        lstm_in = torch.cat([p_emb, c_emb], dim=1).view(B, S, -1)
-        
-        if lstm_state is None:
-             # Initial state
-             device = self_obs.device
-             h0 = torch.zeros(1, B, self.lstm.hidden_size, device=device)
-             c0 = torch.zeros(1, B, self.lstm.hidden_size, device=device)
-             lstm_state = (h0, c0)
-
-        out, (hn, cn) = self.lstm(lstm_in, lstm_state)
-        # out: [B, S, H]
-        
-        # --- 3. Heads ---
-        thrust_logits = self.head_thrust(out)
-        angle_input = self.head_angle(out)
-        
-        shield_logits = self.head_shield(out)
-        boost_logits = self.head_boost(out)
-        
-        # Activations
-        thrust_mean = torch.sigmoid(thrust_logits)
-        angle_mean = torch.tanh(angle_input)
-        
-        if not has_seq:
-            # Squeeze back [B, 1, D] -> [B, D]
-            thrust_mean = thrust_mean.squeeze(1)
-            angle_mean = angle_mean.squeeze(1)
-            shield_logits = shield_logits.squeeze(1)
-            boost_logits = boost_logits.squeeze(1)
-        
-        # Unified std expansion
-        dist_mean = torch.cat([thrust_mean, angle_mean], dim=-1) # [..., 2]
-        std = torch.exp(self.actor_logstd).expand_as(dist_mean)
-             
-        std = torch.clamp(std, min=0.05)
-        
-        return (thrust_mean, angle_mean), std, (shield_logits, boost_logits), (hn, cn)
 
 class PodCritic(nn.Module):
     """
@@ -411,60 +258,352 @@ class PodCritic(nn.Module):
             
         return val, (hn, cn)
 
-class PodAgent(nn.Module):
-    def __init__(self, hidden_dim=128, lstm_hidden=48): 
+class PodActor(nn.Module):
+    """
+    Recurrent Actor with Hard-Gated Mixture of Experts (MoE).
+    Trigger: Role ID (0=Runner, 1=Blocker).
+    """
+    def __init__(self, hidden_dim=64, lstm_hidden=32): 
         super().__init__()
         
         self.hidden_dim = hidden_dim 
         
-        # Recurrent Actor
-        self.actor = PodActor(hidden_dim=hidden_dim, lstm_hidden=lstm_hidden)
+        # 1. Feature Extractors (Shared)
+        # Pilot Features: Self(15) + CP(10) = 25 -> 64
+        self.pilot_embed = nn.Sequential(
+            layer_init(nn.Linear(25, 64)),
+            nn.ReLU(),
+            layer_init(nn.Linear(64, 32)), # Reduced to 32 for Size Opt
+            nn.ReLU()
+        )
         
-        # Recurrent Critic
-        self.critic_net = PodCritic(hidden_dim=256, lstm_hidden=lstm_hidden)
+        # Map Encoder (Shared)
+        self.map_encoder = MapTransformer(input_dim=2, d_model=32, nhead=2, num_layers=1)
         
-    def get_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, lstm_state=None):
-        val, _ = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, lstm_state)
-        return val#.squeeze(-1) # Squeeze last dim? handled by caller check
+        # Commander Features (Shared Encoders)
+        self.role_embedding = nn.Embedding(2, 16)
+        
+        # Teammate Encoder
+        self.teammate_encoder = nn.Sequential(
+            layer_init(nn.Linear(14, 32)),
+            nn.ReLU(),
+            layer_init(nn.Linear(32, 16))
+        )
+        
+        # Enemy Encoder (Shared)
+        # [NEW] Prediction Head added internally? No, we decouple it for now.
+        # But prediction head needs "Per Enemy" embedding.
+        # So we split the encoder:
+        # A. Per-Enemy Embedder
+        self.enemy_embedder = nn.Sequential(
+            layer_init(nn.Linear(14, 32)),
+            nn.ReLU(),
+            layer_init(nn.Linear(32, 16))
+        )
+        # B. Prediction Head (Auxiliary) [16 -> 2] (Thrust, Angle)
+        # Predicts NEXT ACTION or NEXT STATE delta?
+        # Plan says: Predict Next State (Pos/Vel). But let's predict delta-pos (2) for simplicity.
+        self.enemy_pred_head = layer_init(nn.Linear(16, 2), std=1.0) # Delta Pos
+        
+        # === MOE SPLIT ===
+        
+        # EXPERT 1: RUNNER
+        # Input: Self(15) + Team(16) + EnemyCtx(16) + Role(16) + Map(32) = 95
+        self.runner_backbone = nn.Sequential(
+            layer_init(nn.Linear(95, 64)), # Hidden 64 (was 96)
+            nn.ReLU(),
+            layer_init(nn.Linear(64, 32)), # Output 32 (was 48)
+            nn.ReLU()
+        )
+        self.runner_lstm = CustomLSTM(input_size=64, hidden_size=lstm_hidden) # Pilot(32) + Run(32)
+        
+        # EXPERT 2: BLOCKER
+        self.blocker_backbone = nn.Sequential(
+            layer_init(nn.Linear(95, 64)), # Hidden 64
+            nn.ReLU(),
+            layer_init(nn.Linear(64, 32)), # Output 32
+            nn.ReLU()
+        )
+        self.blocker_lstm = CustomLSTM(input_size=64, hidden_size=lstm_hidden) # Pilot(32) + Blk(32)
+        
+        # Shared Heads (Action Space is same)
+        # Input from LSTM (lstm_hidden)
+        self.head_thrust = layer_init(nn.Linear(lstm_hidden, 1), std=0.01)
+        self.head_angle = layer_init(nn.Linear(lstm_hidden, 1), std=0.01)
+        self.head_shield = layer_init(nn.Linear(lstm_hidden, 2), std=0.01)
+        self.head_boost = layer_init(nn.Linear(lstm_hidden, 2), std=0.01)
+        
+        # LogStd (Learnable)
+        self.actor_logstd = nn.Parameter(torch.zeros(2))
+        
+        # Recurrent Critic (Kept as is, or use shared? Independent for stability)
+
+        
+    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, actor_state=None, done=None):
+        # actor_state is now ((h_run, c_run), (h_blk, c_blk))
+        # shape [1, B, H] each.
+        
+        has_seq = (self_obs.ndim == 3)
+        if not has_seq:
+            self_obs_in = self_obs.unsqueeze(1)
+            teammate_obs_in = teammate_obs.unsqueeze(1)
+            enemy_obs_in = enemy_obs.unsqueeze(1)
+            next_cp_obs_in = next_cp_obs.unsqueeze(1)
+            map_obs_in = map_obs.unsqueeze(1)
+            role_ids_in = role_ids.unsqueeze(1)
+            if done is not None: done_in = done.unsqueeze(1)
+            else: done_in = None
+        else:
+            self_obs_in = self_obs
+            teammate_obs_in = teammate_obs
+            enemy_obs_in = enemy_obs
+            next_cp_obs_in = next_cp_obs
+            map_obs_in = map_obs
+            role_ids_in = role_ids
+            done_in = done
+
+        B, S, _ = self_obs_in.shape
+        
+        # --- 1. Shared Feature Extraction ---
+        # Flatten [B*S, F]
+        flat_self = self_obs_in.reshape(B*S, -1)
+        flat_cp = next_cp_obs_in.reshape(B*S, -1)
+        flat_tm = teammate_obs_in.reshape(B*S, -1)
+        flat_en = enemy_obs_in.reshape(B*S, enemy_obs_in.shape[2], -1)
+        flat_role = role_ids_in.reshape(B*S)
+        
+        # Map
+        bs_map, s_map, max_cp, dim_map = map_obs_in.shape
+        flat_map = map_obs_in.reshape(bs_map * s_map, max_cp, dim_map)
+        
+        # A. Pilot Embed
+        pilot_in = torch.cat([flat_self, flat_cp], dim=1)
+        p_emb = self.pilot_embed(pilot_in) # [B*S, 48]
+        
+        # B. Map Embed
+        m_emb = self.map_encoder(flat_map) # [B*S, 32]
+        
+        # C. Shared Context
+        tm_lat = self.teammate_encoder(flat_tm) # [B*S, 16]
+        r_emb = self.role_embedding(flat_role) # [B*S, 16]
+        
+        # D. Enemy Embed & Prediction
+        bs_en, n_en, dim_en = flat_en.shape
+        en_flat_flat = flat_en.reshape(bs_en * n_en, dim_en)
+        en_lat = self.enemy_embedder(en_flat_flat) # [B*S*N, 16]
+        
+        # [AUX] Prediction
+        pred_delta = self.enemy_pred_head(en_lat) # [B*S*N, 2]
+        
+        # Pool
+        en_lat_grouped = en_lat.view(bs_en, n_en, -1)
+        en_ctx, _ = torch.max(en_lat_grouped, dim=1) # [B*S, 16]
+        
+        # --- 2. MoE Switch (Scatter-Gather) ---
+        cmd_in = torch.cat([flat_self, tm_lat, en_ctx, r_emb, m_emb], dim=1) # [B*S, 95]
+        
+        # Masks
+        # role 0: Runner, 1: Blocker
+        is_runner = (flat_role == 0)
+        is_blocker = (flat_role == 1)
+        
+        # Initialize Output Buffers
+        # VMAP-Safe Execution: Run BOTH on full batch, then Mask
+        out_run = self.runner_backbone(cmd_in)
+        out_blk = self.blocker_backbone(cmd_in)
+        
+        # Select
+        mask_run = is_runner.float().unsqueeze(-1)
+        mask_blk = is_blocker.float().unsqueeze(-1)
+        
+        c_emb = out_run * mask_run + out_blk * mask_blk
+            
+        # --- 3. LSTM (Hard Gated) ---
+        # Note: LSTM requires sequential continuity. Scatter-Gather breaks sequence if done per-step.
+        # But we process [B, S]. We must handle state carefully.
+        # Approach: Run BOTH LSTMs for full batch? No, wasteful.
+        # Approach: Split Batch into Runner-Batch and Blocker-Batch?
+        # Only works if role is constant for the whole sequence S.
+        # VALID ASSUMPTION: Roles don't change mid-inference-sequence (usually S=1 during play, S=SeqLen during TRAIN).
+        # During Train, if role changes mid-sequence, it's tricky.
+        # BUT: Role is usually an Episode-level constant or changes rarely.
+        # For simplicity/correctness within PPO batching: We run the WHOLE batch through BOTH LSTMs?
+        # NO, that doubles cost.
+        # OPTIMIZED: We assume mixed batch. We masking update?
+        # CustomLSTM supports masking? No.
+        # Hack: Pass full batch to both, but mask the *input* to zero for inactive? 
+        # LSTM with zero input still updates state (drift).
+        # CORRECT WAY: Gather indices, run LSTM on subset, scatter back.
+        # Issue: Hidden State alignment.
+        # If we have [B, S].
+        # We need state `h_run` [1, B, H].
+        # If we select subset `idx`, we need `h_run[:, idx, :]`.
+        
+        # Combine Embeddings
+        lstm_in_all = torch.cat([p_emb, c_emb], dim=1).view(B, S, -1) # [B, S, 96]
+        
+        # Unpack States
+        if actor_state is None:
+             device = self_obs.device
+             h_run = torch.zeros(1, B, self.runner_lstm.hidden_size, device=device)
+             c_run = torch.zeros(1, B, self.runner_lstm.hidden_size, device=device)
+             h_blk = torch.zeros(1, B, self.blocker_lstm.hidden_size, device=device)
+             c_blk = torch.zeros(1, B, self.blocker_lstm.hidden_size, device=device)
+        else:
+             (h_run, c_run), (h_blk, c_blk) = actor_state
+
+        # We can't easily perform scatter-gather on LSTM if S > 1 and roles change.
+        # But `role_ids` is [B, S].
+        # If S > 1, role *could* change.
+        # However, for PPO training, we usually slice blocks where role is constant? No guaranteed.
+        # COMPROMISE: Run BOTH LSTMs.
+        # Why? Because "Sparse" usually means we skip computation. But if we have to manage state for potential switches,
+        # we might need to keep the "dormant" LSTM state alive (identity pass) or run it.
+        # If we run both, we allow the "Runner Brain" to keep thinking even when Blocking? 
+        # Actually, "Background Thinking" is good.
+        # So: Independent Runner Stream and Blocker Stream ALWAYS run.
+        # The SWITCH only happens at the *output* of the LSTMs (or input to Heads).
+        # This doubles LSTM compute (small, 48 dim) but simplifies State Management massively.
+        # And since LSTM is small part of compute (Vision/MLP is larger), it's acceptable.
+        
+        # --- Dual Stream LSTM ---
+        # 1. Runner Stream
+        # Features: Pilot + CommanderRunner(All Inputs)
+        # Note: We calculated c_emb via MoE. That was "Input Gating".
+        # If we want Dual Stream, we need c_emb_run and c_emb_blk for ALL.
+        # Let's revert the MoE c_emb above and just compute both.
+        # The "MoE" is effectively in the specialized weights.
+        
+        # Re-compute full backbones?
+        # c_emb_run = self.runner_backbone(cmd_in)
+        # c_emb_blk = self.blocker_backbone(cmd_in)
+        # This ensures smooth gradients.
+        
+        # However, plan said "Hard Gated". user wants efficiency?
+        # "Sparse Execution" was the pitch.
+        # If we do Sparse, we handle state complexity.
+        # Let's stick to the Plan: Hard Gated input to LSTM.
+        
+        # To handle S>1 validly with sparse:
+        # We must use the mask per step.
+        # CustomLSTM loop allows this!
+        # Let's modify CustomLSTM or inline it here? 
+        # Or simpler: Just mask the input to the LSTM? 
+        # If input is 0, LSTM state decays.
+        # We want "Pause" (Identity).
+        # A standard LSTM doesn't support "Pause" easily without custom kernel.
+        
+        # Pivot: RUN BOTH. "Expert" means distinct weights, not necessarily conditional computation.
+        # Character limit is 100k. Efficiency is high enough (small model).
+        # Running both is safer for stability and state consistency.
+        
+        c_emb_run = self.runner_backbone(cmd_in)
+        c_emb_blk = self.blocker_backbone(cmd_in)
+        
+        lstm_in_run = torch.cat([p_emb, c_emb_run], dim=1).view(B, S, -1)
+        lstm_in_blk = torch.cat([p_emb, c_emb_blk], dim=1).view(B, S, -1)
+        
+        out_run, (hn_run, cn_run) = self.runner_lstm(lstm_in_run, (h_run, c_run))
+        out_blk, (hn_blk, cn_blk) = self.blocker_lstm(lstm_in_blk, (h_blk, c_blk))
+        
+        # --- Output Gating ---
+        # Select output based on role_ids [B, S]
+        # role_ids 0 -> Run, 1 -> Blk
+        # mask: [B, S, 1]
+        mask_blk = role_ids_in.float().unsqueeze(-1)
+        mask_run = 1.0 - mask_blk
+        
+        out_fused = out_run * mask_run + out_blk * mask_blk
+        
+        # --- Heads ---
+        thrust_logits = self.head_thrust(out_fused)
+        angle_input = self.head_angle(out_fused)
+        shield_logits = self.head_shield(out_fused)
+        boost_logits = self.head_boost(out_fused)
+        
+        # Activations
+        thrust_mean = torch.sigmoid(thrust_logits)
+        angle_mean = torch.tanh(angle_input)
+        
+        if not has_seq:
+            thrust_mean = thrust_mean.squeeze(1)
+            angle_mean = angle_mean.squeeze(1)
+            shield_logits = shield_logits.squeeze(1)
+            boost_logits = boost_logits.squeeze(1)
+
+        dist_mean = torch.cat([thrust_mean, angle_mean], dim=-1) # [..., 2]
+        std = torch.exp(self.actor_logstd).expand_as(dist_mean)
+        std = torch.clamp(std, min=0.05)
+        
+        # Prediction Output (Aux)
+        # Flattened [B*S*N, 2]. We might need to reshape it back to [B, S, N, 2] for loss
+        # Or return as is?
+        # Caller expects specific tuple. 
+        # Let's attach it to 'states' (bad practice) or return extra?
+        # Function signature is fixed? No, we can modify returns.
+        pred_out = pred_delta.view(B, S, n_en, 2)
+        if not has_seq: pred_out = pred_out.squeeze(1)
+        
+        # Return composite state
+        next_state = ((hn_run, cn_run), (hn_blk, cn_blk))
+        
+        # Attach prediction to 'states' dict for convenient passing to loss
+        # Hacky but working
+        aux_out = {'pred': pred_out}
+
+        return (thrust_mean, angle_mean), std, (shield_logits, boost_logits), next_state, aux_out 
 
     def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, action=None, role_ids=None, actor_state=None, critic_state=None, done=None):
-        # NOTE: role_ids must be passed externally or derived.
-        # Derived:
+        # Allow PodActor to function standalone if needed, but primarily used via PodAgent
+        pass
+
+# NEW PodAgent
+class PodAgent(nn.Module):
+    def __init__(self, hidden_dim=64, lstm_hidden=32):
+        super().__init__()
+        self.actor = PodActor(hidden_dim, lstm_hidden)
+        # Critic now uses same hidden size as Actor (32 via config)
+        self.critic = PodCritic(hidden_dim=256, lstm_hidden=lstm_hidden) 
+
+    def forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, action=None, role_ids=None, actor_state=None, critic_state=None, done=None, method='get_action_and_value', lstm_state=None):
+        if method == 'get_value':
+            return self.get_value(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, lstm_state)
+        return self.get_action_and_value(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, action, role_ids, actor_state, critic_state, done)
+    
+    def get_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, critic_state):
+        return self.critic(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, critic_state)
+
+    def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, action=None, role_ids=None, actor_state=None, critic_state=None, done=None):
+        # Derived Role
         if role_ids is None:
              if self_obs.ndim == 3:
-                  role_ids = (self_obs[:, :, 11] > 0.5).long()
+                  # Fix: Index 11 is 'Leader' (is_runner).
+                  # We want role_id=0 for Runner, role_id=1 for Blocker.
+                  # Logic: If is_runner (1.0) -> role_id should be 0.
+                  #        If not is_runner (0.0) -> role_id should be 1.
+                  # So condition: NOT (self_obs > 0.5)
+                  role_ids = (self_obs[:, :, 11] < 0.5).long()
              else:
-                  role_ids = (self_obs[:, 11] > 0.5).long()
-
-        # Dummy Map for now if not provided
+                  role_ids = (self_obs[:, 11] < 0.5).long()
+        
         if map_obs is None:
              B = self_obs.shape[0]
-             D_Map = 6 # Max checkpoints hardcoded/inferred? 
-             # Ideally get MAX_CHECKPOINTS from config or context, but here we are inside model. 
-             # Let's assume 6 or check env?
-             # For robustness, we created MAX_CHECKPOINTS=6 in config.py
-             # But we can't easily import it here cleanly without circular dependency risk relative to env.
-             # However, we can use shape inference if we want, or just 6.
-             
-             # If S dim exists
+             # Dummy map
              if self_obs.ndim == 3:
                  S = self_obs.shape[1]
                  map_obs = torch.zeros((B, S, 6, 2), device=self_obs.device)
              else:
                  map_obs = torch.zeros((B, 6, 2), device=self_obs.device)
 
-        # 1. Actor Forward
-        means_pair, std, logits_pair, (hn_a, cn_a) = self.actor(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, actor_state, done)
+        # 1. Actor
+        means_pair, std, logits_pair, next_actor_state, aux_out = self.actor(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, actor_state, done)
         
-        # 2. Critic Forward
-        # Note: Critic maintains separate state? Yes ideally.
-        value, (hn_c, cn_c) = self.critic_net(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, critic_state)
+        # 2. Critic
+        value, next_critic_state = self.critic(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, critic_state)
         
-        # Unpack
         thrust_mean, angle_mean = means_pair
         shield_logits, boost_logits = logits_pair
         
-        # Construct Distributions
         dist_cont = torch.distributions.Normal(torch.cat([thrust_mean, angle_mean], -1), std)
         dist_shield = torch.distributions.Categorical(logits=shield_logits)
         dist_boost = torch.distributions.Categorical(logits=boost_logits)
@@ -475,7 +614,6 @@ class PodAgent(nn.Module):
             b = dist_boost.sample()
             action = torch.cat([ac_cont, s.unsqueeze(-1).float(), b.unsqueeze(-1).float()], dim=-1)
         else:
-            # Action provided [B, S, 4] or [B, 4]
             ac_cont = action[..., :2]
             s = action[..., 2]
             b = action[..., 3]
@@ -487,18 +625,14 @@ class PodAgent(nn.Module):
         log_prob = lp_cont + lp_s + lp_b
         entropy = dist_cont.entropy().sum(-1) + dist_shield.entropy() + dist_boost.entropy()
         
-        # Squeeze values if needed (PPO expects [B] or [B, S])
         value = value.squeeze(-1)
         
-        # Return states for buffer storage
         states = {
-            'actor': (hn_a, cn_a),
-            'critic': (hn_c, cn_c)
+            'actor': next_actor_state,
+            'critic': next_critic_state
         }
         
-        return action, log_prob, entropy, value, states
-             
-    def forward(self, *args, method='get_action_and_value', **kwargs):
-        if method == 'get_value':
-            return self.get_value(*args, **kwargs)
-        return self.get_action_and_value(*args, **kwargs)
+        return action, log_prob, entropy, value, states, aux_out
+
+
+

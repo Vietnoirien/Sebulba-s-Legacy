@@ -2,9 +2,9 @@
 
 ## 1. Executive Summary
 
-This report analyzes the complexity of the **Sebulba's Legacy** architecture (~155k total parameters, ~58k inference actor) in the context of the "Mad Pod Racing" environment.
+This report analyzes the complexity of the **Sebulba's Legacy** Gen 2 architecture (~140k total parameters, ~56k inference actor) in the context of the "Mad Pod Racing" environment.
 
-**Conclusion**: The current architecture represents an **"Efficient Specialist"** design. It is significantly more compact than standard "Brute Force" Deep RL baselines (often 200k+ params for continuous control) while possessing superior inductive biases (DeepSets, Transformers, Recurrence) that allow it to outperform significantly larger unstructured models. Its size is perfectly adapted for the unique **"Sim-to-Tensor"** high-throughput training paradigm (8,000+ parallel environments), where inference speed directly correlates with sample efficiency.
+**Conclusion**: The current architecture represents an **"Efficient Specialist"** design. By moving to a Mixture of Experts (MoE) approach, we maintain a compact footprint while specialized "brains" handle different racing roles. Its size is perfectly adapted for the unique **"Sim-to-Tensor"** high-throughput training paradigm (8,000+ parallel environments), where inference speed directly correlates with sample efficiency.
 
 ---
 
@@ -42,46 +42,54 @@ The historical top solutions for CodinGame.
 
 ## 3. Our Implementation: The "Recurrent Split Backbone"
 
-Our model (~58k Params) fits into a **Type D: Structured Neural Hybrid** category. Instead of raw size, we use **Inductive Biases**—architectural constraints that force the model to learn efficiently.
+Our model (~56k Actor Params) fits into a **Type D: Structured Neural Hybrid** category. Instead of raw size, we use **Inductive Biases** and **Mixture of Experts**—architectural constraints that force the model to learn efficiently.
 
 ### Comparative Table
 
 | Feature | Standard MLP (Type A) | **Sebulba (Our Model)** | Gain / Logic |
 | :--- | :--- | :--- | :--- |
-| **Total Params** | ~200,000 | **~58,000** | **4x Smaller** (Faster training/inference) |
+| **Total Params** | ~200,000 | **~56,000** | **~4x Smaller** (Inference footprint) |
+| **Specialization** | Generalist weight sharing | **Mixture of Experts (MoE)** | Dedicated backbones/memory for Runner vs Blocker tactics. |
 | **Enemy Processing** | Concatenation (Fixed Size) | **DeepSets (1k params)** | Handles *any* number of enemies naturally (Permutation Invariant). |
 | **Map Understanding** | Ignored / Raw Vector | **Transformer (8.6k params)** | Attends to relevant future track segments; ignores irrelevant ones. |
-| **Memory** | None (Frame Stacking) | **LSTM (28k params)** | True temporal memory (e.g., remembering "I was hit recently"). |
-| **Role Awareness** | Separate Models | **Embeddings** | Single model switches tactics instantly (Runner $\leftrightarrow$ Blocker). |
+| **Memory** | None (Frame Stacking) | **Recurrent LSTMs (25k params)** | Dual temporal memory streams (Navigation + Interception). |
+| **Prediction Head** | None | **Trajectory Pred** | Auxiliary head forces encoder to learn enemy physics. |
+
+---
+
+## 3. Our Implementation: Hard-Gated Mixture of Experts
+
+Instead of a single monolithic network attempting to master both racing and combat, we split the tactical brain.
 
 ### Detailed Component Analysis
 
-#### 1. The Pilot Stream (~4.8k Params)
-*   **Function**: Reflexive driving (Thrust/Steering).
-*   **Comparison**: This is roughly equivalent to a small "TinyML" network.
-*   **Why it works**: Driving physics are deterministic and low-dimensional. A massive network is not needed to learn $F=ma$. Small scale ensures ultra-low latency.
+#### 1. The Pilot Stream (~3.7k Params)
+*   **Function**: Reflexive driving foundation.
+*   **Innovations**: Shared across both experts to ensure consistent physical control.
+*   **Why it works**: Driving fundamentals are role-independent. A small scale ensures ultra-low latency for steering/thrust.
 
-#### 2. The Commander Backbone (~14k Params)
-*   **Function**: High-level tactics (Shielding, Boosting, Aggression).
-*   **Innovation**: It doesn't see raw data. It sees *latents* from the Encoders. It acts as a "manager" making decisions based on processed intel.
+#### 2. Specialized MoE Experts (~20k Params per Expert)
+*   **Expert 1 (Runner)**: Optimized for slipstreaming, optimal racing lines, and checkpoint proximity.
+*   **Expert 2 (Blocker)**: Optimized for interception trajectories, impact force transfer, and loitering.
+*   **Gating**: Hard switching based on role ensures zero gradient interference—Blocker mistakes never "poison" the Runner line.
 
 #### 3. The Map Transformer (~8.6k Params)
 *   **Function**: "Reading" the track.
 *   **SOTA Context**: Large Language Models use Transformers with billions of params. We use a **Nano-Transformer** (1 layer, 2 heads).
-*   **Competence**: For a sequence of 3-6 checkpoints, this is mathematically sufficient to resolve curvature and straightaways without the bloat of a deep NLP model.
+*   **Competence**: Mathematically sufficient to resolve curvature and straightaways for a sequence of 3-6 checkpoints.
 
-#### 4. The LSTM Core (~28k Params)
-*   **Function**: Sequencing and State.
-*   **Importance**: In multi-agent racing, the *history* of interactions matters. An MLP sees a snapshot; the LSTM sees the *movie*. This is critical for stabilizing "wrestler" behavior (not giving up after a collision).
+#### 4. Recurrent LSTM Streams (~25k Params total)
+*   **Function**: Context-aware sequencing.
+*   **Importance**: In multi-agent racing, history matters. An MLP sees a snapshot; the MoE LSTMs see the *strategy*. Each expert maintains its own "state of mind," allowing seamless transitions when roles swap.
 
 ---
 
 ## 4. Assessment of Competence
 
-Is ~58k parameters enough? **Yes, comfortably.**
+Is ~56k parameters enough for the actor? **Yes, comfortably.**
 
-1.  **Information Density**: Our Base85 export allows us to pack this entire model into the 100k char limit of the competition. A standard 200k MLP would not fit.
-2.  **Training Throughput**: The small size allows us to simulate **8,192 environments** at **60,000+ SPS** on a single GPU.
+1.  **Information Density**: Our Base85 export allows us to pack this enhanced MoE model into the 100k char limit. A standard generalist model of this complexity would not fit.
+2.  **Specialization**: By splitting the backbones, each parameter is "worth more" because it doesn't have to compromise between conflicting objectives (Racing vs Blocking).
     *   *Theorem*: In RL, Data Quantity often beats Model Size. We see billions of frames; a larger, slower model would see only millions.
 3.  **Task Complexity Mapping**:
     *   The state space is $\approx 50$ floats.

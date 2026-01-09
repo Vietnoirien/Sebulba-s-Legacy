@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Normal
 import numpy as np
@@ -93,7 +94,8 @@ class PPOTrainer:
         self.compile_model = True if self.device.type == 'cuda' else False 
         
         # Template Agent for Functional Calls (Reference architecture)
-        self.template_agent = PodAgent().to(self.device)
+        # [FIX] Explicitly pass LSTM hidden size from config to ensure consistency across Actor/Critic
+        self.template_agent = PodAgent(lstm_hidden=self.config.lstm_hidden_size).to(self.device)
         # self.template_agent.forward is now handled by class definition with 'method' kwarg
 
         for i in range(self.config.pop_size):
@@ -259,8 +261,9 @@ class PPOTrainer:
                       'logprobs': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
                       'values': torch.zeros((self.current_num_steps, num_active_per_agent_step), device=self.device),
                       # LSTM States [Chunks, Batch, Layers, Hidden] - Sparse Storage
-                      'actor_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
-                      'actor_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
+                      # MoE Actor has 2 layers (Runner, Blocker)
+                      'actor_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 2, self.config.lstm_hidden_size), device=self.device),
+                      'actor_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 2, self.config.lstm_hidden_size), device=self.device),
                       'critic_h': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
                       'critic_c': torch.zeros((self.current_num_steps // self.config.seq_length + 1, num_active_per_agent_step, 1, self.config.lstm_hidden_size), device=self.device),
                   })
@@ -372,32 +375,39 @@ class PPOTrainer:
         Functional wrapper for vmap inference.
         """
         # Reconstruct tuple state
-        actor_state = (actor_h.permute(1,0,2).contiguous(), actor_c.permute(1,0,2).contiguous())
-        critic_state = (critic_h.permute(1,0,2).contiguous(), critic_c.permute(1,0,2).contiguous())
+        # Input: [MB, 2, H] -> Permute [2, MB, H]
+        ah = actor_h.permute(1,0,2).contiguous()
+        ac = actor_c.permute(1,0,2).contiguous()
+        ch = critic_h.permute(1,0,2).contiguous()
+        cc = critic_c.permute(1,0,2).contiguous()
         
-        # Output: action, logprob, ent, val, states
+        # Split into ((hr, cr), (hb, cb))
+        # ah[0:1] is Runner [1, MB, H]
+        actor_state = ((ah[0:1], ac[0:1]), (ah[1:2], ac[1:2]))
+        critic_state = (ch, cc) # Critic is single-stream [1, MB, H] -> Wait, did we split Critic? No, Critic matches LSTM hidden of MoE?
+        # PodAgent.init: PodCritic(..., lstm_hidden=lstm_hidden). 
+        # PodCritic has CustomLSTM(128, lstm_hidden). Single state.
+        # But wait, PodCritic state shape? 
+        # DeepSets: PodCritic returns (hn, cn). 
+        # So Critic state is standard. [1, MB, H].
+        # So critic_h input is [MB, 1, H]. Permute -> [1, MB, H]. Correct.
+        
+        # Output: action, logprob, ent, val, states, aux_out
         out = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'map_obs': map_obs, 'actor_state': actor_state, 'critic_state': critic_state})
-        # Wait, if we added map_obs to forward, we can pass it as positional if signature updated, or kwargs. 
-        # Our modified PodActor signature is: forward(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids, ...)
-        # So we MUST pass map_obs!
-        # And since functional_call takes args tuple...
         
-        # But wait, self.template_agent signature changed.
-        # functional_call args must match forward args: (self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, role_ids)
+        action, logp, ent, val, states, aux_out = out
         
-        # We need to include map_obs in the args tuple.
-        # But wait, _functional_inference arguments also need map_obs?
-        # Yes.
+        # Pack Actor State: ((nhr, ncr), (nhb, ncb)) -> [2, MB, H] -> Permute [MB, 2, H]
+        (nhr, ncr), (nhb, ncb) = states['actor']
+        nh = torch.cat([nhr, nhb], dim=0).permute(1,0,2).contiguous()
+        nc = torch.cat([ncr, ncb], dim=0).permute(1,0,2).contiguous()
         
-        # But let's fix the call inside _functional_inference first.
-        # We need "map_obs" passed from caller.
-        # So I need to update _functional_inference signature.
+        # Critic State: (nch, ncc) -> [1, MB, H] -> Permute [MB, 1, H]
+        (nch, ncc) = states['critic']
+        next_ch = nch.permute(1,0,2).contiguous()
+        next_cc = ncc.permute(1,0,2).contiguous()
         
-        # STOP. I cannot change signature here without changing the vmap call site.
-        # I will update the signature in the NEXT hunk.
-        # Here I will just assume `mp` is passed in arguments.
-        action, logp, ent, val, states = out
-        return action, logp, ent, val, states['actor'], states['critic']
+        return action, logp, ent, val, nh, nc, next_ch, next_cc
 
     def _functional_get_value(self, params, buffers, s, tm, en, cp, map_obs, critic_h, critic_c):
         # We need critic state to get value
@@ -405,27 +415,33 @@ class PPOTrainer:
         return functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'method': 'get_value', 'map_obs': map_obs, 'lstm_state': critic_state})
 
     def _functional_loss(self, params, buffers, s, tm, en, cp, map_obs, act, old_logp, old_val, adv, ret, actor_h0, actor_c0, critic_h0, critic_c0, use_div, ent_coef, clip_range, vf_coef, div_coef):
-        # s, tm, en, cp are [MB, SeqLat, D]
-        # h0, c0 are [MB, 1, Hidden] -> Need [Layers, MB, Hidden]
-        
-        # Permute states to [Layers, MB, Hidden] usually [1, MB, 64]
-        # Input is [MB, 1, 64]
-        a_h = actor_h0.permute(1, 0, 2).contiguous()
-        a_c = actor_c0.permute(1, 0, 2).contiguous()
+        # Unpack Dual State
+        ah = actor_h0.permute(1, 0, 2).contiguous()
+        ac = actor_c0.permute(1, 0, 2).contiguous()
         c_h = critic_h0.permute(1, 0, 2).contiguous()
         c_c = critic_c0.permute(1, 0, 2).contiguous()
         
-        # Forward (Sequence Mode handled by PodAgent based on input dim)
-        # We disable divergence check for LSTM architecture for now as it doesn't support 'compute_divergence'
-        _, logp, ent, val, states = functional_call(self.template_agent, (params, buffers), (s, tm, en, cp), kwargs={'map_obs': map_obs, 'action': act, 'actor_state': (a_h, a_c), 'critic_state': (c_h, c_c)})
+        actor_state = ((ah[0:1], ac[0:1]), (ah[1:2], ac[1:2]))
+        critic_state = (c_h, c_c)
+        
+        # Forward
+        _, logp, ent, val, states, aux_out = functional_call(
+            self.template_agent, (params, buffers), (s, tm, en, cp), 
+            kwargs={'map_obs': map_obs, 'action': act, 'actor_state': actor_state, 'critic_state': critic_state}
+        )
         div = torch.tensor(0.0, device=s.device)
         
-        next_actor_h, next_actor_c = states['actor']
+        # Compute Next States (Not really used but returned)
+        (nhr, ncr), (nhb, ncb) = states['actor']
+        # No need to pack, just return None or dummy? 
+        # The caller unpacks it into batch_aux but ignores it.
+        # Let's pack to be safe.
+        next_actor_h = torch.cat([nhr, nhb], dim=0) # [2, MB, H]
+        next_actor_c = torch.cat([ncr, ncb], dim=0)
         next_critic_h, next_critic_c = states['critic']
             
         # val is [MB, Seq]
-        val = val.flatten() # [MB*Seq]
-        # old_val is [MB, Seq] -> flatten
+        val = val.flatten()
         old_val = old_val.flatten()
         logp = logp.flatten()
         old_logp = old_logp.flatten()
@@ -446,11 +462,23 @@ class PPOTrainer:
         # Value Loss
         v_loss = 0.5 * ((val - ret) ** 2).mean()
         
+        # Prediction Loss (Auxiliary)
+        pred = aux_out['pred'] # [MB, Seq, N, 2]
+        # Target: Next Enemy Pos.
+        # en is [MB, Seq, 2, 14]. Pos is :, :, :, 0:2
+        en_pos = en[..., :2]
+        
+        if pred.shape[1] > 1:
+             p_slice = pred[:, :-1]
+             t_slice = en_pos[:, 1:]
+             pred_loss = F.mse_loss(p_slice, t_slice)
+        else:
+             pred_loss = torch.tensor(0.0, device=pred.device)
+        
         # Entropy & Div
-        # CLAMP DIVERGENCE to prevent explosion (e.g. max 10.0)
         div_clamped = torch.clamp(div.mean(), max=10.0)
         
-        loss = pg_loss - ent_coef * ent.mean() + vf_coef * v_loss - div_coef * div_clamped
+        loss = pg_loss - ent_coef * ent.mean() + vf_coef * v_loss - div_coef * div_clamped + 0.5 * pred_loss
         
         return loss, (loss.detach(), pg_loss.detach(), v_loss.detach(), ent.mean().detach(), div_clamped.detach(), (next_actor_h, next_actor_c), (next_critic_h, next_critic_c))
 
@@ -769,7 +797,7 @@ class PPOTrainer:
                   # Duel Fused: Wins, Denials, Novelty
                   # Log top elite stats
                   e = elites[0]
-                  self.log(f"Elite Stats | Wins: {e['ema_wins']:.1%} | Denials: {e['ema_denials']:.1%} | Nov: {e['novelty_score']:.2f}")
+                  self.log(f"Elite Stats | Wins: {e['ema_wins']:.1%} | Denials: {e['ema_denials']:.1%} | Impact: {e.get('ema_blocker_dmg', 0.0):.0f} | Nov: {e['novelty_score']:.2f}")
              elif self.env.curriculum_stage == STAGE_NURSERY:
                   # Fallback (Should not happen given if check above)
                   pass 
@@ -1188,32 +1216,6 @@ class PPOTrainer:
                  if hasattr(self, 'last_buffer_shape'):
                      delattr(self, 'last_buffer_shape')
                  
-                 # --- Mitosis Strategy (Transition to Team Mode) ---
-                 # If moving from Solo/Duel (Stage < 2) to Team (Stage 2),
-                 # Clone Runner Brain to Blocker Brain to avoid "Dead Weight".
-                 if prev_stage < STAGE_TEAM and self.env.curriculum_stage >= STAGE_TEAM:
-                      self.log("Approaching Team Stage: Executing Mitosis (Cloning Runner -> Blocker)...")
-                      for p in self.population:
-                           agent = p['agent']
-                           # Clone Weights
-
-                           
-                           
-                       # [FIX] Simplified Mitosis: Just Clone. 
-                       # Diagnostics showed that Zeroing Teammate Weights caused 'Reverse' (-0.99) behavior 
-                       # compared to preserving them (+0.86), likely due to learned bias from Stage 2 padding (-100k).
-                       # We rely on training to adapt the weights to the new input distribution.
-                               
-
-
-                      # [FIX] CRITICAL: Sync Modified Agents back to Vectorized Stack!
-                      # Without this, the optimizer continues using random Blocker weights.
-                      self.log(">>> [FIX] Syncing Mitosis changes to Vectorized Parameters... <<<")
-                      self.sync_agents_to_vectorized()
-                      
-                      # Reset Vectorized Optimizer State (Critical to break old momentum)
-                      self.log(">>> [MITOSIS] Resetting Vectorized Optimizer State to clear Stage 2 momentum. <<<")
-                      self.vectorized_adam.reset_state()
                       
                  # [FIX] Memory Cleanup after transition
                  gc.collect()
@@ -1422,10 +1424,13 @@ class PPOTrainer:
 
                 # Initialize Current States if first step
                 if step == 0:
-                     # [Pop, Batch, 1, Hidden]
+                     # [Pop, Batch, LAYERS, Hidden]
+                     # MoE Actor has 2 layers (Run, Blk)
                      total_batch = v_s.shape[1]
-                     self.curr_actor_h = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
-                     self.curr_actor_c = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
+                     self.curr_actor_h = torch.zeros((Pop, total_batch, 2, self.config.lstm_hidden_size), device=self.device)
+                     self.curr_actor_c = torch.zeros((Pop, total_batch, 2, self.config.lstm_hidden_size), device=self.device)
+                     
+                     # Critic is single
                      self.curr_critic_h = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
                      self.curr_critic_c = torch.zeros((Pop, total_batch, 1, self.config.lstm_hidden_size), device=self.device)
                 
@@ -1444,7 +1449,7 @@ class PPOTrainer:
                 # vmap expects inputs to be stacked. self.curr_... is [Pop, Batch, ...]
                 
                 # Add critic startes to input
-                v_act, v_lp, _, v_val, (v_nah, v_nac), (v_nch, v_ncc) = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0,0,0,0,0,0), randomness='different')(
+                v_act, v_lp, _, v_val, v_nah, v_nac, v_nch, v_ncc = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0,0,0,0,0,0), randomness='different')(
                     self.stacked_params, self.stacked_buffers, v_s, v_tm, v_en, v_cp, v_mp, self.curr_actor_h, self.curr_actor_c, self.curr_critic_h, self.curr_critic_c
                 )
                 
@@ -2265,7 +2270,7 @@ class PPOTrainer:
             
             with torch.no_grad():
                 # Use current critic states (at end of rollout)
-                v_next_vals = vmap(self._functional_get_value, in_dims=(0,0,0,0,0,0,0,0,0), randomness='different')(
+                v_next_vals, _ = vmap(self._functional_get_value, in_dims=(0,0,0,0,0,0,0,0,0), randomness='different')(
                      self.stacked_params, self.stacked_buffers, v_n_s, v_n_tm, v_n_en, v_n_cp, v_n_mp, self.curr_critic_h, self.curr_critic_c
                 )
             

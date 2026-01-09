@@ -35,7 +35,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v14', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v17', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -52,13 +52,23 @@ export const ConfigPanel: React.FC = () => {
             [RW.PROXIMITY]: 5.0,
             [RW.RANK]: 500.0,
             [RW.LAP]: 2000.0,
-            [RW.DENIAL]: 10000.0
+            [RW.DENIAL]: 10000.0,
+            [RW.ZONE]: 5.0
         },
         tau: 0.0,
         team_spirit: 0.0
     })
 
-    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v4', {
+    const [rewardScaling, setRewardScaling] = useLocalStorage('spt2_config_rewardScaling_v1', {
+        collision_blocker_scale: 2.0,
+        intercept_progress_scale: 1.0,
+        goalie_penalty: 500.0,
+        velocity_scale_const: 0.001,
+        orientation_threshold: 0.5
+    })
+
+
+    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v5', {
         stage: 0,
         difficulty: 0.0
     })
@@ -68,14 +78,14 @@ export const ConfigPanel: React.FC = () => {
         ent_coef: 0.01
     })
 
-    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v12', {
+    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v15', {
         nursery_consistency_threshold: 500.0,
         solo_efficiency_threshold: 40.0,
         solo_consistency_threshold: 3000.0,
 
         // Stage 2 -> 3
-        duel_graduation_difficulty: 0.80,
-        duel_graduation_win_rate: 0.65,
+        duel_graduation_difficulty: 0.85,
+        duel_graduation_win_rate: 0.70,
         duel_graduation_checks: 5,
 
         // Stage 3 -> 4
@@ -86,15 +96,15 @@ export const ConfigPanel: React.FC = () => {
 
         // New Phase 3
         duel_graduation_denial_rate: 0.05,
-        duel_graduation_blocker_impact: 1000.0
+        duel_graduation_collision_steps: 60 // [FIX] Replaced Impact with Steps
     })
 
     // Bot Config
-    const [botConfig, setBotConfig] = useLocalStorage('spt2_config_bot_v1', {
+    const [botConfig, setBotConfig] = useLocalStorage('spt2_config_bot_v3', {
         intercept_offset_scale: 500.0,
         ramming_speed_scale: 20.0,
         difficulty_noise_scale: 30.0,
-        thrust_scale: 80.0
+        thrust_scale: 60.0
     })
 
     // Presets
@@ -125,7 +135,8 @@ export const ConfigPanel: React.FC = () => {
                 curriculum: curriculum,
                 hyperparameters: hyperparams,
                 transitions: transitions,
-                bot_config: botConfig
+                bot_config: botConfig,
+                reward_scaling_config: rewardScaling
             }
         }
         sendMessage(JSON.stringify(payload))
@@ -196,6 +207,7 @@ export const ConfigPanel: React.FC = () => {
         if (d.hyperparameters) setHyperparams(prev => ({ ...prev, ...d.hyperparameters }))
         if (d.transitions) setTransitions(prev => ({ ...prev, ...d.transitions }))
         if (d.bot_config) setBotConfig(prev => ({ ...prev, ...d.bot_config }))
+        if (d.reward_scaling_config) setRewardScaling(prev => ({ ...prev, ...d.reward_scaling_config }))
     }
 
     const handleDeletePreset = async (name?: string) => {
@@ -296,8 +308,8 @@ export const ConfigPanel: React.FC = () => {
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_win_rate: parseFloat(e.target.value) }))} />
                                 <Slider label="MIN DENIAL RATE" min={0.0} max={0.5} step={0.01} value={transitions.duel_graduation_denial_rate || 0.05} valueDisplay={((transitions.duel_graduation_denial_rate || 0.05) * 100).toFixed(0) + "%"}
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_denial_rate: parseFloat(e.target.value) }))} />
-                                <Slider label="BLOCKER IMPACT THRESHOLD" min={0} max={5000} step={100} value={transitions.duel_graduation_blocker_impact || 1000}
-                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_blocker_impact: parseFloat(e.target.value) }))} />
+                                <Slider label="COLLISION DURATION (STEPS)" min={0} max={200} step={5} value={transitions.duel_graduation_collision_steps || 60}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_collision_steps: parseFloat(e.target.value) }))} />
                                 <Slider label="CONSISTENCY CHECKS" min={1} max={10} step={1} value={transitions.duel_graduation_checks}
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_checks: parseFloat(e.target.value) }))} />
                             </div>

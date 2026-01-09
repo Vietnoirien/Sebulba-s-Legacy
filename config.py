@@ -58,6 +58,11 @@ class SpawnConfig:
 class RewardScalingConfig:
     velocity_scale_const: float = 1.0 / 1000.0
     orientation_threshold: float = 0.5
+    
+    # Blocker SOTA Params
+    collision_blocker_scale: float = 2.0
+    intercept_progress_scale: float = 1.0
+    goalie_penalty: float = 500.0
     dynamic_reward_bonus: float = 1800.0
 
 @dataclass
@@ -73,7 +78,7 @@ class TrainingConfig:
     
     # LSTM / BPTT
     use_lstm: bool = True
-    lstm_hidden_size: int = 48
+    lstm_hidden_size: int = 32 # Reduced from 48 for Size Optimization (<100k)
     seq_length: int = 32  # BPTT Horizon
     
     # Optimization
@@ -140,7 +145,9 @@ class CurriculumConfig:
     duel_graduation_win_rate: float = 0.70
     duel_graduation_checks: int = 5
     duel_graduation_denial_rate: float = 0.05
-    duel_graduation_blocker_impact: float = 1000.0
+    # [FIX] Changed from Impact (Force) to Collision Steps (Duration)
+    # Threshold: 60 steps = ~1 second of contact per episode.
+    duel_graduation_collision_steps: float = 60.0
     
     # Stage 3 (Team) -> 4 (League) Graduation
     team_graduation_difficulty: float = 0.85
@@ -149,7 +156,7 @@ class CurriculumConfig:
     
     # Team Stage Start Difficulty
     team_start_difficulty: float = 0.6
- 
+
     # Critical Thresholds (Difficulty Adjustment)
     wr_critical: float = 0.25 # Trigger Difficulty Decrease
     wr_warning: float = 0.45 # Trigger Warning/Streak
