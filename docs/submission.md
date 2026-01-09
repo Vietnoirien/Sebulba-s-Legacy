@@ -44,66 +44,99 @@ The heart of the submission is the `N` class, a minimal neural network framework
 
 ### Inference Data Flow
 
+### Inference Data Flow
+
 ```mermaid
 graph TD
-    subgraph Inputs
-    S(Self State)
-    CP(Checkpoints)
-    TM(Teammate)
-    EN(Enemies)
-    Map(Map Obs)
-    R(Role ID)
+    %% --- Inputs ---
+    subgraph Inputs ["Raw Inputs"]
+        S("Self [15]")
+        CP("Next CP [10]")
+        TM("Teammate [14]")
+        EN("Enemies [Nx14]")
+        Map("Checkpoints [Sx2]")
+        R("Role ID [1]")
     end
 
-    subgraph "Pilot Network"
-    S & CP --> PE[Pilot Embed<br/>~4.8k params]
-    PE --> P_Feat(Pilot Features)
+    %% --- Shared Encoders ---
+    subgraph Shared_Encoders ["Shared Feature Extractors"]
+        direction TB
+        
+        %% Pilot Stream
+        subgraph Pilot_System ["Pilot System"]
+            P_In(Concat: Self + CP) --> P_Net["Pilot MLP (64, 32)"]
+        end
+
+        %% Perception System
+        subgraph Perception ["Perception System"]
+            TM --> TM_Enc["Teammate Encoder (32, 16)"]
+            
+            %% DeepSets
+            EN --> EN_Enc["Enemy Encoder (14->32->16)"]
+            EN_Enc --> EN_Pool["Global Max Pool"]
+            EN_Enc -- "Per-Enemy Emb" --> Pred["Aux: Trajectory Pred HEAD"]
+            
+            %% Map
+            Map --> Map_Tr["Map Transformer (Attn->32)"]
+            
+            %% Role
+            R --> R_Emb["Role Embedding (16)"]
+        end
     end
 
-    subgraph "Commander Network"
-    TM & EN --> EE[Shared Enemy Encoder<br/>~1k params]
-    EE --> E_Feat(Entity Features)
-    E_Feat --> GMP[Global Max Pool]
-    GMP --> C_Feat(Context Features)
+    %% --- MoE Core ---
+    subgraph MoE_Core ["Hard-Gated Mixture of Experts"]
+        direction TB
+        
+        %% Command Bus
+        Bus("Command Bus [95] <br/> (Self | Team | EnemyCtx | Role | Map)")
+        P_Net --> Pilot_Ctx("Pilot Context [32]")
+        
+        S & TM_Enc & EN_Pool & R_Emb & Map_Tr --> Bus
+        
+        %% Expert 1: Runner
+        subgraph Runner_Exp ["Runner Expert (Navigation)"]
+            Bus --> Run_BB["Runner Backbone (64, 32)"]
+            Pilot_Ctx & Run_BB --> Run_In("Concat [64]")
+            Run_In --> Run_LSTM["Runner LSTM (H=32)"]
+        end
+        
+        %% Expert 2: Blocker
+        subgraph Blocker_Exp ["Blocker Expert (Combat)"]
+            Bus --> Blk_BB["Blocker Backbone (64, 32)"]
+            Pilot_Ctx & Blk_BB --> Blk_In("Concat [64]")
+            Blk_In --> Blk_LSTM["Blocker LSTM (H=32)"]
+        end
+    end
+
+    %% --- Gating & Heads ---
+    subgraph Output_Stage ["Gating & Actuation"]
+        R -- "Selects" --> Gate{"Hard Switch"}
+        Run_LSTM --> Gate
+        Blk_LSTM --> Gate
+        
+        Gate --> Fused("Fused State [32]")
+        
+        Fused --> H_Th["Thrust (Sigmoid)"]
+        Fused --> H_Ang["Angle (Tanh)"]
+        Fused --> H_Sh["Shield (Logits)"]
+        Fused --> H_Bo["Boost (Logits)"]
+    end
     
-    Map --> MT[Map Transformer<br/>~8.6k params]
-    MT --> M_Feat(Map Features)
-    
-    R --> RE[Role Embedding]
-    RE --> R_Feat(Role Features)
-    
-    P_Feat & C_Feat & M_Feat & R_Feat --> Concat[Concatenate]
-    Concat --> CB[Commander Backbone<br/>~14k params]
+    %% --- Neural-Guided Search ---
+    subgraph NGS ["Neural-Guided Local Search"]
+        H_Th & H_Ang & H_Sh & H_Bo --> Candidates[Generate Candidates]
+        Candidates --> Sim[Fast 1-Step Sim]
+        Sim --> Score[Heuristic Scoring]
+        Score --> Best[Select Best Action]
     end
-
-    subgraph "Recurrent Core"
-    CB --> LSTM[LSTM Cell<br/>~28k params]
-    LSTM --> H((Hidden State))
-    H -.-> LSTM
-    end
-
-    subgraph Heads
-    LSTM --> H_Th(Thrust)
-    LSTM --> H_Ang(Angle)
-    LSTM --> H_Sh(Shield)
-    LSTM --> H_Bo(Boost)
-    end
-
-    subgraph "Neural-Guided Local Search"
-    H_Th & H_Ang & H_Sh & H_Bo --> Gen[Candidate Generation]
-    Gen --> |Simulate 1 Step| Sim[Fast Physics]
-    Sim --> Score[Heuristic Scoring]
-    Score --> Select[Select Best]
-    end
-
-    Select --> Out_Th(Action: Thrust)
-    Select --> Out_Ang(Action: Angle)
-    Select --> Out_Misc(Action: Shield/Boost)
 ```
 
 ## Model Complexity
 
-The submission model is a direct export of the trained `PodAgent` (Actor), highly optimized for| Metric | Value |
+The submission model is a direct export of the trained `PodAgent` (Actor), highly optimized for size and speed.
+
+| Metric | Value |
 | :--- | :--- |
 | **Total Parameters (Actor)** | **~56,202** |
 | **Total Parameters (Critic)** | **~84,321** |
