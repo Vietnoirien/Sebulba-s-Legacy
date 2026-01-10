@@ -30,37 +30,41 @@ def fuse_normalization_pilot(pilot, rms_stats):
     mean_s, std_s = get_ms(rms_stats['self'])
     mean_c, std_c = get_ms(rms_stats['cp'])
     
-    layer = pilot.pilot_embed[0]
-    W = layer.weight.data.cpu().numpy()
-    b = layer.bias.data.cpu().numpy()
+    layer_runner = pilot.pilot_embed_runner[0]
+    layer_blocker = pilot.pilot_embed_blocker[0]
     
-    W_self = W[:, 0:15]
-    W_cp   = W[:, 15:25]
-    
-    W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
-    W_cp_new, shift_cp = fuse_layer_section(W_cp, mean_c, std_c)
-    
-    W_new = np.concatenate([W_self_new, W_cp_new], axis=1)
-    b_new = b - shift_self - shift_cp
-    
-    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
-    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
+    for layer in [layer_runner, layer_blocker]:
+        W = layer.weight.data.cpu().numpy()
+        b = layer.bias.data.cpu().numpy()
+        
+        W_self = W[:, 0:15]
+        W_cp   = W[:, 15:25]
+        
+        W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
+        W_cp_new, shift_cp = fuse_layer_section(W_cp, mean_c, std_c)
+        
+        W_new = np.concatenate([W_self_new, W_cp_new], axis=1)
+        b_new = b - shift_self - shift_cp
+        
+        layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
+        layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
 
 def fuse_normalization_commander(actor, rms_stats):
     print("Fusing Commander Normalization...")
     mean_s, std_s = get_ms(rms_stats['self'])
     mean_e, std_e = get_ms(rms_stats['ent'])
     
-    # 1. Enemy Embedder [0] (14 -> 32)
-    layer = actor.enemy_embedder[0]
-    W = layer.weight.data.cpu().numpy()
-    b = layer.bias.data.cpu().numpy()
-    
-    W_new, shift = fuse_layer_section(W, mean_e, std_e)
-    b_new = b - shift
-    
-    layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
-    layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
+    # 1. Enemy Embedder (Split)
+    for enc in [actor.enemy_embedder_runner, actor.enemy_embedder_blocker]:
+        layer = enc[0]
+        W = layer.weight.data.cpu().numpy()
+        b = layer.bias.data.cpu().numpy()
+        
+        W_new, shift = fuse_layer_section(W, mean_e, std_e)
+        b_new = b - shift
+        
+        layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
+        layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
     
     # 2. Backbones (Runner & Blocker)
     # Both take input: Self(15) + Team(16) + En(16) + Role(16) + Map(32) = 95
@@ -113,10 +117,6 @@ def quantize_weights(actor):
     weights = []
     
     # === SHARED ===
-    # 1. Pilot Embed
-    weights.extend(extract_layer(actor.pilot_embed[0]))
-    weights.extend(extract_layer(actor.pilot_embed[2]))
-    
     # 2. Map Encoder
     weights.extend(extract_layer(actor.map_encoder.input_proj))
     enc = actor.map_encoder.transformer.layers[0]
@@ -136,12 +136,25 @@ def quantize_weights(actor):
     # 4. Role Emb
     weights.extend(actor.role_embedding.weight.data.cpu().numpy().flatten())
     
-    # 5. Enemy Embedder
-    weights.extend(extract_layer(actor.enemy_embedder[0]))
-    weights.extend(extract_layer(actor.enemy_embedder[2]))
-    
-    # 6. Pred Head
+    # 6. Pred Head (Shared) - Moved up for cleaner reading order
     weights.extend(extract_layer(actor.enemy_pred_head))
+    
+    # === SPLIT MODULES ===
+    # 1. Pilot Embed (Runner)
+    weights.extend(extract_layer(actor.pilot_embed_runner[0]))
+    weights.extend(extract_layer(actor.pilot_embed_runner[2]))
+    
+    # 1b. Pilot Embed (Blocker)
+    weights.extend(extract_layer(actor.pilot_embed_blocker[0]))
+    weights.extend(extract_layer(actor.pilot_embed_blocker[2]))
+    
+    # 5. Enemy Embedder (Runner)
+    weights.extend(extract_layer(actor.enemy_embedder_runner[0]))
+    weights.extend(extract_layer(actor.enemy_embedder_runner[2]))
+    
+    # 5b. Enemy Embedder (Blocker)
+    weights.extend(extract_layer(actor.enemy_embedder_blocker[0]))
+    weights.extend(extract_layer(actor.enemy_embedder_blocker[2]))
     
     # === MOE (Runner) ===
     # 7. Runner Backbone
@@ -306,37 +319,101 @@ class N:
         return [max(r[j] for r in n2) for j in range(32)] if n2 else [0.0]*32
     def f(self,s,tm,en,cp,mo,rv,d):
         self.c=0
+        def run_mlp(inp,w1,b1,w2,b2):
+             l1=[]; o=[]
+             for k in range(64):
+                 a=b1[k]
+                 for j in range(95): a+=inp[j]*w1[k*95+j]
+                 l1.append(max(0.0,a))
+             for k in range(32):
+                 a=b2[k]
+                 for j in range(64): a+=l1[j]*w2[k*64+j]
+                 o.append(max(0.0,a))
+             return o
+        def run_lstm_step(inp, h, c, W, U, B):
+             # Manual LSTM step with pre-read weights
+             # W: [128, 64] (flat ordered), U: [128, 32], B: [128]
+             nc,nh=[],[]
+             for k in range(32):
+                 i,f,g,o_idx = k, 32+k, 64+k, 96+k
+                 # Compute gates
+                 def d(w_arr, off, vec, sz): return sum(vec[z]*w_arr[off*sz+z] for z in range(sz))
+                 vi = d(W, i, inp, 64) + d(U, i, h, 32) + B[i]
+                 vf = d(W, f, inp, 64) + d(U, f, h, 32) + B[f]
+                 vg = d(W, g, inp, 64) + d(U, g, h, 32) + B[g]
+                 vo = d(W, o_idx, inp, 64) + d(U, o_idx, h, 32) + B[o_idx]
+                 si=1.0/(1.0+math.exp(-vi)); sf=1.0/(1.0+math.exp(-vf)); so=1.0/(1.0+math.exp(-vo)); tg=math.tanh(vg)
+                 C_next=sf*c[k]+si*tg; H_next=so*math.tanh(C_next)
+                 nc.append(C_next); nh.append(H_next)
+             return nh, nc
+
         # Shared Features
-        # Pilot: 25->64->32
-        pe=self.l(s+cp,25,64,r=True); pe=self.l(pe,64,32,r=True)
+        # Map
         me=self.mr(mo)
+        # Teammate
         t_lat=self.l(tm,14,32,r=True); t_lat=self.l(t_lat,32,16)
+        # Role
         r_emb=self.gw(32); re=r_emb[int(rv)*16:(int(rv)+1)*16]
+        # Pred Head (Shared)
+        phw,phb=self.gw(32),self.gw(2)
         
-        # Enemy + Pred
-        ew1,eb1=self.gw(448),self.gw(32); ew2,eb2=self.gw(512),self.gw(16)
-        phw,phb=self.gw(32),self.gw(2) # PredHead [16->2]
+        # Split Modules (Must read all weights)
+        # Pilot Run [25->64->32]
+        pe_run=self.l(s+cp,25,64,r=True); pe_run=self.l(pe_run,64,32,r=True)
+        # Pilot Blk
+        pe_blk=self.l(s+cp,25,64,r=True); pe_blk=self.l(pe_blk,64,32,r=True)
         
-        preds=[]; e_ctx=[-9e9]*16
-        if not en: e_ctx=[0.0]*16
+        # Enemy Encoders (Weights) - Reading but not computing yet
+        # We need to compute inside loop for each enemy.
+        # Run Enc Weights
+        er_w1,er_b1=self.gw(448),self.gw(32); er_w2,er_b2=self.gw(512),self.gw(16)
+        # Blk Enc Weights
+        eb_w1,eb_b1=self.gw(448),self.gw(32); eb_w2,eb_b2=self.gw(512),self.gw(16)
+        
+        # Process Enemies (Run both logic?)
+        preds=[]; e_ctx_run=[-9e9]*16; e_ctx_blk=[-9e9]*16
+        if not en: 
+             e_ctx_run=[0.0]*16; e_ctx_blk=[0.0]*16
         else:
             for ef in en:
+                # RUNNER ENC
                 # Embed [14->32->16]
                 h=[]; o=[]
                 for k in range(32):
-                    a=eb1[k]
-                    for j in range(14): a+=ef[j]*ew1[k*14+j]
+                    a=er_b1[k]
+                    for j in range(14): a+=ef[j]*er_w1[k*14+j]
                     h.append(max(0.0,a))
                 for k in range(16):
-                    a=eb2[k]
-                    for j in range(32): a+=h[j]*ew2[k*32+j]
+                    a=er_b2[k]
+                    for j in range(32): a+=h[j]*er_w2[k*32+j]
                     o.append(a)
                 # Max Pool
                 for k in range(16): 
-                    if o[k]>e_ctx[k]: e_ctx[k]=o[k]
-                # Predict
-                dx=phb[0]+sum(o[j]*phw[j] for j in range(16))
-                dy=phb[1]+sum(o[j]*phw[16+j] for j in range(16))
+                    if o[k]>e_ctx_run[k]: e_ctx_run[k]=o[k]
+                # Predict (Shared Head, from Runner Latent)
+                dx_r=phb[0]+sum(o[j]*phw[j] for j in range(16))
+                dy_r=phb[1]+sum(o[j]*phw[16+j] for j in range(16))
+                
+                # BLOCKER ENC
+                h=[]; o=[]
+                for k in range(32):
+                    a=eb_b1[k]
+                    for j in range(14): a+=ef[j]*eb_w1[k*14+j]
+                    h.append(max(0.0,a))
+                for k in range(16):
+                    a=eb_b2[k]
+                    for j in range(32): a+=h[j]*eb_w2[k*32+j]
+                    o.append(a)
+                # Max Pool
+                for k in range(16): 
+                    if o[k]>e_ctx_blk[k]: e_ctx_blk[k]=o[k]
+                # Predict (Blocker Latent)
+                dx_b=phb[0]+sum(o[j]*phw[j] for j in range(16))
+                dy_b=phb[1]+sum(o[j]*phw[16+j] for j in range(16))
+                
+                # Average Prediction
+                dx = (dx_r + dx_b) * 0.5
+                dy = (dy_r + dy_b) * 0.5
                 preds.append((dx,dy))
                 
         # Read Experts (ALL WEIGHTS MUST BE CONSUMED)
@@ -366,47 +443,20 @@ class N:
         # Shield: 32->2. W 64. B 2.
         hw_s,hb_s=self.gw(64),self.gw(2); hw_b,hb_b=self.gw(64),self.gw(2)
         
-        # Execution
-        x=s+t_lat+e_ctx+re+me # 95 dims
-        
-        def run_mlp(inp,w1,b1,w2,b2):
-             l1=[]; o=[]
-             for k in range(64):
-                 a=b1[k]
-                 for j in range(95): a+=inp[j]*w1[k*95+j]
-                 l1.append(max(0.0,a))
-             for k in range(32):
-                 a=b2[k]
-                 for j in range(64): a+=l1[j]*w2[k*64+j]
-                 o.append(max(0.0,a))
-             return o
-             
-        def run_lstm_step(inp, h, c, W, U, B):
-             # Manual LSTM step with pre-read weights
-             # W: [128, 64] (flat ordered), U: [128, 32], B: [128]
-             nc,nh=[],[]
-             for k in range(32):
-                 i,f,g,o_idx = k, 32+k, 64+k, 96+k
-                 # Compute gates
-                 def d(w_arr, off, vec, sz): return sum(vec[z]*w_arr[off*sz+z] for z in range(sz))
-                 vi = d(W, i, inp, 64) + d(U, i, h, 32) + B[i]
-                 vf = d(W, f, inp, 64) + d(U, f, h, 32) + B[f]
-                 vg = d(W, g, inp, 64) + d(U, g, h, 32) + B[g]
-                 vo = d(W, o_idx, inp, 64) + d(U, o_idx, h, 32) + B[o_idx]
-                 
-                 si=1.0/(1.0+math.exp(-vi)); sf=1.0/(1.0+math.exp(-vf)); so=1.0/(1.0+math.exp(-vo)); tg=math.tanh(vg)
-                 C_next=sf*c[k]+si*tg; H_next=so*math.tanh(C_next)
-                 nc.append(C_next); nh.append(H_next)
-             return nh, nc
-
+        # Execution Gating
         if rv==0: # Runner
-             cb = run_mlp(x, rw1, rb1, rw2, rb2)
-             nh, nc = run_lstm_step(pe+cb, self.hr, self.cr, rlW, rlH, rlB)
+             x_run = s+t_lat+e_ctx_run+re+me
+             cb = run_mlp(x_run, rw1, rb1, rw2, rb2)
+             # Concat for LSTM: pe_run(32) + cb(32) -> 64
+             lstm_in = pe_run + cb
+             nh, nc = run_lstm_step(lstm_in, self.hr, self.cr, rlW, rlH, rlB)
              o = nh
              self.hr, self.cr = nh, nc
         else: # Blocker
-             cb = run_mlp(x, bw1, bb1, bw2, bb2)
-             nh, nc = run_lstm_step(pe+cb, self.hb, self.cb, blW, blH, blB)
+             x_blk = s+t_lat+e_ctx_blk+re+me
+             cb = run_mlp(x_blk, bw1, bb1, bw2, bb2)
+             lstm_in = pe_blk + cb
+             nh, nc = run_lstm_step(lstm_in, self.hb, self.cb, blW, blH, blB)
              o = nh
              self.hb, self.cb = nh, nc
              

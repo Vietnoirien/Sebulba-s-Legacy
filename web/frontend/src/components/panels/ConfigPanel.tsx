@@ -35,7 +35,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v17', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v18', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -45,7 +45,7 @@ export const ConfigPanel: React.FC = () => {
             [RW.MAGNET]: 10.0,
             [RW.ORIENTATION]: 1.0,
             [RW.WRONG_WAY]: 10.0,
-            [RW.COLLISION_BLOCKER]: 5.0,
+            [RW.COLLISION_BLOCKER]: 10.0,
             [RW.COLLISION_RUNNER]: 0.5,
             [RW.COLLISION_MATE]: 5.0,
             [RW.STEP_PENALTY]: 10.0,
@@ -78,9 +78,10 @@ export const ConfigPanel: React.FC = () => {
         ent_coef: 0.01
     })
 
-    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v15', {
+    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v17', {
         nursery_consistency_threshold: 500.0,
-        solo_efficiency_threshold: 40.0,
+        solo_efficiency_threshold: 50.0,
+        solo_min_win_rate: 0.75,
         solo_consistency_threshold: 3000.0,
 
         // Stage 2 -> 3
@@ -96,7 +97,8 @@ export const ConfigPanel: React.FC = () => {
 
         // New Phase 3
         duel_graduation_denial_rate: 0.05,
-        duel_graduation_collision_steps: 60 // [FIX] Replaced Impact with Steps
+        duel_graduation_collision_steps: 60, // [FIX] Replaced Impact with Steps
+        duel_progression_collision_steps: 30 // [NEW] Difficulty Gate
     })
 
     // Bot Config
@@ -293,6 +295,8 @@ export const ConfigPanel: React.FC = () => {
                         <>
                             <Slider label="EFFICIENCY SCORE (LOWER IS BETTER)" min={10} max={60} step={1} value={transitions.solo_efficiency_threshold}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_efficiency_threshold: parseFloat(e.target.value) }))} />
+                            <Slider label="MIN WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.solo_min_win_rate || 0.75} valueDisplay={((transitions.solo_min_win_rate || 0.75) * 100).toFixed(0) + "%"}
+                                onChange={(e) => setTransitions(prev => ({ ...prev, solo_min_win_rate: parseFloat(e.target.value) }))} />
                             <Slider label="CONSISTENCY" min={1000} max={5000} step={50} value={transitions.solo_consistency_threshold}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_consistency_threshold: parseFloat(e.target.value) }))} />
                         </>
@@ -310,6 +314,8 @@ export const ConfigPanel: React.FC = () => {
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_denial_rate: parseFloat(e.target.value) }))} />
                                 <Slider label="COLLISION DURATION (STEPS)" min={0} max={200} step={5} value={transitions.duel_graduation_collision_steps || 60}
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_collision_steps: parseFloat(e.target.value) }))} />
+                                <Slider label="DIFFICULTY GATE (MIN HITS)" min={0} max={100} step={5} value={transitions.duel_progression_collision_steps || 30}
+                                    onChange={(e) => setTransitions(prev => ({ ...prev, duel_progression_collision_steps: parseFloat(e.target.value) }))} />
                                 <Slider label="CONSISTENCY CHECKS" min={1} max={10} step={1} value={transitions.duel_graduation_checks}
                                     onChange={(e) => setTransitions(prev => ({ ...prev, duel_graduation_checks: parseFloat(e.target.value) }))} />
                             </div>

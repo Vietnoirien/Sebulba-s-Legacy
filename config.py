@@ -32,8 +32,8 @@ STAGE_NURSERY_CONSISTENCY_THRESHOLD = 500.0
 
 # Stage 1 (Solo) -> 2 (Duel)
 # Goal: Efficiency (Speed) + Consistency
-STAGE_SOLO_EFFICIENCY_THRESHOLD = 40.0
-STAGE_SOLO_CONSISTENCY_THRESHOLD = 3000.0
+STAGE_SOLO_EFFICIENCY_THRESHOLD = 50.0
+STAGE_SOLO_CONSISTENCY_THRESHOLD = 1800.0
 STAGE_SOLO_PENALTY_CONSISTENCY_THRESHOLD = 1000.0
 STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD = 55.0
 STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD = 65.0
@@ -135,7 +135,7 @@ class CurriculumConfig:
     solo_penalty_efficiency_threshold: float = STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD
     solo_penalty_exit_efficiency_threshold: float = STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD
     solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
-    solo_min_win_rate: float = 0.90
+    solo_min_win_rate: float = 0.30
     
     # Stage 2 (Duel Fused) -> 3 (Team) Graduation
     # Requires mastery of both Running (Win Rate) and Blocking (Denial Rate)
@@ -148,6 +148,10 @@ class CurriculumConfig:
     # [FIX] Changed from Impact (Force) to Collision Steps (Duration)
     # Threshold: 60 steps = ~1 second of contact per episode.
     duel_graduation_collision_steps: float = 60.0
+    
+    # [NEW] Difficulty Progression Gate (Augment Difficulty)
+    # Requires 30 hits (half graduation) to increase bot difficulty.
+    duel_progression_collision_steps: float = 30.0
     
     # Stage 3 (Team) -> 4 (League) Graduation
     team_graduation_difficulty: float = 0.85
@@ -205,7 +209,7 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_CHECKPOINT_SCALE: 50.0,
     RW_PROGRESS: 0.2, # Scaled down to prevent overpowering Checkpoint (2000) 
     RW_COLLISION_RUNNER: 0.5,
-    RW_COLLISION_BLOCKER: 5.0, # Reduced from 1000.0 (Impact is ~800, so 5*800=4000 ~ 2 Checkpoints)
+    RW_COLLISION_BLOCKER: 10.0, # Increased from 5.0 to 10.0 (User Request: Reward More Collision)
     RW_STEP_PENALTY: 10.0, # Increased to 10.0 to make Time Cost significant (Speed Incentive)
     RW_ORIENTATION: 1.0, # Reduced to soft guidance
     RW_WRONG_WAY: 10.0,

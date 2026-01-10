@@ -2,9 +2,9 @@
 
 ## 1. Executive Summary
 
-This report analyzes the complexity of the **Sebulba's Legacy** Gen 2 architecture (~140k total parameters, ~56k inference actor) in the context of the "Mad Pod Racing" environment.
+This report analyzes the complexity of the **Sebulba's Legacy** Gen 2.1 architecture (~145k total parameters, ~61k inference actor) in the context of the "Mad Pod Racing" environment.
 
-**Conclusion**: The current architecture represents an **"Efficient Specialist"** design. By moving to a Mixture of Experts (MoE) approach, we maintain a compact footprint while specialized "brains" handle different racing roles. Its size is perfectly adapted for the unique **"Sim-to-Tensor"** high-throughput training paradigm (8,000+ parallel environments), where inference speed directly correlates with sample efficiency.
+**Conclusion**: The current architecture represents an **"Efficient Specialist"** design. By moving to a **Recurrent Split Backbone** (Hard-Gated MoE) approach, we maintain a compact footprint while specialized "brains" handle different racing roles. Its size is perfectly adapted for the unique **"Sim-to-Tensor"** high-throughput training paradigm (8,000+ parallel environments), where inference speed directly correlates with sample efficiency.
 
 ---
 
@@ -42,15 +42,15 @@ The historical top solutions for CodinGame.
 
 ## 3. Our Implementation: The "Recurrent Split Backbone"
 
-Our model (~56k Actor Params) fits into a **Type D: Structured Neural Hybrid** category. Instead of raw size, we use **Inductive Biases** and **Mixture of Experts**—architectural constraints that force the model to learn efficiently.
+Our model (~61k Actor Params) fits into a **Type D: Structured Neural Hybrid** category. Instead of raw size, we use **Inductive Biases** and **Hard-Gated Mixture of Experts**—architectural constraints that force the model to learn efficiently.
 
 ### Comparative Table
 
 | Feature | Standard MLP (Type A) | **Sebulba (Our Model)** | Gain / Logic |
 | :--- | :--- | :--- | :--- |
-| **Total Params** | ~200,000 | **~56,000** | **~4x Smaller** (Inference footprint) |
-| **Specialization** | Generalist weight sharing | **Mixture of Experts (MoE)** | Dedicated backbones/memory for Runner vs Blocker tactics. |
-| **Enemy Processing** | Concatenation (Fixed Size) | **DeepSets (1k params)** | Handles *any* number of enemies naturally (Permutation Invariant). |
+| **Total Params** | ~200,000 | **~61,000** | **~3x Smaller** (Inference footprint) |
+| **Specialization** | Generalist weight sharing | **Split MoE** | Separate Pilot/Encoders and Backbones for Runner vs Blocker. |
+| **Enemy Processing** | Concatenation (Fixed Size) | **DeepSets (Split)** | Permutation Invariant + Role-Specific Contexts. |
 | **Map Understanding** | Ignored / Raw Vector | **Transformer (8.6k params)** | Attends to relevant future track segments; ignores irrelevant ones. |
 | **Memory** | None (Frame Stacking) | **Recurrent LSTMs (25k params)** | Dual temporal memory streams (Navigation + Interception). |
 | **Prediction Head** | None | **Trajectory Pred** | Auxiliary head forces encoder to learn enemy physics. |
@@ -63,10 +63,10 @@ Instead of a single monolithic network attempting to master both racing and comb
 
 ### Detailed Component Analysis
 
-#### 1. The Pilot Stream (~3.7k Params)
+#### 1. The Pilot Stream (Split ~7.4k Params)
 *   **Function**: Reflexive driving foundation.
-*   **Innovations**: Shared across both experts to ensure consistent physical control.
-*   **Why it works**: Driving fundamentals are role-independent. A small scale ensures ultra-low latency for steering/thrust.
+*   **Innovations**: **Split** into `pilot_embed_runner` and `pilot_embed_blocker`.
+*   **Why it works**: Allows the Runner to master "smooth racing lines" while the Blocker learns "aggressive cornering" without interference. Each expert gets its own dedicated sensory-motor cortex.
 
 #### 2. Specialized MoE Experts (~20k Params per Expert)
 *   **Expert 1 (Runner)**: Optimized for slipstreaming, optimal racing lines, and checkpoint proximity.
@@ -86,7 +86,7 @@ Instead of a single monolithic network attempting to master both racing and comb
 
 ## 4. Assessment of Competence
 
-Is ~56k parameters enough for the actor? **Yes, comfortably.**
+Is ~61k parameters enough for the actor? **Yes, comfortably.**
 
 1.  **Information Density**: Our Base85 export allows us to pack this enhanced MoE model into the 100k char limit. A standard generalist model of this complexity would not fit.
 2.  **Specialization**: By splitting the backbones, each parameter is "worth more" because it doesn't have to compromise between conflicting objectives (Racing vs Blocking).
@@ -94,7 +94,7 @@ Is ~56k parameters enough for the actor? **Yes, comfortably.**
 3.  **Task Complexity Mapping**:
     *   The state space is $\approx 50$ floats.
     *   The action space is 4 dimensions.
-    *   A 58k parameter model has enough capacity to map regions of this 50D space to optimal actions with high non-linearity.
+    *   A 61k parameter model has enough capacity to map regions of this 50D space to optimal actions with high non-linearity.
 
 ## 5. Conclusion
 

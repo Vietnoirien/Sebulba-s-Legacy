@@ -25,7 +25,7 @@ All dense rewards (including Blocker-specific rewards like Collision Damage and 
 To prevent "luck-based" progression, we use strict statistical gates with **Role-Separated Metrics**:
 
 *   **Nursery $\to$ Solo**: `Consistency > 500`. Finish without crashing for 100 consecutive episodes.
-*   **Solo $\to$ Unified Duel**: `Efficiency < 40.0`, `Consistency > 3000`, and `Win Rate > 90%`.
+*   **Solo $\to$ Unified Duel**: `Efficiency < 50.0`, `Consistency > 1800`, and `Win Rate > 30%`.
 *   **Unified Duel $\to$ Team**: `Bot Difficulty > 0.85` and `Win Rate > 70%` (for 5 consecutive checks) AND `Denial Rate > 5%` (or high Impact).
 *   **Team $\to$ League**: `Bot Difficulty > 0.85` and `Win Rate > 70%` (for 5 consecutive checks).
 

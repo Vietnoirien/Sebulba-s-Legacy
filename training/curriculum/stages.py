@@ -237,15 +237,23 @@ class UnifiedDuelStage(Stage):
                 new_diff = trainer.env.bot_difficulty
                 msg = None
                 
-                # Turbo Logic
-                if rec_wr > self.config.wr_progression_insane_turbo:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_insane_turbo); msg = "Insane Turbo"
-                elif rec_wr > self.config.wr_progression_super_turbo:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_super_turbo); msg = "Super Turbo"
-                elif rec_wr > self.config.wr_progression_turbo:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_turbo); msg = "Turbo"
-                elif rec_wr > self.config.wr_progression_standard:
-                    new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_standard); msg = "Standard"
+                # Check Progression Gate: Must average X hits per game (Competent Blocking)
+                # If avg_hits < threshold, we hold difficulty (force them to learn blocking on current bots)
+                gate_open = (avg_hits >= self.config.duel_progression_collision_steps)
+                
+                if not gate_open:
+                     # Blocked
+                     trainer.log(f"-> Progression Gated: Low Collision Rate ({avg_hits:.1f} < {self.config.duel_progression_collision_steps:.1f}). Difficulty Held.")
+                else:
+                    # Turbo Logic (Only applied if Gate is Open)
+                    if rec_wr > self.config.wr_progression_insane_turbo:
+                        new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_insane_turbo); msg = "Insane Turbo"
+                    elif rec_wr > self.config.wr_progression_super_turbo:
+                        new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_super_turbo); msg = "Super Turbo"
+                    elif rec_wr > self.config.wr_progression_turbo:
+                        new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_turbo); msg = "Turbo"
+                    elif rec_wr > self.config.wr_progression_standard:
+                        new_diff = min(1.0, trainer.env.bot_difficulty + self.config.diff_step_standard); msg = "Standard"
 
                 max_diff = self.config.duel_graduation_difficulty
                 if trainer.env.bot_difficulty < max_diff:

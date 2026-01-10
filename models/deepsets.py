@@ -268,12 +268,20 @@ class PodActor(nn.Module):
         
         self.hidden_dim = hidden_dim 
         
-        # 1. Feature Extractors (Shared)
+        # 1. Feature Extractors (Split)
         # Pilot Features: Self(15) + CP(10) = 25 -> 64
-        self.pilot_embed = nn.Sequential(
+        # RUNNER PILOT
+        self.pilot_embed_runner = nn.Sequential(
             layer_init(nn.Linear(25, 64)),
             nn.ReLU(),
-            layer_init(nn.Linear(64, 32)), # Reduced to 32 for Size Opt
+            layer_init(nn.Linear(64, 32)),
+            nn.ReLU()
+        )
+        # BLOCKER PILOT
+        self.pilot_embed_blocker = nn.Sequential(
+            layer_init(nn.Linear(25, 64)),
+            nn.ReLU(),
+            layer_init(nn.Linear(64, 32)),
             nn.ReLU()
         )
         
@@ -290,12 +298,19 @@ class PodActor(nn.Module):
             layer_init(nn.Linear(32, 16))
         )
         
-        # Enemy Encoder (Shared)
+        # Enemy Encoder (Split)
         # [NEW] Prediction Head added internally? No, we decouple it for now.
         # But prediction head needs "Per Enemy" embedding.
         # So we split the encoder:
         # A. Per-Enemy Embedder
-        self.enemy_embedder = nn.Sequential(
+        # RUNNER ENEMY ENC
+        self.enemy_embedder_runner = nn.Sequential(
+            layer_init(nn.Linear(14, 32)),
+            nn.ReLU(),
+            layer_init(nn.Linear(32, 16))
+        )
+        # BLOCKER ENEMY ENC
+        self.enemy_embedder_blocker = nn.Sequential(
             layer_init(nn.Linear(14, 32)),
             nn.ReLU(),
             layer_init(nn.Linear(32, 16))
@@ -376,9 +391,10 @@ class PodActor(nn.Module):
         bs_map, s_map, max_cp, dim_map = map_obs_in.shape
         flat_map = map_obs_in.reshape(bs_map * s_map, max_cp, dim_map)
         
-        # A. Pilot Embed
+        # A. Pilot Embed (Split)
         pilot_in = torch.cat([flat_self, flat_cp], dim=1)
-        p_emb = self.pilot_embed(pilot_in) # [B*S, 48]
+        pe_run = self.pilot_embed_runner(pilot_in) # [B*S, 32]
+        pe_blk = self.pilot_embed_blocker(pilot_in) # [B*S, 32]
         
         # B. Map Embed
         m_emb = self.map_encoder(flat_map) # [B*S, 32]
@@ -387,20 +403,35 @@ class PodActor(nn.Module):
         tm_lat = self.teammate_encoder(flat_tm) # [B*S, 16]
         r_emb = self.role_embedding(flat_role) # [B*S, 16]
         
-        # D. Enemy Embed & Prediction
+        # D. Enemy Embed & Prediction (Split)
         bs_en, n_en, dim_en = flat_en.shape
         en_flat_flat = flat_en.reshape(bs_en * n_en, dim_en)
-        en_lat = self.enemy_embedder(en_flat_flat) # [B*S*N, 16]
         
-        # [AUX] Prediction
-        pred_delta = self.enemy_pred_head(en_lat) # [B*S*N, 2]
+        # Run BOTH
+        en_lat_run = self.enemy_embedder_runner(en_flat_flat) # [B*S*N, 16]
+        en_lat_blk = self.enemy_embedder_blocker(en_flat_flat) # [B*S*N, 16]
+        
+        # [AUX] Prediction (Shared Head, Dual Input)
+        pred_delta_run = self.enemy_pred_head(en_lat_run)
+        pred_delta_blk = self.enemy_pred_head(en_lat_blk)
+        pred_delta = (pred_delta_run + pred_delta_blk) / 2.0
         
         # Pool
-        en_lat_grouped = en_lat.view(bs_en, n_en, -1)
-        en_ctx, _ = torch.max(en_lat_grouped, dim=1) # [B*S, 16]
+        en_lat_run_grouped = en_lat_run.view(bs_en, n_en, -1)
+        en_lat_blk_grouped = en_lat_blk.view(bs_en, n_en, -1)
+        
+        en_ctx_run, _ = torch.max(en_lat_run_grouped, dim=1) # [B*S, 16]
+        en_ctx_blk, _ = torch.max(en_lat_blk_grouped, dim=1) # [B*S, 16]
         
         # --- 2. MoE Switch (Scatter-Gather) ---
-        cmd_in = torch.cat([flat_self, tm_lat, en_ctx, r_emb, m_emb], dim=1) # [B*S, 95]
+        # Construct Input for each Backbone
+        # cmd_in_run: uses pe_run, en_ctx_run
+        # cmd_in_blk: uses pe_blk, en_ctx_blk
+        # Shape: Self(15) + Team(16) + Enemy(16) + Role(16) + Map(32) = 95
+        # Role embedding is still helpful? Yes, keep it.
+        
+        cmd_in_run = torch.cat([flat_self, tm_lat, en_ctx_run, r_emb, m_emb], dim=1) # [B*S, 95]
+        cmd_in_blk = torch.cat([flat_self, tm_lat, en_ctx_blk, r_emb, m_emb], dim=1) # [B*S, 95]
         
         # Masks
         # role 0: Runner, 1: Blocker
@@ -409,38 +440,18 @@ class PodActor(nn.Module):
         
         # Initialize Output Buffers
         # VMAP-Safe Execution: Run BOTH on full batch, then Mask
-        out_run = self.runner_backbone(cmd_in)
-        out_blk = self.blocker_backbone(cmd_in)
+        out_run = self.runner_backbone(cmd_in_run)
+        out_blk = self.blocker_backbone(cmd_in_blk)
         
         # Select
         mask_run = is_runner.float().unsqueeze(-1)
         mask_blk = is_blocker.float().unsqueeze(-1)
         
-        c_emb = out_run * mask_run + out_blk * mask_blk
-            
-        # --- 3. LSTM (Hard Gated) ---
-        # Note: LSTM requires sequential continuity. Scatter-Gather breaks sequence if done per-step.
-        # But we process [B, S]. We must handle state carefully.
-        # Approach: Run BOTH LSTMs for full batch? No, wasteful.
-        # Approach: Split Batch into Runner-Batch and Blocker-Batch?
-        # Only works if role is constant for the whole sequence S.
-        # VALID ASSUMPTION: Roles don't change mid-inference-sequence (usually S=1 during play, S=SeqLen during TRAIN).
-        # During Train, if role changes mid-sequence, it's tricky.
-        # BUT: Role is usually an Episode-level constant or changes rarely.
-        # For simplicity/correctness within PPO batching: We run the WHOLE batch through BOTH LSTMs?
-        # NO, that doubles cost.
-        # OPTIMIZED: We assume mixed batch. We masking update?
-        # CustomLSTM supports masking? No.
-        # Hack: Pass full batch to both, but mask the *input* to zero for inactive? 
-        # LSTM with zero input still updates state (drift).
-        # CORRECT WAY: Gather indices, run LSTM on subset, scatter back.
-        # Issue: Hidden State alignment.
-        # If we have [B, S].
-        # We need state `h_run` [1, B, H].
-        # If we select subset `idx`, we need `h_run[:, idx, :]`.
-        
-        # Combine Embeddings
-        lstm_in_all = torch.cat([p_emb, c_emb], dim=1).view(B, S, -1) # [B, S, 96]
+        # Embeddings for LSTM
+        # Pilot(32) + Backbone(32) -> 64
+        # We must CONCATENATE, not ADD.
+        lstm_in_run = torch.cat([pe_run, out_run], dim=1).view(B, S, -1) # [B, S, 64]
+        lstm_in_blk = torch.cat([pe_blk, out_blk], dim=1).view(B, S, -1) # [B, S, 64]
         
         # Unpack States
         if actor_state is None:
@@ -452,68 +463,18 @@ class PodActor(nn.Module):
         else:
              (h_run, c_run), (h_blk, c_blk) = actor_state
 
-        # We can't easily perform scatter-gather on LSTM if S > 1 and roles change.
-        # But `role_ids` is [B, S].
-        # If S > 1, role *could* change.
-        # However, for PPO training, we usually slice blocks where role is constant? No guaranteed.
-        # COMPROMISE: Run BOTH LSTMs.
-        # Why? Because "Sparse" usually means we skip computation. But if we have to manage state for potential switches,
-        # we might need to keep the "dormant" LSTM state alive (identity pass) or run it.
-        # If we run both, we allow the "Runner Brain" to keep thinking even when Blocking? 
-        # Actually, "Background Thinking" is good.
-        # So: Independent Runner Stream and Blocker Stream ALWAYS run.
-        # The SWITCH only happens at the *output* of the LSTMs (or input to Heads).
-        # This doubles LSTM compute (small, 48 dim) but simplifies State Management massively.
-        # And since LSTM is small part of compute (Vision/MLP is larger), it's acceptable.
-        
-        # --- Dual Stream LSTM ---
-        # 1. Runner Stream
-        # Features: Pilot + CommanderRunner(All Inputs)
-        # Note: We calculated c_emb via MoE. That was "Input Gating".
-        # If we want Dual Stream, we need c_emb_run and c_emb_blk for ALL.
-        # Let's revert the MoE c_emb above and just compute both.
-        # The "MoE" is effectively in the specialized weights.
-        
-        # Re-compute full backbones?
-        # c_emb_run = self.runner_backbone(cmd_in)
-        # c_emb_blk = self.blocker_backbone(cmd_in)
-        # This ensures smooth gradients.
-        
-        # However, plan said "Hard Gated". user wants efficiency?
-        # "Sparse Execution" was the pitch.
-        # If we do Sparse, we handle state complexity.
-        # Let's stick to the Plan: Hard Gated input to LSTM.
-        
-        # To handle S>1 validly with sparse:
-        # We must use the mask per step.
-        # CustomLSTM loop allows this!
-        # Let's modify CustomLSTM or inline it here? 
-        # Or simpler: Just mask the input to the LSTM? 
-        # If input is 0, LSTM state decays.
-        # We want "Pause" (Identity).
-        # A standard LSTM doesn't support "Pause" easily without custom kernel.
-        
-        # Pivot: RUN BOTH. "Expert" means distinct weights, not necessarily conditional computation.
-        # Character limit is 100k. Efficiency is high enough (small model).
-        # Running both is safer for stability and state consistency.
-        
-        c_emb_run = self.runner_backbone(cmd_in)
-        c_emb_blk = self.blocker_backbone(cmd_in)
-        
-        lstm_in_run = torch.cat([p_emb, c_emb_run], dim=1).view(B, S, -1)
-        lstm_in_blk = torch.cat([p_emb, c_emb_blk], dim=1).view(B, S, -1)
-        
-        out_run, (hn_run, cn_run) = self.runner_lstm(lstm_in_run, (h_run, c_run))
-        out_blk, (hn_blk, cn_blk) = self.blocker_lstm(lstm_in_blk, (h_blk, c_blk))
+        # Run BOTH LSTMs (State consistency strategy)
+        out_run_lstm, (hn_run, cn_run) = self.runner_lstm(lstm_in_run, (h_run, c_run))
+        out_blk_lstm, (hn_blk, cn_blk) = self.blocker_lstm(lstm_in_blk, (h_blk, c_blk))
         
         # --- Output Gating ---
         # Select output based on role_ids [B, S]
-        # role_ids 0 -> Run, 1 -> Blk
-        # mask: [B, S, 1]
         mask_blk = role_ids_in.float().unsqueeze(-1)
         mask_run = 1.0 - mask_blk
         
-        out_fused = out_run * mask_run + out_blk * mask_blk
+        out_fused = out_run_lstm * mask_run + out_blk_lstm * mask_blk
+        
+
         
         # --- Heads ---
         thrust_logits = self.head_thrust(out_fused)

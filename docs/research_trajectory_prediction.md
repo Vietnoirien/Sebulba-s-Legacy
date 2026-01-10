@@ -84,11 +84,15 @@ This is the most powerful unlock. Currently, our **System 2 (Local Search)** ass
     *   New: 1 Step Sim for Ego + Enemies.
     *   The `N` class physics engine is vector-capable or fast loops. simulating 3 extra pods per candidate is well within the 1000ms (we currently use ~10ms).
 
-## 5. Recommendation
+## 5. Recommendation & Status (Gen 2.1 Update)
 
-**Implement "Action Prediction" immediately.**
+**Status: Partially Implemented (Architecture Ready)**
 
-1.  **Add `pred_head`** to the `EnemyEncoder` in `architecture.py`.
-2.  **Add `L_pred`** to the loss function in `ppo.py`.
-3.  **Update `export.py`** to include these weights.
-4.  **Update `submission.py`** (System 2) to use these predictions during the simulation step.
+1.  **Architecture**: `pred_head` added to `EnemyEncoder` in `models/deepsets.py`. It currently outputs `pred_delta` but is unused.
+2.  **Training**: `L_pred` auxiliary loss needs to be added to `ppo.py`.
+3.  **Inference**: `submission.py` template needs to use these predictions for the Neural-Guided Search.
+
+**Next Steps:**
+1.  Implement `L_pred` in `training/ppo.py`.
+2.  Verify loss convergence.
+3.  Enable prediction-based simulation in `export.py`.

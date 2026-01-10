@@ -34,13 +34,14 @@ The heart of the submission is the `N` class, a minimal neural network framework
     -   Manually implements the Multi-Head Attention, Layer Norm, and Feed-Forward Network operations using raw list comprehensions and math functions.
     -   Processes the sequence of checkpoint observations.
 -   **`f(...)`**: **Forward Pass**. Reconstructs the `PodAgent` static graph.
-    1.  **Pilot Embed**: Processes `s` (Self) + `cp` (Checkpoints).
-    2.  **Entity Encoding**: Processes `tm` (Team) and `en` (Enemy) via shared `ec` (Enemy Encoder) weights.
-    3.  **Context Aggregation**: Performs global max pooling on entity embeddings.
+    1.  **Pilot Embed**: Processes `s` (Self) + `cp` (Checkpoints) through TWO paths (Runner/Blocker).
+    2.  **Entity Encoding**: Processes `tm` (Team) and `en` (Enemy) via separate `enemy_enc` weights for Runner/Blocker context.
+    3.  **Context Aggregation**: Performs max pooling on entity embeddings for both contexts.
     4.  **Role & Map**: Lookups role embedding (`re`) and runs Map Transformer (`mr`).
-    5.  **Commander Backbone**: Concatenates all features and passes through MLP.
-    6.  **LSTM**: Updates memory state.
-    7.  **Heads**: Computes final action logits (Thrust, Angle, Shield, Boost).
+    5.  **Gated Execution**: Selects the active branch (`if rv==0: run else: block`).
+    6.  **Commander Backbone**: Passes specific context through specific MLP.
+    7.  **LSTM**: Updates specific memory state (Runner or Blocker).
+    8.  **Heads**: Computes final action logits.
 
 ### Inference Data Flow
 
@@ -62,19 +63,25 @@ graph TD
     subgraph Shared_Encoders ["Shared Feature Extractors"]
         direction TB
         
-        %% Pilot Stream
-        subgraph Pilot_System ["Pilot System"]
-            P_In(Concat: Self + CP) --> P_Net["Pilot MLP (64, 32)"]
+        %% Split Pilot Stream
+        subgraph Pilot_System ["Pilot System (Split)"]
+            P_In(Concat: Self + CP) 
+            P_In --> P_Run["Pilot MLP Runner (64, 32)"]
+            P_In --> P_Blk["Pilot MLP Blocker (64, 32)"]
         end
 
         %% Perception System
         subgraph Perception ["Perception System"]
             TM --> TM_Enc["Teammate Encoder (32, 16)"]
             
-            %% DeepSets
-            EN --> EN_Enc["Enemy Encoder (14->32->16)"]
-            EN_Enc --> EN_Pool["Global Max Pool"]
-            EN_Enc -- "Per-Enemy Emb" --> Pred["Aux: Trajectory Pred HEAD"]
+            %% DeepSets (Split)
+            EN --> EN_Run["Enemy Enc Runner"]
+            EN_Run --> EN_Run_Pool["Max Pool (Runner)"]
+            
+            EN --> EN_Blk["Enemy Enc Blocker"]
+            EN_Blk --> EN_Blk_Pool["Max Pool (Blocker)"]
+            
+            EN_Run & EN_Blk -- "Avg Pred" --> Pred["Aux: Traj Pred HEAD"]
             
             %% Map
             Map --> Map_Tr["Map Transformer (Attn->32)"]
@@ -89,22 +96,23 @@ graph TD
         direction TB
         
         %% Command Bus
-        Bus("Command Bus [95] <br/> (Self | Team | EnemyCtx | Role | Map)")
-        P_Net --> Pilot_Ctx("Pilot Context [32]")
+        Bus("Command Bus [95] <br/> (Self | Team | Role | Map)")
         
-        S & TM_Enc & EN_Pool & R_Emb & Map_Tr --> Bus
+        S & TM_Enc & R_Emb & Map_Tr --> Bus
         
         %% Expert 1: Runner
         subgraph Runner_Exp ["Runner Expert (Navigation)"]
-            Bus --> Run_BB["Runner Backbone (64, 32)"]
-            Pilot_Ctx & Run_BB --> Run_In("Concat [64]")
+            Bus & EN_Run_Pool --> Run_Bus("Specific Ctx")
+            Run_Bus --> Run_BB["Runner Backbone (64, 32)"]
+            P_Run & Run_BB --> Run_In("Concat [64]")
             Run_In --> Run_LSTM["Runner LSTM (H=32)"]
         end
         
         %% Expert 2: Blocker
         subgraph Blocker_Exp ["Blocker Expert (Combat)"]
-            Bus --> Blk_BB["Blocker Backbone (64, 32)"]
-            Pilot_Ctx & Blk_BB --> Blk_In("Concat [64]")
+            Bus & EN_Blk_Pool --> Blk_Bus("Specific Ctx")
+            Blk_Bus --> Blk_BB["Blocker Backbone (64, 32)"]
+            P_Blk & Blk_BB --> Blk_In("Concat [64]")
             Blk_In --> Blk_LSTM["Blocker LSTM (H=32)"]
         end
     end
@@ -138,10 +146,10 @@ The submission model is a direct export of the trained `PodAgent` (Actor), highl
 
 | Metric | Value |
 | :--- | :--- |
-| **Total Parameters (Actor)** | **~56,202** |
+| **Total Parameters (Actor)** | **~60,900** |
 | **Total Parameters (Critic)** | **~84,321** |
-| **Model Size (Uncompressed)** | ~562 KB (FP32) |
-| **Final Export Size** | **~89,616 chars** (Base85) |
+| **Model Size (Uncompressed)** | ~600 KB (FP32) |
+| **Final Export Size** | **~97,454 chars** (Base85) |
 | **Inference Latency** | < 1ms (on typical hardware) |
 
 ## Neural-Guided Local Search

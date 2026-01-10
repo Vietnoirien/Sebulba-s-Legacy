@@ -395,9 +395,21 @@ class PodRacerEnv:
              
              half_envs = self.num_envs // 2
              
-             # Group A (First Half): Agent is Runner (True), Bot is Blocker (False)
+             # Group A (First Half): Agent is Runner (True)
              self.is_runner[env_ids[:half_envs], 0] = True
-             self.is_runner[env_ids[:half_envs], 1] = False
+             self.is_runner[env_ids[:half_envs], 1] = False # Teammate Inactive
+             
+             # Group A Opponent: Bot (Pod 2) should be Blocker (Evasion Training)
+             # User Request: "runner should be trained versus a blocker bot"
+             self.is_runner[env_ids[:half_envs], 2] = False
+             self.is_runner[env_ids[:half_envs], 3] = False
+             
+             # Group B (Second Half): Agent is Blocker (False)
+             # Group B Opponent: Bot (Pod 2) must be Runner (Target).
+             self.is_runner[env_ids[half_envs:], 0] = False
+             self.is_runner[env_ids[half_envs:], 1] = False # Teammate Inactive
+             self.is_runner[env_ids[half_envs:], 2] = True # Bot is Runner (Target)
+             self.is_runner[env_ids[half_envs:], 3] = False
              return
 
         if self.curriculum_stage == STAGE_TEAM:
@@ -407,20 +419,6 @@ class PodRacerEnv:
              self.is_runner[env_ids, 1] = False
              self.is_runner[env_ids, 2] = True
              self.is_runner[env_ids, 3] = False
-             return
-             self.is_runner[env_ids[:half_envs], 2] = False # Bot is Blocker (Interceptor)
-             self.is_runner[env_ids[:half_envs], 3] = False
-             
-             # Group B (Second Half): Agent is Blocker (False)
-             # Bot (Pod 2) must be RUNNER (True) to be the target.
-             # Wait, if Agent is Blocker, Bot should be Runner.
-             # Config says active_pods=[0, 2].
-             # Pod 0: Blocker (False)
-             # Pod 2: Runner (True)
-             self.is_runner[env_ids[half_envs:], 0] = False
-             self.is_runner[env_ids[half_envs:], 1] = False # Teammate is Inactive (Blocker)
-             self.is_runner[env_ids[half_envs:], 2] = True # Bot is Runner
-             self.is_runner[env_ids[half_envs:], 3] = False
              return
 
         # [FIX] Force Fixed Roles for Stage 3 (Team)
@@ -869,17 +867,30 @@ class PodRacerEnv:
                         # Target Index
                         t_idx = torch.where(target_is_a, idx_a, idx_b)
                         
-                        # [FIX] Intercept Logic: Aim for Enemy's Next Checkpoint
-                        # Instead of aiming at the Enemy (Chase), aim at their Goal (Intercept).
+                        # [FIX] Intercept Logic: Dynamic Targeting (Head-on vs Catch-up)
+                        # Replicates logic from Intercept Reward (lines 1600+) to align Orientation Guidance.
+                        
+                        # Enemy Next CP
                         e_next_cp = self.next_cp_id[batch_indices, t_idx] # [N]
+                        target_cp_pos = self.checkpoints[batch_indices, e_next_cp] # [N, 2]
                         
-                        # Lookup CP Pos
-                        # self.checkpoints is [N, MaxCP, 2]
-                        # advanced indexing
-                        t_pos = self.checkpoints[batch_indices, e_next_cp] # [N, 2]
+                        # Enemy Position
+                        enemy_pos = self.physics.pos[batch_indices, t_idx] # [N, 2]
                         
-                        # Vector TO Intercept Point (CP)
-                        vec_to_intercept = t_pos - curr_pos
+                        # Distances
+                        d_me_cp = torch.norm(target_cp_pos - curr_pos, dim=1)
+                        d_en_cp = torch.norm(target_cp_pos - enemy_pos, dim=1)
+                        
+                        # Mode Switch
+                        is_ahead = (d_me_cp < d_en_cp)
+                        
+                        # Select Target: Enemy if Ahead, CP if Behind
+                        # We use torch.where for batch safety
+                        # final_target_pos : [N, 2]
+                        final_target_pos = torch.where(is_ahead.unsqueeze(-1), enemy_pos, target_cp_pos)
+                        
+                        # Vector TO Target
+                        vec_to_intercept = final_target_pos - curr_pos
                         angle_to_intercept = torch.atan2(vec_to_intercept[:, 1], vec_to_intercept[:, 0])
                         
                         # Override target_angle where is_block
@@ -1582,43 +1593,91 @@ class PodRacerEnv:
                  t_cp_pos = self.checkpoints[torch.arange(self.num_envs), t_next_cp]
                  
                  # Dist Me -> Intercept
-                 curr_pos = self.physics.pos[:, i]
-                 dist_intercept = torch.norm(t_cp_pos - curr_pos, dim=1)
+                  # curr_pos = self.physics.pos[:, i]
+                  # dist_intercept = torch.norm(t_cp_pos - curr_pos, dim=1)
+                  
+                 # [FIX] Pro-Active Intercept Logic
+                 # Problem: "Intercepting" the CP just makes us race the enemy (Escort).
+                 # Solution:
+                 # 1. If we are BEHIND enemy (Distance to CP > Enemy Dist to CP):
+                 #    Target = CP (Catch up/Overtake)
+                 # 2. If we are AHEAD of enemy (Distance to CP < Enemy Dist to CP):
+                 #    Target = ENEMY (Slow down/Turn back to collide)
                  
-                 # Previous Distance (Needs State)
-                 # self.prev_dist_intercept is [B, 4]. Initialize in reset.
+                 curr_pos = self.physics.pos[:, i]
+                 enemy_pos = self.physics.pos[torch.arange(self.num_envs, device=self.device), target_e]
+                 
+                 # Distances to CP
+                 dist_me_cp = torch.norm(t_cp_pos - curr_pos, dim=1)
+                 dist_en_cp = torch.norm(t_cp_pos - enemy_pos, dim=1)
+                 
+                 # Distance to Enemy
+                 dist_me_en = torch.norm(enemy_pos - curr_pos, dim=1)
+                 
+                 # Determine Mode
+                 # Bias "Ahead" slightly to encourage aggressive blocking early? No, strict is fine.
+                 is_ahead = (dist_me_cp < dist_en_cp)
+                 
+                 # Dynamic Target Distance
+                 # If Ahead: Minimize Dist to Enemy.
+                 # If Behind: Minimize Dist to CP.
+                 final_dist_target = torch.where(is_ahead, dist_me_en, dist_me_cp)
+                 
+                 # Previous Distance State Handling
+                 # Switching targets causes a jump in 'dist'.
+                 # 'valid_delta' mask below (abs < 500) handles this by ignoring the single step of the switch.
                  if not hasattr(self, 'prev_dist_intercept'):
                       self.prev_dist_intercept = torch.zeros((self.num_envs, 4), device=self.device)
                       
-                 # Calculate Delta (Closing Velocity)
-                 # Positive if closing in.
-                 delta = self.prev_dist_intercept[:, i] - dist_intercept
+                 # Calculate Delta (Positive = Closing In)
+                 delta = self.prev_dist_intercept[:, i] - final_dist_target
                  
-                 # Clamp to avoid huge jumps on reset/teleport (though reset handles state)
-                 # But switching targets causes jump.
-                 # Filter jumps > 500 units/step (Max speed ~200)
+                 # Filter Jumps (Mode Switch or Teleport)
+                 # Max speed ~100-200. 500 is safe margin.
                  valid_delta = (delta.abs() < 500.0).float()
-                 
-                 # Reward
-                 # S_VEL is 1/1000. 
-                 # We want roughly same scale as Runner Progress.
-                 # Runner gives dist_delta * w_progress. 
-                 # We use w_progress too? Or w_intercept?
-                 # Use w_progress for simplicity + Intercept Scale.
-                 # If w_progress is 0, use default 1.0 logic?
-                 # No, assume w_progress is set.
                  
                  intercept_rew = delta * valid_delta * INTERCEPT_SCALE * dense_mult
                  
-                 # Apply (Masked by is_blocker)
-                 # Note: w_progress might be masked out for blockers elsewhere?
-                 # We apply it explicitly here.
+                 # Update State
+                 self.prev_dist_intercept[:, i] = final_dist_target
+                 
+                 # --- [NEW] Anti-Escort Penalty ---
+                 # If we are close and moving parallel, we are just racing/escorting.
+                 # Penalize High Cosine Sim of Velocity.
+                 
+                 my_vel = self.physics.vel[:, i]
+                 en_vel = self.physics.vel[torch.arange(self.num_envs, device=self.device), target_e]
+                 
+                 # Normalize
+                 my_speed = torch.norm(my_vel, dim=1) + 1e-6
+                 en_speed = torch.norm(en_vel, dim=1) + 1e-6
+                 
+                 my_dir = my_vel / my_speed.unsqueeze(1)
+                 en_dir = en_vel / en_speed.unsqueeze(1)
+                 
+                 # Cos Sim
+                 alignment = (my_dir * en_dir).sum(dim=1) # [-1, 1]
+                 
+                 # Only penalize if:
+                 # 1. Close to enemy (< 3000u)
+                 # 2. High Alignment (> 0.9)
+                 # 3. Moving fast enough (> 100)
+                 is_prox = (dist_me_en < 3000.0)
+                 is_aligned = (alignment > 0.9)
+                 is_fast = (my_speed > 100.0)
+                 
+                 escort_mask = is_prox & is_aligned & is_fast
+                 
+                 # Penalty Magnitude:Proportional to speed or fixed? Fixed is stable.
+                 # 10.0 per step is significant (like step penalty).
+                 escort_penalty = -10.0 * escort_mask.float()
+                 
                  w_prog = reward_weights[:, RW_PROGRESS]
                  
-                 rewards_indiv[:, i] += intercept_rew * w_prog * is_block.float()
+                 # Combined Reward
+                 total_intercept = intercept_rew + escort_penalty
                  
-                 # Update State
-                 self.prev_dist_intercept[:, i] = dist_intercept
+                 rewards_indiv[:, i] += total_intercept * w_prog * is_block.float()
                  
             # Passive Failure Penalty
             # Check if ANY enemy runner passed CP this step

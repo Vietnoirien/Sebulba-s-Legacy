@@ -9,60 +9,54 @@ The core philosophy is **"Sim-to-Tensor"**: the simulation state resides on the 
 graph TD
     subgraph GPU_ACC ["GPU Acceleration"]
         sim_vec["Vectorized Simulation (8192 Envs)"]
-        physics_eng["Custom Physics Engine & Rewards"]
         
-        subgraph agent_model ["Gen 2 MoE Actor (~56k Params)"]
+        subgraph agent_model ["Gen 2.1 Split MoE Actor (~61k Params)"]
             obs_input["Observation"]
             
-            subgraph moe_brain ["Hard-Gated MoE Backbone"]
-                pilot_feat["Pilot Stream (Sensory-Motor)<br/>~3.7k params"]
+            subgraph split_inputs ["Split Perception & Motor"]
+                pilot_run["Pilot (Runner)<br/>~3.7k params"]
+                pilot_blk["Pilot (Blocker)<br/>~3.7k params"]
                 
-                subgraph experts ["Specialized Experts"]
-                    run_exp["Runner Expert (Navigation)<br/>~20k params"]
-                    blk_exp["Blocker Expert (Combat)<br/>~20k params"]
-                end
-                
-                pred_head["Trajectory Prediction<br/>(Auxiliary)"]
-                
-                pilot_heads["Pilot Heads"]
-                cmd_heads["Commander Heads"]
+                enemy_run["Enemy Enc (Runner)<br/>~1k params"]
+                enemy_blk["Enemy Enc (Blocker)<br/>~1k params"]
             end
             
-            enemy_encoder["DeepSets Enemy Encoder<br/>~1k params"]
-            map_encoder["Map Transformer<br/>~8.6k params"]
+            map_encoder["Map Transformer (Shared)<br/>~8.6k params"]
             role_emb["Role Selection"]
+
+            subgraph experts ["Hard-Gated Experts"]
+                run_exp["Runner Backbone + LSTM<br/>~20k params"]
+                blk_exp["Blocker Backbone + LSTM<br/>~20k params"]
+            end
+            
+            pred_head["Trajectory Prediction<br/>(Auxiliary)"]
         end
     end
     
     subgraph CPU_ORCH ["CPU Orchestration"]
         ppo_trainer["PPO Trainer + VectorizedAdam"]
         ga_ctrl["Evolutionary Controller (NSGA-II)"]
-        league_mgr["League Manager (PFSP)"]
     end
     
-    sim_vec -- "Self+CP" --> pilot_feat
-    sim_vec -- "Enemies" --> enemy_encoder 
-    enemy_encoder --> run_exp
-    enemy_encoder --> blk_exp
-    enemy_encoder --> pred_head
+    sim_vec -- "Self+CP" --> pilot_run
+    sim_vec -- "Self+CP" --> pilot_blk
     
-    sim_vec -- "Self+Team" --> run_exp
-    sim_vec -- "Self+Team" --> blk_exp
+    sim_vec -- "Enemies" --> enemy_run
+    sim_vec -- "Enemies" --> enemy_blk
     
-    sim_vec -- "Map (Next CPs)" --> map_encoder
+    enemy_run --> run_exp
+    enemy_blk --> blk_exp
+    
+    sim_vec -- "Map" --> map_encoder
     map_encoder --> run_exp
     map_encoder --> blk_exp
     
+    pilot_run --> run_exp
+    pilot_blk --> blk_exp
+    
     role_emb -- "Switch" --> experts
     
-    pilot_feat --> experts
-    run_exp --> pilot_heads
-    run_exp --> cmd_heads
-    blk_exp --> pilot_heads
-    blk_exp --> cmd_heads
-    
-    ppo_trainer -- "Gradients" --> moe_brain
-    ga_ctrl -- "Mutations" --> ppo_trainer
+    ppo_trainer -- "Gradients" --> agent_model
 ```
 
 ## Core Components
@@ -75,12 +69,17 @@ graph TD
 ### 2. Universal Actor (The "Recurrent Split Backbone")
 Instead of a monolithic network, we use a **Hard-Gated Mixture of Experts (MoE)** architecture. This allows the model to switch between entirely different behavioral "brains" depending on its assigned role.
 
-*   **Pilot Stream (Reactive)**: A lightweight shared MLP processing immediate physical state. It provides a common sensory foundation for both experts.
+*   **DeepSets Enemy Encoder (Split)**: We naturally split the enemy encoder.
+    *   `enemy_embedder_runner`: Learning to perceive enemies as obstacles to avoid.
+    *   `enemy_embedder_blocker`: Learning to perceive enemies as targets to intercept.
+*   **Pilot Stream (Split)**: We also split the Pilot Stream (Motor Control).
+    *   `pilot_embed_runner`: Optimizes for pure speed and racing lines.
+    *   `pilot_embed_blocker`: Optimizes for stability and impact resilience.
 *   **Mixture of Experts (MoE)**:
-    *   **Runner Expert**: A specialized backbone and LSTM optimized for high-speed racing and obstacle avoidance.
-    *   **Blocker Expert**: A specialized backbone and LSTM optimized for interception physics and "wrestler" combat.
-*   **Trajectory Prediction (Auxiliary)**: A prediction head that attempts to forecast the next position of the nearest enemy. Training this head via an auxiliary loss forces the enemy encoder to learn relevant physical features of opponents.
-*   **Selection Head**: Gating logic that activates the corresponding expert based on the `role_id`. During inference, both streams can run in parallel (masked) or sparsely to optimize compute.
+    *   **Runner Expert**: A specialized backbone and LSTM optimized for high-speed racing.
+    *   **Blocker Expert**: A specialized backbone and LSTM optimized for physics combat.
+*   **Trajectory Prediction (Auxiliary)**: A prediction head that attempts to forecast the next position of the nearest enemy. It is driven by the shared "Enemy Context" but gradients flow to the specific encoder in use.
+*   **Selection Head**: Gating logic that activates the corresponding expert based on the `role_id`. During inference, both streams run, but only one is selected.
 
 ### 3. Role Embeddings & Contextual Condition
 Instead of separate networks, we use a **Context-Conditioned** approach. A learned **Role Embedding** (Size 16) is concatenated with the core observations before entering the Commander Backbone.
@@ -111,12 +110,11 @@ We incorporate **Random Network Distillation** to generate intrinsic rewards.
 ### 7. Model Complexity
 Despite the deep reinforcement learning capability, the model remains highly efficient to ensure high SPS (Steps Per Second).
 
-*   **Total Trainable Parameters**: ~140,523
-    *   **Actor Network**: ~56,202 (Inference model)
+*   **Total Trainable Parameters**: ~145,000
+    *   **Actor Network**: ~60,900 (Inference model)
+        *   **MoE Experts**: ~20k params each (Backbone + LSTM)
+        *   **Map Transformer**: ~8.6k params
+        *   **Pilot Stream**: ~3.7k params x 2 (Split)
+        *   **DeepSets Encoders**: ~1k params x 2 (Split)
     *   **Critic Network**: ~84,321 (Accurate value estimation)
-*   **Key Component sizes**:
-    *   **MoE Experts**: ~20k params each (Backbone + LSTM)
-    *   **Map Transformer**: ~8.6k params
-    *   **Pilot Stream**: ~3.7k params
-    *   **DeepSets Encoders**: ~1k params each
 
