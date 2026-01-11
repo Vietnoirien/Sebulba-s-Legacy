@@ -66,7 +66,8 @@ class PPOTrainer:
         self.reward_weights_tensor = torch.zeros((self.config.num_envs, 17), device=self.device)
         
         # Normalization
-        self.rms_self = RunningMeanStd((15,), device=self.device)
+        # Exclude Index 11 (Leader/is_runner) from Normalization
+        self.rms_self = RunningMeanStd((14,), device=self.device)
         self.rms_ent = RunningMeanStd((14,), device=self.device)
         self.rms_cp = RunningMeanStd((10,), device=self.device)
         
@@ -141,8 +142,10 @@ class PPOTrainer:
                 'ema_blocker_dmg': None,
                 'ema_dist': None,
                 'ema_denials': None, # [NEW] Stage 3 Metric,
+                'ema_blocker_score': None, # [NEW] Unified Metric
                 
                 'behavior_buffer': torch.zeros(4, device=self.device),
+                'blocker_collisions': 0, # [NEW] Step Count
                 
                 'accum_dist_fraction': 0.0,
                 'accum_dist_count': 0.0,
@@ -277,6 +280,23 @@ class PPOTrainer:
         else:
              self.behavior_stats_tensor.zero_()
     
+    def _normalize_self_selective(self, raw_self, fixed=False):
+        """
+        Normalizes self_obs (15 dims) while EXCLUDING Index 11 (Leader/is_runner).
+        """
+        # Split: Indices 0-10, 12-14 (Norm) | 11 (Pass)
+        p1 = raw_self[..., :11]
+        p2 = raw_self[..., 12:]
+        leader = raw_self[..., 11:12]
+        
+        to_norm = torch.cat([p1, p2], dim=-1) # [..., 14]
+        normed = self.rms_self(to_norm, fixed=fixed)
+        
+        n1 = normed[..., :11]
+        n2 = normed[..., 11:]
+        
+        return torch.cat([n1, leader, n2], dim=-1) # [..., 15]
+
     def init_vectorized_population(self):
         """
         Consolidates individual agent parameters into a single stacked TensorDict.
@@ -374,7 +394,6 @@ class PPOTrainer:
         """
         Functional wrapper for vmap inference.
         """
-        # Reconstruct tuple state
         # Input: [MB, 2, H] -> Permute [2, MB, H]
         ah = actor_h.permute(1,0,2).contiguous()
         ac = actor_c.permute(1,0,2).contiguous()
@@ -404,6 +423,7 @@ class PPOTrainer:
         
         # Critic State: (nch, ncc) -> [1, MB, H] -> Permute [MB, 1, H]
         (nch, ncc) = states['critic']
+        
         next_ch = nch.permute(1,0,2).contiguous()
         next_cc = ncc.permute(1,0,2).contiguous()
         
@@ -584,6 +604,25 @@ class PPOTrainer:
         # Retrieve Nursery Metrics from Tensor
         nursery_data = self.nursery_metrics_buffer.cpu().numpy() # [Pop, 2]
         
+        # [NEW] Calculate Blocker Score
+        # Score = (Denial Rate * 1000) + (Avg Collision Steps * 10)
+        # 100% Denial = 1000 pts.
+        # 100 steps (20s) = 1000 pts.
+        for i, p in enumerate(self.population):
+             avg_col_steps = 0.0
+             bm = p.get('blocker_matches', 0)
+             if bm > 0:
+                 avg_col_steps = p.get('blocker_collisions', 0) / bm
+                 
+             dr = p.get('denial_rate', 0.0)
+             p['blocker_score'] = (dr * 1000.0) + (avg_col_steps * 10.0)
+             
+             # EMA
+             if p.get('ema_blocker_score') is None:
+                 p['ema_blocker_score'] = p['blocker_score']
+             else:
+                 p['ema_blocker_score'] = p['ema_blocker_score'] * 0.9 + p['blocker_score'] * 0.1
+
         for i, p in enumerate(self.population):
             # Sync Nursery Data
             # Note: We accumulate into p['accum_dist_fraction'] for persistence?
@@ -797,7 +836,7 @@ class PPOTrainer:
                   # Duel Fused: Wins, Denials, Novelty
                   # Log top elite stats
                   e = elites[0]
-                  self.log(f"Elite Stats | Wins: {e['ema_wins']:.1%} | Denials: {e['ema_denials']:.1%} | Impact: {e.get('ema_blocker_dmg', 0.0):.0f} | Nov: {e['novelty_score']:.2f}")
+                  self.log(f"Elite Stats | Wins: {e['ema_wins']:.1%} | Denials: {e['ema_denials']:.1%} | BlkScr: {e.get('ema_blocker_score', 0.0):.1f} | Nov: {e['novelty_score']:.2f}")
              elif self.env.curriculum_stage == STAGE_NURSERY:
                   # Fallback (Should not happen given if check above)
                   pass 
@@ -910,6 +949,10 @@ class PPOTrainer:
             p['total_cp_hits'] = 0
             p['avg_runner_vel'] = 0.0
             p['avg_blocker_dmg'] = 0.0
+            p['avg_denial_zone'] = 0.0
+            p['avg_intercept_rew'] = 0.0
+            p['runner_matches'] = 0
+            p['blocker_matches'] = 0
             # Reset Behavior Buffer
             p['behavior_buffer'].zero_()
             p['accum_dist_fraction'] = 0.0
@@ -1052,6 +1095,12 @@ class PPOTrainer:
              avg_den = np.mean(dens) if dens else 0.0
              l_den = leader.get('ema_denials', 0.0)
              if l_den is None: l_den = 0.0
+             
+             # Metric: Blocker Score
+             blks = [p.get('ema_blocker_score', 0.0) for p in self.population if p.get('ema_blocker_score') is not None]
+             avg_blk = np.mean(blks) if blks else 0.0
+             l_blk = leader.get('ema_blocker_score', 0.0)
+             if l_blk is None: l_blk = 0.0
         
         # Nursery Specific Logging
         if self.env.curriculum_stage == STAGE_NURSERY:
@@ -1093,10 +1142,15 @@ class PPOTrainer:
             def best_sorter_fused(p):
                  den = p.get('ema_denials', 0.0) if p.get('ema_denials') is not None else 0.0
                  wins = p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0
-                 return (wins + den)
+                 # Normalize Blocker Reward (Assume ~2000 is good max per episode)
+                 dmg = p.get('ema_blocker_dmg', 0.0) if p.get('ema_blocker_dmg') is not None else 0.0
+                 dmg_norm = dmg / 2000.0 
+                 return (wins + den + dmg_norm)
             best_agent = max(self.population, key=best_sorter_fused)
             b_den = best_agent.get('ema_denials', 0.0)
             if b_den is None: b_den = 0.0
+            b_blk = best_agent.get('ema_blocker_score', 0.0)
+            if b_blk is None: b_blk = 0.0
         else:
             # Best is Max Win Rate
             best_agent = max(self.population, key=lambda p: p.get('ema_wins', 0.0) if p.get('ema_wins') is not None else 0.0)
@@ -1149,6 +1203,7 @@ class PPOTrainer:
         if self.env.curriculum_stage == STAGE_DUEL_FUSED:
             self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1%} | {avg_win:<10.1%} | {b_win:<10.1%}")
             self.log(f" {'Denials (EMA)':<15} | {l_den:<10.1%} | {avg_den:<10.1%} | {b_den:<10.1%}")
+            self.log(f" {'Blocker Sc':<15} | {l_blk:<10.1f} | {avg_blk:<10.1f} | {b_blk:<10.1f}")
         else:
             self.log(f" {'Wins (EMA)':<15} | {l_win:<10.1%} | {avg_win:<10.1%} | {b_win:<10.1%}")
         self.log(f" {'Novelty':<15} | {l_nov:<10.2f} | {avg_nov:<10.2f} | {b_nov:<10.2f}")
@@ -1158,7 +1213,7 @@ class PPOTrainer:
              best_nurs_agent = max(self.population, key=lambda p: p.get('nursery_score', 0.0))
              b_nur = best_nurs_agent.get('nursery_score', 0.0)
              self.log(f" {'Nursery Sc':<15} | {l_nur:<10.0f} | {avg_nur:<10.0f} | {b_nur:<10.0f} | (Novelty: {l_nov:.2f})")
-             
+
         self.log("-" * 80)
 
 
@@ -1356,8 +1411,9 @@ class PPOTrainer:
                 raw_cp = all_cp[active_pods].view(-1, 10)
                 raw_map = all_map[active_pods].view(-1, MAX_CHECKPOINTS, 2)
                 
-                # Normalize & Update Stats
-                norm_self = self.rms_self(raw_self)
+                # Normalize & Update Stats (Selective for Self)
+                # norm_self = self.rms_self(raw_self)
+                norm_self = self._normalize_self_selective(raw_self)
                 
                 # Normalize Teammate (13) using ENT stats
                 norm_tm = self.rms_ent(raw_tm)
@@ -1449,6 +1505,7 @@ class PPOTrainer:
                 # vmap expects inputs to be stacked. self.curr_... is [Pop, Batch, ...]
                 
                 # Add critic startes to input
+                
                 v_act, v_lp, _, v_val, v_nah, v_nac, v_nch, v_ncc = vmap(self._functional_inference, in_dims=(0,0,0,0,0,0,0,0,0,0,0), randomness='different')(
                     self.stacked_params, self.stacked_buffers, v_s, v_tm, v_en, v_cp, v_mp, self.curr_actor_h, self.curr_actor_c, self.curr_critic_h, self.curr_critic_c
                 )
@@ -1571,7 +1628,8 @@ class PPOTrainer:
                      # Normalize (Fixed stats)
                      # Must flatten to normalize then reshape back
                      B_o, N_e, D_o = opp_raw_self.shape
-                     opp_norm_self = self.rms_self(opp_raw_self.view(-1, D_o), fixed=True).view(B_o, N_e, D_o)
+                     # opp_norm_self = self.rms_self(opp_raw_self.view(-1, D_o), fixed=True).view(B_o, N_e, D_o)
+                     opp_norm_self = self._normalize_self_selective(opp_raw_self.view(-1, D_o), fixed=True).view(B_o, N_e, D_o)
                      
                      D_tm = opp_raw_tm.shape[-1]
                      opp_norm_tm = self.rms_ent(opp_raw_tm.view(-1, D_tm), fixed=True).view(B_o, N_e, D_tm)
@@ -1821,7 +1879,7 @@ class PPOTrainer:
                      # 0: RewardSum, 1: RewardCount, 2: Laps, 3: CPs, 4: Vel, 5: Dmg, 
                      # 6: CP_Steps, 7: CP_Hits, 8: Wins, 9: Matches, 10: Denials
                      # [NEW] 11: Runner Matches, 12: Blocker Matches
-                     self._iter_metrics = torch.zeros((self.config.pop_size, 13), device=self.device)
+                     self._iter_metrics = torch.zeros((self.config.pop_size, 20), device=self.device)
                      self._iter_max_streak = torch.zeros(self.config.pop_size, device=self.device) # Keep max separate
                 
                 # 0. Rewards
@@ -1855,6 +1913,15 @@ class PPOTrainer:
                 self._iter_metrics[:, 4] += i_vel[:, :, active_pods].sum(dim=(1, 2))
                 self._iter_metrics[:, 5] += i_dmg[:, :, active_pods].sum(dim=(1, 2))
                 
+                # New Metrics: Zone (13) and Intercept (14)
+                if 'denial_zone' in infos:
+                    i_zone = infos['denial_zone'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                    self._iter_metrics[:, 13] += i_zone[:, :, active_pods].sum(dim=(1, 2))
+                    
+                if 'blocker_intercept' in infos:
+                    i_int = infos['blocker_intercept'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                    self._iter_metrics[:, 14] += i_int[:, :, active_pods].sum(dim=(1, 2))
+                
                 # 5. Max Streak
                 # Max over (Envs, ActivePods)
                 # i_streak_active = i_streak[:, :, active_pods]
@@ -1865,18 +1932,30 @@ class PPOTrainer:
                 # Only check active pods
                 streak_active = i_streak[:, :, active_pods]
                 # Max across Envs and Pods per agent
+                # Max across Envs and Pods per agent
                 batch_max = streak_active.amax(dim=(1, 2)) # [Pop]
                 self._iter_max_streak = torch.maximum(self._iter_max_streak, batch_max)
 
-                # 6. Efficiency
-                # Filter CP1 Farmers (streak > 0)
+                # [FIX] Retrieve Role Snapshot from Infos (Before Update)
+                # infos['is_runner'] is [TotalEnvs, 4] -> Reshape [Pop, EPA, 4]
+                if 'is_runner' in infos:
+                    is_run_snap = infos['is_runner'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                else:
+                    # Fallback (Unsafe if roles rotated)
+                    is_run_snap = self.env.is_runner.view(self.config.pop_size, self.config.envs_per_agent, 4)
+                
+                # Active Pods Role Mask
+                is_run_active = is_run_snap[:, :, active_pods].float() # [Pop, EPA, N_Active]
+
+                # 6. Efficiency (Runners Only)
+                # Filter CP1 Farmers (streak > 0) AND Is Runner
                 i_steps = infos['cp_steps'].view(self.config.pop_size, self.config.envs_per_agent, 4)[:, :, active_pods]
                 
-                # Mask: steps > 0 AND streak > 0
+                # Mask: steps > 0 AND streak > 0 AND is_runner
                 # We need corresponding streak for active pods
                 s_active = i_streak[:, :, active_pods]
                 
-                eff_mask = (i_steps > 0) & (s_active > 0)
+                eff_mask = (i_steps > 0) & (s_active > 0) & (is_run_active > 0.5)
                 
                 # Sum Steps where mask is true
                 # We can just multiply steps * mask.float()
@@ -1907,12 +1986,12 @@ class PPOTrainer:
                 wins = (done_mask & (w_reshaped == 0)).float().sum(dim=1)
                 matches = done_mask.float().sum(dim=1)
                 
-                # [NEW] Denials (Done & Winner == -1)
-                denials = (done_mask & (w_reshaped == -1)).float().sum(dim=1)
+                # [NEW] Denials (Done & Winner == -1) -> MOVED TO LOOP
+                # denials = (done_mask & (w_reshaped == -1)).float().sum(dim=1)
                 
-                self._iter_metrics[:, 8] += wins
-                self._iter_metrics[:, 9] += matches
-                self._iter_metrics[:, 10] += denials
+
+                # self._iter_metrics[:, 10] += denials -> MOVED
+
                 
                 # [NEW] Separation of Denominators
                 # We need to know: Was I a Runner? Was I a Blocker?
@@ -1927,7 +2006,8 @@ class PPOTrainer:
                 # "Denial Rate" = Denials / Blocker Episodes.
                 
                 # Reshape is_runner [TotalEnvs, 4] -> [Pop, EnvsPerAgent, 4]
-                is_run_reshaped = self.env.is_runner.view(self.config.pop_size, self.config.envs_per_agent, 4)
+                # [FIX] Use Snapshot
+                is_run_reshaped = is_run_snap
                 
                 # We only care about ACTIVE pods for this agent.
                 # active_pods is a list of indices e.g. [0, 1]
@@ -1941,6 +2021,7 @@ class PPOTrainer:
                 # If separate envs (Duel), I am Runner in Envs 0..N/2, Blocker in N/2..N
                 runner_matches = 0
                 blocker_matches = 0
+                denials = 0
                 
                 for pod_idx in active_pods:
                     # is_run_reshaped[:, :, pod_idx] is 1 if runner, 0 if blocker
@@ -1952,7 +2033,32 @@ class PPOTrainer:
                     # If done, and this pod was Runner -> Runner Match ++
                     runner_matches += (done_mask.float() * is_r).sum(dim=1)
                     blocker_matches += (done_mask.float() * is_b).sum(dim=1)
+                    
+                    # [FIX] Denials: Only count if I was a Blocker AND it was a Timeout (Winner == -1)
+                    # Denials = Done & Winner==-1 & IsBlocker
+                    is_timeout = (w_reshaped == -1)
+                    denials += (done_mask.float() * is_timeout.float() * is_b).sum(dim=1)
 
+                # [NEW] Blocker Collisions
+                # infos['collision_flags'] is [TotalEnvs, 4] -> [Pop, EPA, 4]
+                if 'collision_flags' in infos:
+                    col_flags = infos['collision_flags'].view(self.config.pop_size, self.config.envs_per_agent, 4)
+                    col_active = col_flags[:, :, active_pods] # [Pop, EPA, N_Active]
+                    
+                    # Count collisions ONLY if Blocker?
+                    # "Blocker Score" = collisions while blocking.
+                    # Mask with (1 - is_run_active)
+                    is_block_active = 1.0 - is_run_active
+                    
+                    # Sum collision steps
+                    blocker_col_steps = (col_active * is_block_active).sum(dim=(1, 2))
+                    self._iter_metrics[:, 15] += blocker_col_steps
+
+
+                self._iter_metrics[:, 8] += wins
+                self._iter_metrics[:, 9] += matches
+                # Index 10 is Denials
+                self._iter_metrics[:, 10] += denials 
                 self._iter_metrics[:, 11] += runner_matches
                 self._iter_metrics[:, 12] += blocker_matches
                 
@@ -2156,7 +2262,17 @@ class PPOTrainer:
                     self.population[i]['laps_score'] += int(m[2])
                     self.population[i]['checkpoints_score'] += int(m[3])
                     self.population[i]['avg_runner_vel'] += m[4]
-                    self.population[i]['avg_blocker_dmg'] += m[5]
+                    # Index 5 repurposed from 'avg_blocker_dmg' to 'avg_denial_rew'
+                    self.population[i]['avg_blocker_dmg'] += m[5] 
+                    
+                    # [NEW] Zone and Intercept
+                    if 'avg_denial_zone' not in self.population[i]: self.population[i]['avg_denial_zone'] = 0.0
+                    self.population[i]['avg_denial_zone'] += m[13]
+                    
+                    if 'avg_intercept_rew' not in self.population[i]: self.population[i]['avg_intercept_rew'] = 0.0
+                    self.population[i]['avg_intercept_rew'] += m[14] 
+                    # Note: We keep the key 'avg_blocker_dmg' in population dict to avoid breaking legacy loads/restarts.
+                    # But conceptually it now holds Denial Reward sum.
                     
                     # Logic needs to account for max streak being tracked per step? 
                     # Yes, we did max over batch per step accumulator.
@@ -2172,6 +2288,7 @@ class PPOTrainer:
                     self.population[i]['denials'] += int(m[10])
                     self.population[i]['runner_matches'] += int(m[11])
                     self.population[i]['blocker_matches'] += int(m[12])
+                    self.population[i]['blocker_collisions'] += int(m[15])
 
                     # Recalculate EMAs with correct denominators
                     runner_matches_iter = int(m[11])
@@ -2224,7 +2341,8 @@ class PPOTrainer:
             next_raw_en = all_en[active_pods].view(-1, 2, 14)
             next_raw_cp = all_cp[active_pods].view(-1, 10)
             
-            next_norm_self = self.rms_self(next_raw_self, fixed=True)
+            # next_norm_self = self.rms_self(next_raw_self, fixed=True)
+            next_norm_self = self._normalize_self_selective(next_raw_self, fixed=True)
             
             next_norm_tm = self.rms_ent(next_raw_tm, fixed=True)
             B_e, N_e, D_e = next_raw_en.shape

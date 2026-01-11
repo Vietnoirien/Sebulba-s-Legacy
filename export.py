@@ -411,9 +411,13 @@ class N:
                 dx_b=phb[0]+sum(o[j]*phw[j] for j in range(16))
                 dy_b=phb[1]+sum(o[j]*phw[16+j] for j in range(16))
                 
-                # Average Prediction
-                dx = (dx_r + dx_b) * 0.5
-                dy = (dy_r + dy_b) * 0.5
+                # Select Prediction based on Role (rv)
+                # rv==0: Runner, rv==1: Blocker
+                if rv == 0:
+                     dx, dy = dx_r, dy_r
+                else:
+                     dx, dy = dx_b, dy_b
+                     
                 preds.append((dx,dy))
                 
         # Read Experts (ALL WEIGHTS MUST BE CONSUMED)

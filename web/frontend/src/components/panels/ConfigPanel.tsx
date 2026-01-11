@@ -35,7 +35,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v18', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v21', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -59,30 +59,32 @@ export const ConfigPanel: React.FC = () => {
         team_spirit: 0.0
     })
 
-    const [rewardScaling, setRewardScaling] = useLocalStorage('spt2_config_rewardScaling_v1', {
-        collision_blocker_scale: 2.0,
-        intercept_progress_scale: 1.0,
-        goalie_penalty: 500.0,
+    const [rewardScaling, setRewardScaling] = useLocalStorage('spt2_config_rewardScaling_v7', {
+        collision_blocker_scale: 50.0,
+        intercept_progress_scale: 0.05,
+        goalie_penalty: 0.0,
         velocity_scale_const: 0.001,
-        orientation_threshold: 0.5
+        orientation_threshold: 0.5,
+        velocity_denial_weight: 100.0,
+        dynamic_reward_bonus: 1800.0
     })
 
 
-    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v5', {
+    const [curriculum, setCurriculum] = useLocalStorage('spt2_config_curriculum_v6', {
         stage: 0,
         difficulty: 0.0
     })
 
-    const [hyperparams, setHyperparams] = useLocalStorage('spt2_config_hyperparams_v2', {
-        lr: 1e-4,
+    const [hyperparams, setHyperparams] = useLocalStorage('spt2_config_hyperparams_v4', {
+        lr: 1.5e-4,
         ent_coef: 0.01
     })
 
-    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v17', {
+    const [transitions, setTransitions] = useLocalStorage('spt2_config_transitions_v21', {
         nursery_consistency_threshold: 500.0,
         solo_efficiency_threshold: 50.0,
-        solo_min_win_rate: 0.75,
-        solo_consistency_threshold: 3000.0,
+        solo_min_win_rate: 0.30,
+        solo_consistency_threshold: 1800.0,
 
         // Stage 2 -> 3
         duel_graduation_difficulty: 0.85,
@@ -102,11 +104,12 @@ export const ConfigPanel: React.FC = () => {
     })
 
     // Bot Config
-    const [botConfig, setBotConfig] = useLocalStorage('spt2_config_bot_v3', {
+    const [botConfig, setBotConfig] = useLocalStorage('spt2_config_bot_v4', {
         intercept_offset_scale: 500.0,
         ramming_speed_scale: 20.0,
         difficulty_noise_scale: 30.0,
-        thrust_scale: 60.0
+        thrust_scale: 75.0,
+        thrust_base: 25.0
     })
 
     // Presets
@@ -150,7 +153,8 @@ export const ConfigPanel: React.FC = () => {
             curriculum: curriculum,
             hyperparameters: hyperparams,
             transitions: transitions,
-            bot_config: botConfig
+            bot_config: botConfig,
+            reward_scaling_config: rewardScaling
         }
 
         try {
@@ -279,9 +283,14 @@ export const ConfigPanel: React.FC = () => {
                                 onChange={(e) => setBotConfig(prev => ({ ...prev, intercept_offset_scale: parseFloat(e.target.value) }))} />
                             <Slider label="RAMMING AGGRESSION" min={0} max={100} step={1} value={botConfig.ramming_speed_scale}
                                 onChange={(e) => setBotConfig(prev => ({ ...prev, ramming_speed_scale: parseFloat(e.target.value) }))} />
+                            <Slider label="THRUST BASE" min={0} max={100} step={1} value={botConfig.thrust_base || 25.0} // Fallback just in case
+                                onChange={(e) => setBotConfig(prev => ({ ...prev, thrust_base: parseFloat(e.target.value) }))} />
+                            <Slider label="THRUST SCALE" min={0} max={100} step={1} value={botConfig.thrust_scale}
+                                onChange={(e) => setBotConfig(prev => ({ ...prev, thrust_scale: parseFloat(e.target.value) }))} />
                         </div>
                     </div>
                 )}
+
 
                 <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
                     <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Graduation Criteria</h3>
@@ -295,7 +304,7 @@ export const ConfigPanel: React.FC = () => {
                         <>
                             <Slider label="EFFICIENCY SCORE (LOWER IS BETTER)" min={10} max={60} step={1} value={transitions.solo_efficiency_threshold}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_efficiency_threshold: parseFloat(e.target.value) }))} />
-                            <Slider label="MIN WIN RATE" min={0.5} max={1.0} step={0.01} value={transitions.solo_min_win_rate || 0.75} valueDisplay={((transitions.solo_min_win_rate || 0.75) * 100).toFixed(0) + "%"}
+                            <Slider label="MIN WIN RATE" min={0.0} max={1.0} step={0.01} value={transitions.solo_min_win_rate} valueDisplay={((transitions.solo_min_win_rate) * 100).toFixed(0) + "%"}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_min_win_rate: parseFloat(e.target.value) }))} />
                             <Slider label="CONSISTENCY" min={1000} max={5000} step={50} value={transitions.solo_consistency_threshold}
                                 onChange={(e) => setTransitions(prev => ({ ...prev, solo_consistency_threshold: parseFloat(e.target.value) }))} />
@@ -439,6 +448,21 @@ export const ConfigPanel: React.FC = () => {
                                 onChange={(e) => setWeight(RW.ZONE, parseFloat(e.target.value))} />
                             <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit}
                                 onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />
+                        </div>
+
+                        {/* Advanced Scaling */}
+                        <div className="bg-slate-800/30 p-3 rounded border border-slate-700 space-y-3">
+                            <h3 className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Advanced Scaling</h3>
+                            <Slider label="VELOCITY DENIAL WEIGHT (SOTA)" min={0} max={1000} step={10} value={rewardScaling.velocity_denial_weight}
+                                onChange={(e) => setRewardScaling(prev => ({ ...prev, velocity_denial_weight: parseFloat(e.target.value) }))} />
+                            <Slider label="GOALIE PENALTY" min={0} max={1000} step={50} value={rewardScaling.goalie_penalty}
+                                onChange={(e) => setRewardScaling(prev => ({ ...prev, goalie_penalty: parseFloat(e.target.value) }))} />
+                            <Slider label="BLOCKER COLLISION SCALE" min={0} max={100} step={1.0} value={rewardScaling.collision_blocker_scale}
+                                onChange={(e) => setRewardScaling(prev => ({ ...prev, collision_blocker_scale: parseFloat(e.target.value) }))} />
+                            <Slider label="INTERCEPT SCALE" min={0} max={5} step={0.1} value={rewardScaling.intercept_progress_scale}
+                                onChange={(e) => setRewardScaling(prev => ({ ...prev, intercept_progress_scale: parseFloat(e.target.value) }))} />
+                            <Slider label="DYNAMIC BONUS" min={0} max={5000} step={100} value={rewardScaling.dynamic_reward_bonus || 1800.0}
+                                onChange={(e) => setRewardScaling(prev => ({ ...prev, dynamic_reward_bonus: parseFloat(e.target.value) }))} />
                         </div>
                     </div>
                 )}

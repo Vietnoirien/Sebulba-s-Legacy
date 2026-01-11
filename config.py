@@ -45,8 +45,8 @@ from typing import List, Optional, Dict
 @dataclass
 class BotConfig:
     difficulty_noise_scale: float = 30.0
-    thrust_base: float = 40.0 # Increased from 20.0
-    thrust_scale: float = 60.0 # Reduced from 80.0 (Total max 100)
+    thrust_base: float = 25.0 # Reduced from 40.0 (User Request)
+    thrust_scale: float = 75.0 # (Total max 100)
     intercept_offset_scale: float = 500.0
     ramming_speed_scale: float = 20.0
 
@@ -60,10 +60,11 @@ class RewardScalingConfig:
     orientation_threshold: float = 0.5
     
     # Blocker SOTA Params
-    collision_blocker_scale: float = 2.0
-    intercept_progress_scale: float = 1.0
-    goalie_penalty: float = 500.0
+    collision_blocker_scale: float = 50.0 # Boosted to ~500 reward per hit (User Request)
+    intercept_progress_scale: float = 0.05 # Reduced from 1.0 to 0.05 (Target ~25 reward per step)
+    goalie_penalty: float = 0.0 # Default Disabled (User Request)
     dynamic_reward_bonus: float = 1800.0
+    velocity_denial_weight: float = 100.0 # New SOTA Reward (10k / 100 steps)
 
 @dataclass
 class TrainingConfig:

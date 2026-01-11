@@ -1,7 +1,7 @@
 # System Documentation: Observations & Rewards
 
 > [!NOTE]
-> This document details the currently implemented Observation Space and Reward Function as of **Tier 2 ("The Wrestler")** update.
+> This document details the currently implemented Observation Space and Reward Function as of **Tier 3 ("SOTA Blocker")** update.
 
 ## 1. Observation Space
 The model consumes a hierarchical observation set processed by the **DeepSets** architecture.
@@ -66,21 +66,30 @@ Rewards are composed of **Dense** (per-step) and **Sparse** (event-based) signal
 ### Core Rewards
 *   **Progress**: Velocity projected towards next checkpoint.
 *   **Checkpoint**: Bonus (+500) for passing CP.
+*   **Lap Completion**: Bonus (+2000) for completing a lap.
 *   **Win/Loss**: Large sparse reward (+10k/-2k).
 
-### Tier 2 Interaction Rewards ("The Wrestler")
+### Tier 3 Interaction Rewards ("SOTA Blocker")
 Specific logic for **Blocker** agents (Pod 1/3) to create effective interference.
 
-#### A. Zone Control (Intercept)
+#### A. Denial Reward (Timeout)
+Explicit reward for forcing the enemy to timeout.
+*   **Reward**: **+10,000** (Same as a Win).
+*   **Condition**: Opponent timeout counter reaches 0.
+*   **Effect**: Turns "Denial" into a primary objective equal to racing.
+
+#### B. Zone Control (Safe Dynamic Reward)
 Rewards the blocker for positioning themselves in the **future path** of the enemy.
 *   **Logic**: Projects `Vector(Me -> Enemy)` onto `Vector(Enemy -> Target)`.
-*   **Effect**: If positive, I am "downstream" of the enemy -> Reward. Encourages "Parking" and "Screening" rather than just chasing.
+*   **Improvement**: Uses "Velocity Projection" to ensure the blocker is actively moving to intercept, preventing static position camping.
 
-#### B. Timeout Pressure
-Multiplies denial rewards based on the opponent's desperation.
-*   **Condition**: `Enemy_Timeout < 25`.
-*   **Multiplier**: **2.0x**.
-*   **Effect**: Aggression scales up when the opponent is vulnerable to elimination.
+#### C. Collision Mechanics & Pinning
+*   **Energy Transfer**: Reward scales with relative velocity. Hard hits > Soft touches.
+*   **Pinning**: Continuous reward for pressing enemy against walls (low relative velocity but high force implication).
+*   **Anti-Help**: Negative reward if collision pushes the enemy *closer* to their objective.
+
+#### D. Magnet / Proximity
+Dense shaping reward to pull the blocker towards the target runner to speed up early learning.
 
 ---
 
@@ -88,6 +97,7 @@ Multiplies denial rewards based on the opponent's desperation.
 - **v1.0**: Baseline implementation. Simple "Chase" blocking.
 - **v2.0 (Tier 1: Glasses)**: Expanded `cp_obs` (10-dim). Solved "Myopic Driver" issue.
 - **v2.1 (Tier 2: Wrestler)**: Expanded `entity_obs` (14-dim). Implemented Zone Control & Timeout Pressure.
+- **v2.2 (Tier 3: SOTA Blocker)**: Added Denial Reward, Safe Dynamic Zone Control, Collision Energy Transfer, Magnet.
 
 ## 4. Pending / Future
 - **TTC (Time To Collision)**: Explicit physics calculation for input (currently implicit).

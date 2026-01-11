@@ -96,12 +96,34 @@ def test_rewards():
     # Runner moving North (0, 800) at 1000, 1000.
     # Blocker Stationary at 1000, 2000 (In Front).
     # Alignment = 0 (v_b=0). Position Bias = In Front.
-    env.physics.pos[env_intercept, 0] = torch.tensor([1000.0, 2000.0], device=device)
-    env.physics.vel[env_intercept, 0] = torch.tensor([0.0, 0.0], device=device)
+    # --- Scenario 7: Intercepting (Head-On Collision High Speed) ---
+    # Runner North (800). Blocker South (-800).
+    # Pos: En(1000), Me(1700). Dist 700 (Collision).
+    env.physics.pos[env_intercept, 0] = torch.tensor([1000.0, 1700.0], device=device)
+    env.physics.vel[env_intercept, 0] = torch.tensor([0.0, -800.0], device=device)
     env.physics.pos[env_intercept, 2] = torch.tensor([1000.0, 1000.0], device=device)
     env.physics.vel[env_intercept, 2] = torch.tensor([0.0, 800.0], device=device)
     env.next_cp_id[env_intercept, 2] = 1
     env.checkpoints[env_intercept, 1] = torch.tensor([1000.0, 5000.0], device=device)
+    
+    # --- Scenario 8: Perfect Pin (Head-On Low Speed) ---
+    # Runner North (100). Blocker South (-100).
+    # Pos: En(1000), Me(1700). Dist 700.
+    # Should yield High Pin Quality + Drain Reward.
+    # We need to increase num_envs to 8.
+    
+    # Wait, modifying num_envs requires changing init call line 17.
+    # I will stick to 7 envs and reuse 'env_escort' (Scenario 6) as Perfect Pin for now,
+    # since Escort was verified negative. Or reuse 'helping'.
+    # I'll just change local var 'env_escort' to 'env_perfect_pin'.
+    
+    # Reuse env 5 (was escort, change to Perfect Pin)
+    env.physics.pos[env_escort, 0] = torch.tensor([1000.0, 1700.0], device=device)
+    env.physics.vel[env_escort, 0] = torch.tensor([0.0, -100.0], device=device) 
+    env.physics.pos[env_escort, 2] = torch.tensor([1000.0, 1000.0], device=device)
+    env.physics.vel[env_escort, 2] = torch.tensor([0.0, 100.0], device=device)
+    env.next_cp_id[env_escort, 2] = 1
+    env.checkpoints[env_escort, 1] = torch.tensor([1000.0, 5000.0], device=device)
     
     # --- STEP ---
     # No actions
@@ -117,30 +139,39 @@ def test_rewards():
     print("Stepping...")
     rewards, dones, infos = env.step(actions, weights, tau=0.0)
     
+    if 'blocker_damage' in infos:
+        dmg = infos['blocker_damage']
+        print(f"\n[METRIC CHECK] Blocker Damage Metric (All Envs):")
+        print(dmg)
+        print(f"  Sum: {dmg.sum().item()}")
+    else:
+        print("\n[METRIC CHECK] 'blocker_damage' key MISSING in infos!")
+    
     # --- ANALYZE REWARDS ---
     
     print("\n--- RESULTS ---")
     
     r_passive = rewards[env_passive, 0].item()
-    print(f"Scenario 1 (Passive): Reward = {r_passive:.2f}")
+    print(f"Scenario 1 (Passive): Reward = {r_passive:.2f} (Expected Negative due to Denial penalty)")
     
     r_active = rewards[env_active, 0].item()
     print(f"Scenario 2 (Active Correct): Reward = {r_active:.2f}")
     
     r_fail = rewards[env_fail, 0].item()
-    print(f"Scenario 3 (Failed Block): Reward = {r_fail:.2f}")
+    print(f"Scenario 3 (Failed Block): Reward = {r_fail:.2f} (Expected Large Negative)")
     
     r_helping = rewards[env_helping, 0].item()
-    print(f"Scenario 4 (Helping): Reward = {r_helping:.2f}")
+    print(f"Scenario 4 (Helpers/Pushing): Reward = {r_helping:.2f} (Expected Positive if fast? Mixed due to Anti-Help)")
     
     r_pinning = rewards[env_pinning, 0].item()
-    print(f"Scenario 5 (Pinning): Reward = {r_pinning:.2f}")
+    print(f"Scenario 5 (Rear-End Push): Reward = {r_pinning:.2f} (Expected Penalized 'Bad Contact')")
+    # Note: Previous 'Pinning' was actually pushing from behind (Blk Fast North, Run Slow North)
     
     r_escort = rewards[env_escort, 0].item()
-    print(f"Scenario 6 (Escort): Reward = {r_escort:.2f} (Expect Low/Zero)")
+    print(f"Scenario 6 (Perfect Pin / Head-On Low Speed): Reward = {r_escort:.2f} (Expected HIGH Positive)")
     
     r_intercept = rewards[env_intercept, 0].item()
-    print(f"Scenario 7 (Intercept): Reward = {r_intercept:.2f} (Expect High Zone)")
+    print(f"Scenario 7 (High Speed Collision): Reward = {r_intercept:.2f} (Expected Mixed: Impact + Denial Penalty)")
 
 if __name__ == "__main__":
     try:

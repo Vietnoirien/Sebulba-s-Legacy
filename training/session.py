@@ -350,10 +350,9 @@ class TrainingSession:
             if "transitions" in config:
                 trans = config["transitions"]
                 # Update known keys
-                for k in ["solo_efficiency_threshold", "solo_consistency_threshold",
+                for k in ["solo_efficiency_threshold", "solo_consistency_threshold", "solo_min_win_rate",
                           "duel_graduation_difficulty", "duel_graduation_win_rate", "duel_graduation_checks",
-                          "duel_graduation_difficulty", "duel_graduation_win_rate", "duel_graduation_checks",
-                          "duel_graduation_denial_rate", "duel_graduation_blocker_impact",
+                          "duel_graduation_denial_rate", "duel_graduation_collision_steps", "duel_progression_collision_steps",
                           "team_graduation_difficulty", "team_graduation_win_rate", "team_graduation_checks"]:
                      if k in trans:
                          setattr(self.trainer.curriculum_config, k, float(trans[k]))
@@ -367,6 +366,14 @@ class TrainingSession:
                          if hasattr(self.trainer.env, "bot_config"):
                              setattr(self.trainer.env.bot_config, k, float(bot_cfg[k]))
                 print(f"Bot Config Updated: {self.trainer.env.bot_config}")
+
+            if "reward_scaling_config" in config:
+                rs_cfg = config["reward_scaling_config"]
+                for k in ["collision_blocker_scale", "intercept_progress_scale", "goalie_penalty", "velocity_denial_weight"]:
+                     if k in rs_cfg:
+                         if hasattr(self.trainer.env, "reward_scaling_config"):
+                             setattr(self.trainer.env.reward_scaling_config, k, float(rs_cfg[k]))
+                print(f"Reward Scaling Config Updated: {self.trainer.env.reward_scaling_config}")
 
     async def _playback_loop(self):
         print("Starting Playback Loop...")

@@ -414,25 +414,45 @@ DEFAULT_CONFIG = {
     "rewards": {
          "weights": {
              "0": 10000.0, "1": 2000.0, "2": 500.0, "3": 50.0, "4": 0.2,
-             "5": 0.5, "6": 5.0, "7": 10.0, "8": 1.0, "9": 10.0, "10": 5.0,
-             "11": 5.0, "12": 10.0, "13": 500.0, "14": 2000.0, "15": 10000.0
+             "5": 0.5, "6": 10.0, "7": 10.0, "8": 1.0, "9": 10.0, "10": 5.0,
+             "11": 5.0, "12": 10.0, "13": 500.0, "14": 2000.0, "15": 10000.0, "16": 5.0
          },
          "tau": 0.0,
          "team_spirit": 0.0
     },
     "curriculum": {"stage": 0, "difficulty": 0.0},
-    "hyperparameters": {"lr": 1e-4, "ent_coef": 0.01},
+    "hyperparameters": {"lr": 1.5e-4, "ent_coef": 0.01},
     "transitions": {
          "nursery_consistency_threshold": 500.0,
-         "solo_efficiency_threshold": 40.0,
-         "solo_consistency_threshold": 3000.0,
-         "duel_graduation_difficulty": 0.80,
-         "duel_graduation_win_rate": 0.65,
+         "solo_efficiency_threshold": 50.0,
+         "solo_consistency_threshold": 1800.0,
+         "solo_min_win_rate": 0.30,
+         "duel_graduation_difficulty": 0.85,
+         "duel_graduation_win_rate": 0.70,
          "duel_graduation_checks": 5,
+         "duel_graduation_denial_rate": 0.05,
+         "duel_graduation_collision_steps": 60,
+         "duel_progression_collision_steps": 30,
          "team_graduation_difficulty": 0.85,
          "team_graduation_win_rate": 0.70,
          "team_graduation_checks": 5,
          "team_start_difficulty": 0.6
+    },
+    "bot_config": {
+        "difficulty_noise_scale": 30.0,
+        "thrust_base": 25.0,
+        "thrust_scale": 75.0,
+        "intercept_offset_scale": 500.0,
+        "ramming_speed_scale": 20.0
+    },
+    "reward_scaling_config": {
+        "velocity_scale_const": 1.0 / 1000.0,
+        "orientation_threshold": 0.5,
+        "collision_blocker_scale": 50.0,
+        "intercept_progress_scale": 0.05,
+        "goalie_penalty": 0.0,
+        "dynamic_reward_bonus": 1800.0,
+        "velocity_denial_weight": 100.0
     }
 }
 

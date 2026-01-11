@@ -14,10 +14,9 @@ The `PodActor` now features a Hard-Gated Mixture of Experts (MoE):
 **Configuration:**
 - **Active Pods**: `[0]` (Single Agent)
 - **Opponents**: None (Inactive/Despawned)
-- **Role Assignment**: Dynamic Fallback.
-    - Since Pod 1 is inactive (positioned at infinity), its progress score is minimal.
-    - Pod 0 (Active) trivially beats Pod 1.
-    - Result: `is_runner[0] = True`.
+- **Role Assignment**: **Explicit (Logic Override)**
+    - Config explicitly sets `is_runner[0] = True` for all environments in this stage.
+    - Other pods are deactivated or ignored.
 
 **Policy Update Profile:**
 - **Active Role**: **Runner (100%)**
@@ -48,7 +47,7 @@ The `PodActor` now features a Hard-Gated Mixture of Experts (MoE):
 
 ---
 
-### Stage 3: Team & Stage 4: League
+### Stage 3: Team
 **Configuration:**
 - **Active Pods**: `[0, 1, 2, 3]` (2v2)
 - **Training Batch**: Multi-Agent (Contains observations from both Pod 0 and Pod 1).
@@ -62,6 +61,23 @@ The `PodActor` now features a Hard-Gated Mixture of Experts (MoE):
 - **Active Branches**:
     - **BOTH** branches update simultaneously.
 - **Goal**: Specialized refinement. Pod 0 refines the Runner expert; Pod 1 refines the Blocker expert.
+
+---
+
+### Stage 4: League
+**Configuration:**
+- **Active Pods**: `[0, 1, 2, 3]` (Competitive)
+- **Role Assignment**: **Dynamic (Hysteresis)**
+    - Roles are inferred from real-time progress.
+    - The agent leading the team is designated **Runner**; the trailer is **Blocker**.
+    - **Hysteresis**: Role swaps are rate-limited (locked for 50 steps) to prevent oscillation.
+
+**Policy Update Profile:**
+- **Active Role**: **Dynamic / Hybrid**
+    - Agents switch experts mid-episode as the race evolution dictates.
+- **Active Branches**:
+    - Both experts receive gradients depending on the specific agent's momentary role.
+- **Goal**: Generalization. The agent must handle dynamic role transitions and strategic fluidity.
 
 ## Conclusion
 The implementation correctly aligns with the curriculum requirements:

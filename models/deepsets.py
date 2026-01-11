@@ -414,7 +414,16 @@ class PodActor(nn.Module):
         # [AUX] Prediction (Shared Head, Dual Input)
         pred_delta_run = self.enemy_pred_head(en_lat_run)
         pred_delta_blk = self.enemy_pred_head(en_lat_blk)
-        pred_delta = (pred_delta_run + pred_delta_blk) / 2.0
+        
+        # [FIX] Select Prediction based on Role to direct gradients to the CORRECT Expert Encoder
+        # Previously: (Run + Blk) / 2.0  -> Leaked gradients to inactive expert
+        
+        # Expand role mask: [B*S] -> [B*S*N, 1]
+        # flat_role is [B*S]
+        mask_blk_pred = (flat_role == 1).float().view(bs_en, 1, 1).expand(bs_en, n_en, 1).reshape(bs_en * n_en, 1)
+        mask_run_pred = 1.0 - mask_blk_pred
+        
+        pred_delta = pred_delta_run * mask_run_pred + pred_delta_blk * mask_blk_pred
         
         # Pool
         en_lat_run_grouped = en_lat_run.view(bs_en, n_en, -1)

@@ -156,14 +156,13 @@ class UnifiedDuelStage(Stage):
         if competence < 0.10:
             nov = 0.0
             
-        # [EVO FIX] Use Blocker Damage (Impact) as dense signal for blocking
-        # This helps evolution find the sparse 'Denial' event.
-        impact = p.get('ema_blocker_dmg', 0.0)
+        # [EVO FIX] Use Blocker Score (Unified Metric)
+        # This replaces legacy 'impact' and 'denials' raw usage
+        blocker_score = p.get('ema_blocker_score', 0.0)
 
         return [
             wins,
-            denials,
-            impact,
+            blocker_score,
             -p.get('ema_efficiency', 999.0),
             nov
         ]
