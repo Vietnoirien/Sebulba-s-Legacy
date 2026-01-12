@@ -368,6 +368,12 @@ class RunnerStage(Stage):
             
             if passed:
                  self.grad_consistency_counter += 1
+                 
+                 # Early Graduation for Elite Performance
+                 if rec_wr >= 0.99:
+                      reason = f"Elite Performance: WR {rec_wr:.1%} >= 99% (Diff {trainer.env.bot_difficulty:.2f})"
+                      trainer.log(f">>> EARLY GRADUATION FROM RUNNER ACADEMY! {reason} <<<")
+                      return STAGE_TEAM, reason
             else:
                  self.grad_consistency_counter = 0
                  
@@ -406,7 +412,7 @@ class TeamStage(Stage):
         # Team Mode requires more time for complex strategies (Blocking/Coop) to emerge
         # and for the agent to stabilize its coordination policy.
         # 2 Iterations is too fast (aggressive culling). Increasing to 5.
-        return 5
+        return 4
 
     def get_active_pods(self) -> List[int]:
         return [0, 1]
@@ -484,18 +490,22 @@ class TeamStage(Stage):
                     trainer.log(f"-> Progress: Diff {trainer.env.bot_difficulty:.2f} (Capped at {max_diff})")
 
             # Graduation to League
-            if trainer.env.bot_difficulty >= self.config.team_graduation_difficulty:
+            # [FIX]: Require Full Team Spirit (1.0) before considering graduation
+            if trainer.team_spirit >= 1.0 and trainer.env.bot_difficulty >= self.config.team_graduation_difficulty:
                 min_wr = self.config.team_graduation_win_rate
                 checks = self.config.team_graduation_checks
                 
                 if rec_wr >= min_wr:
                     self.grad_consistency_counter += 1
                 else:
+                    # Reset consistency if spirit not ready (keep training)
+                    # Use warning log occasionally?
+                    # Determine progress of spirit annealing
                     self.grad_consistency_counter = 0
-                    
+                
                 if self.grad_consistency_counter >= checks:
-                    reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} (Diff {trainer.env.bot_difficulty:.2f}) for {checks} checks"
-                    trainer.log(f">>> UPGRADING TO STAGE 4: LEAGUE ({reason}) <<<")
+                    reason = f"Competence: WR {rec_wr:.2f} >= {min_wr} & Spirit {trainer.team_spirit:.1f} (Diff {trainer.env.bot_difficulty:.2f})"
+                    trainer.log(f">>> UPGRADING TO STAGE 5: LEAGUE ({reason}) <<<")
                     if auto:
                         trainer.env.stage_metrics["recent_games"] = 0
                         trainer.env.stage_metrics["recent_wins"] = 0

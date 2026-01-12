@@ -254,6 +254,10 @@ class TrainingSession:
                 if 'cp' in state:
                     self.trainer.rms_cp.load_state_dict(state['cp'])
                     
+                if 'team_spirit' in state:
+                    self.trainer.team_spirit = float(state['team_spirit'])
+                    self.trainer.log(f"Restored Team Spirit: {self.trainer.team_spirit:.2f}")
+                    
                 self.trainer.log(f"Successfully loaded normalization statistics from {rms_path}")
             except Exception as e:
                 self.trainer.log(f"Failed to load RMS stats from {rms_path}: {e}")

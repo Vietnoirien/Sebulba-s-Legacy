@@ -1078,7 +1078,8 @@ class PPOTrainer:
         torch.save({
             'self': self.rms_self.state_dict(),
             'ent': self.rms_ent.state_dict(),
-            'cp': self.rms_cp.state_dict()
+            'cp': self.rms_cp.state_dict(),
+            'team_spirit': self.team_spirit # Persist Spirit for resumption
         }, rms_path)
 
         # --- Auto-Flush Old Generations (Stage-Specific, Date-Based) ---

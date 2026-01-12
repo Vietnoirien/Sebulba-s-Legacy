@@ -468,21 +468,17 @@ class PodRacerEnv:
              return
              
         if self.curriculum_stage == STAGE_TEAM:
-             # Standard Team Config: Pod 0 Runner, Pod 1 Blocker
-             # Pod 2 Runner, Pod 3 Blocker (Opponent Team Standard)
-             self.is_runner[env_ids, 0] = True
-             self.is_runner[env_ids, 1] = False
-             self.is_runner[env_ids, 2] = True
-             self.is_runner[env_ids, 3] = False
-             return
+             # Standard Team Config: Adaptive
+             # Fall through to Progress Calculation below.
+             pass
 
         # Calculate Progress Score
         # Score = Laps * 1000 + NextCP * 10 + (1 - Dist/20000)
         # Higher is better
         
         # Gather data
-        laps = self.laps[env_ids] # [N, 4]
-        next_cp = self.next_cp_id[env_ids] # [N, 4]
+        # Use cps_passed for robust monotonic progress (handles lap wrap correctly)
+        cps = self.cps_passed[env_ids] # [N, 4]
         # Dist to next CP.
         # We can reuse self.prev_dist if valid, but reset might not have it yet?
         # reset calls update_progress_metric BEFORE this, so prev_dist is valid.
@@ -492,7 +488,7 @@ class PodRacerEnv:
         # Max map dist approx 20000.
         dist_score = 1.0 - (dists / 20000.0)
         
-        total_score = (laps * 1000.0) + (next_cp * 10.0) + dist_score
+        total_score = (cps * 1000.0) + dist_score
         
         # Compare Team 0: Pod 0 vs 1
         s0 = total_score[:, 0]
@@ -542,7 +538,7 @@ class PodRacerEnv:
              changed_env_ids = update_env_ids[env_changed]
              
              if len(changed_env_ids) > 0:
-                 self.role_lock_timer[changed_env_ids] = 50
+                 self.role_lock_timer[changed_env_ids] = 10
 
 
     def update_progress_metric(self, env_ids):
@@ -1098,16 +1094,8 @@ class PodRacerEnv:
             if passed.any():
                 pass_idx = torch.nonzero(passed).squeeze(-1)
                 
-                # Reset timeout
-                # Reset timeout
-                self.timeouts[pass_idx, i] = self.config.timeout_steps 
-                
-                # [FIX] Team Resets: In Stage 4 (Team), Runner resets Blocker's timer too.
-                # Just reset the whole team? Or specifically the teammate?
-                # Teammate index = i ^ 1
-                if self.curriculum_stage >= STAGE_TEAM:
-                     mate_idx = i ^ 1
-                     self.timeouts[pass_idx, mate_idx] = self.config.timeout_steps 
+                # Resets are handled in Time Extension block below
+ 
                 
                 # Determine Next CP and Lap Logic
                 # Use cached 'next_ids' (OLD target)
@@ -1307,6 +1295,18 @@ class PodRacerEnv:
         elif self.curriculum_stage == STAGE_TEAM:
             # Stage 4: Team 2v2.
             # Strategic Timeout Activated: Any pod triggers reset (Global Timeout).
+            # [FIX] Determine Winner on Timeout
+            # If Team 0 times out -> Team 1 Wins
+            # If Team 1 times out -> Team 0 Wins
+            t0_out = (timed_out[:, 0] | timed_out[:, 1])
+            t1_out = (timed_out[:, 2] | timed_out[:, 3])
+            
+            win_1 = t0_out & ~t1_out
+            self.winners[win_1] = 1
+            
+            win_0 = t1_out & ~t0_out
+            self.winners[win_0] = 0
+            
             # [FIX] Added Denial Reward for Timeout
             env_timed_out = timed_out.any(dim=1)
             

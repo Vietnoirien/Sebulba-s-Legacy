@@ -145,15 +145,23 @@ class CurriculumManager:
         
         if self.current_stage_id < STAGE_TEAM:
             current = 0.0
-        # Else: Retain current value (updated via on_evolution_step)
+        elif self.current_stage_id == STAGE_LEAGUE:
+            current = 1.0
             
         return current
 
     def on_evolution_step(self, trainer):
         """
         Called when population evolution occurs.
-        Increments team_spirit by 0.01 if in Team Stage.
+        Increments team_spirit by 0.01 (Standard) or 0.05 (Turbo if Difficulty Maxed).
         """
         if self.current_stage_id >= STAGE_TEAM:
-            # Anneal by +0.01 per evolution
-            trainer.team_spirit = min(1.0, trainer.team_spirit + 0.01)
+            # Dynamic Annealing
+            # If Bot Difficulty is Maxed (Ready for Graduation), speed up Spirit Annealing
+            grad_diff = self.config.team_graduation_difficulty
+            if trainer.env.bot_difficulty >= grad_diff:
+                 step = 0.05 # Turbo Spirit: 20 evolutions -> 100%
+            else:
+                 step = 0.01 # Standard Spirit: 100 evolutions -> 100%
+            
+            trainer.team_spirit = min(1.0, trainer.team_spirit + step)
