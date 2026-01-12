@@ -415,7 +415,7 @@ DEFAULT_CONFIG = {
          "weights": {
              "0": 10000.0, "1": 2000.0, "2": 500.0, "3": 50.0, "4": 0.2,
              "5": 0.5, "6": 10.0, "7": 10.0, "8": 1.0, "9": 10.0, "10": 5.0,
-             "11": 5.0, "12": 10.0, "13": 500.0, "14": 2000.0, "15": 10000.0, "16": 5.0
+             "11": 5.0, "12": 10.0, "13": 500.0, "14": 2000.0, "15": 10000.0, "16": 10.0
          },
          "tau": 0.0,
          "team_spirit": 0.0
@@ -426,11 +426,11 @@ DEFAULT_CONFIG = {
          "nursery_consistency_threshold": 500.0,
          "solo_efficiency_threshold": 50.0,
          "solo_consistency_threshold": 1800.0,
-         "solo_min_win_rate": 0.30,
+         "solo_min_win_rate": 0.90,
          "duel_graduation_difficulty": 0.85,
          "duel_graduation_win_rate": 0.70,
          "duel_graduation_checks": 5,
-         "duel_graduation_denial_rate": 0.05,
+         "duel_graduation_denial_rate": 0.80,
          "duel_graduation_collision_steps": 60,
          "duel_progression_collision_steps": 30,
          "team_graduation_difficulty": 0.85,

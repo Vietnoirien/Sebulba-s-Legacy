@@ -61,9 +61,9 @@ class PPOTrainer:
         self.generation = 0
         self.iteration = 0
         
-        # Reward Weights [TotalEnvs, 15] - Per environment weights
-        # 15 = Win, Loss, CP, Scale, Progress, Runner, Blocker, StepPen, Orient, WrongWay, Mate, Prox, Magnet, Rank, Lap
-        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 17), device=self.device)
+        # Reward Weights [TotalEnvs, 18] - Per environment weights
+        # 18 = Win, Loss, CP, Scale, Progress, Runner, Blocker, StepPen, Orient, WrongWay, Mate, Prox, Magnet, Rank, Lap, Denial, Zone, ZonePressure
+        self.reward_weights_tensor = torch.zeros((self.config.num_envs, 18), device=self.device)
         
         # Normalization
         # Exclude Index 11 (Leader/is_runner) from Normalization
@@ -829,7 +829,7 @@ class PPOTrainer:
 
         else:
              # NSGA-II Logging
-             self.log(f"Pareto Fronts (Quality Gated > 20% WR): {[len(f) for f in fronts]}")
+             self.log(f"Pareto Fronts: {[len(f) for f in fronts]}")
              self.log(f"Elites (Rank 0, Crowded): {elite_ids}")
              
              if self.env.curriculum_stage == STAGE_DUEL_FUSED:
@@ -849,6 +849,10 @@ class PPOTrainer:
         # Full sort of population
         # Key: (Rank ASC, Crowding DESC)
         
+        # [EVO FIX] Removed Pre-Replacement Logic (Moved to Post-Sync)
+
+
+        
         # We want to keep Lower Rank (0 is best), Higher Crowding.
         sorted_pop_indices = list(range(self.config.pop_size))
         sorted_pop_indices.sort(key=lambda i: (self.population[i]['rank'], -self.population[i]['crowding']))
@@ -863,10 +867,13 @@ class PPOTrainer:
         num_parents = max(2, int(self.config.pop_size * 0.25))
         parent_candidates = sorted_pop_indices[:num_parents]
         
-        # Replacement Logic
-        # Replacement Logic
         with torch.no_grad():
-            for idx in cull_indices:
+            # [FIX] Disable Standard Evolution in Stage 2 (Unified Duel)
+            # We want to rely solely on Synthetic Hybrid Crossover + Gradient Descent here.
+            # Standard evolution tends to clone Pure Runners (High Wins), deleting any Blocker progress.
+            indices_to_replace = cull_indices
+            
+            for idx in indices_to_replace:
                 loser = self.population[idx]
                 
                 # Tournament Selection from candidates
@@ -933,7 +940,11 @@ class PPOTrainer:
         
         # Sync back to instances for saving/compatibility
         self.sync_vectorized_to_agents()
-                 
+
+        # [EVO FIX] Removed Synthetic Hybrid Crossover (User Request: Use Classic Method)
+        # The block previously here averaged Best Runner + Best Blocker policies.
+        # This is now disabled to rely on pure PBT and Gradient Descent.
+
         # 5. Save & Reset
         self.save_generation()
         
@@ -960,10 +971,6 @@ class PPOTrainer:
         
         # Reset Nursery Buffer
         self.nursery_metrics_buffer.zero_()
-        
-        # Reset Nursery Buffer
-        self.nursery_metrics_buffer.zero_()
-
             
         self.generation += 1
         # --- LEADER SELECTION (Performance Based) ---
@@ -1001,6 +1008,31 @@ class PPOTrainer:
              best_guy = max(candidates, key=lambda i: self.population[i].get('ema_wins', 0.0) if self.population[i].get('ema_wins') is not None else 0.0)
              
         self.leader_idx = self.population[best_guy]['id']
+
+    def broadcast_blocker_weights(self, source_agent_id: int):
+        """
+        Snapshot Strategy: Broadcasts Blocker Expert weights from source agent to entire population.
+        Used when transitioning Stage 2 -> Stage 3 to preserve SOTA blocking skills.
+        """
+        source_agent = None
+        for p in self.population:
+            if p['id'] == source_agent_id:
+                source_agent = p['agent']
+                break
+        
+        if source_agent is None:
+            self.log(f"CRITICAL: Broadcast failed. Source Agent {source_agent_id} not found.")
+            return
+            
+        blocker_state = source_agent.get_blocker_state()
+        
+        count = 0
+        for p in self.population:
+            if p['id'] == source_agent_id: continue
+            p['agent'].set_blocker_state(blocker_state)
+            count += 1
+            
+        self.log(f"*** SNAPSHOT BROADCAST: Copied Blocker Weights from Agent {source_agent_id} to {count} agents. ***")
 
     def save_generation(self):
         # NEW: Stage-based structure
@@ -1748,8 +1780,10 @@ class PPOTrainer:
                     # Let's align with STAGE_DUEL (0.5) or stricter?
                     # Unified stage: 0.5 seems reasonable.
                     current_tau = 0.5
-                elif self.env.curriculum_stage == STAGE_TEAM:
+                elif self.env.curriculum_stage == STAGE_RUNNER:
                     current_tau = 0.5
+                elif self.env.curriculum_stage == STAGE_TEAM:
+                    current_tau = 0.7
                 elif self.env.curriculum_stage == STAGE_LEAGUE:
                     current_tau = 0.85
                 
@@ -2019,25 +2053,32 @@ class PPOTrainer:
                 # Mask: Done & IsRunner (for active pods)
                 # We sum over Active Pods.
                 # If separate envs (Duel), I am Runner in Envs 0..N/2, Blocker in N/2..N
-                runner_matches = 0
-                blocker_matches = 0
-                denials = 0
+                # [FIX] Simplified Vectorized Aggregation
+                # Summing over ACTIVE PODS dimension (dim 2 of is_run_reshaped)
+                # done_mask is [Pop, EPA]. We need it to be [Pop, EPA, 1] broadcasted?
+                # Actually, runner_matches needs to sum per agent.
                 
-                for pod_idx in active_pods:
-                    # is_run_reshaped[:, :, pod_idx] is 1 if runner, 0 if blocker
-                    is_r = is_run_reshaped[:, :, pod_idx].float()
-                    is_b = 1.0 - is_r
-                    
-                    # Matches for this pod
-                    # done_mask is [Pop, EnvsPerAgent]
-                    # If done, and this pod was Runner -> Runner Match ++
-                    runner_matches += (done_mask.float() * is_r).sum(dim=1)
-                    blocker_matches += (done_mask.float() * is_b).sum(dim=1)
-                    
-                    # [FIX] Denials: Only count if I was a Blocker AND it was a Timeout (Winner == -1)
-                    # Denials = Done & Winner==-1 & IsBlocker
-                    is_timeout = (w_reshaped == -1)
-                    denials += (done_mask.float() * is_timeout.float() * is_b).sum(dim=1)
+                # Expand done_mask: [Pop, EPA] -> [Pop, EPA, 1]
+                dm_exp = done_mask.float().unsqueeze(-1)
+                
+                # Active Pods Mask: [Pop, EPA, N_Active]
+                # is_run_active: [Pop, EPA, N_Active]
+                is_r_active = is_run_active # Already extracted above
+                is_b_active = 1.0 - is_r_active
+                
+                # Matches
+                runner_matches = (dm_exp * is_r_active).sum(dim=(1, 2))
+                blocker_matches = (dm_exp * is_b_active).sum(dim=(1, 2))
+                
+                # Denials: Done & (Winner == -1) & IsBlocker
+                # w_reshaped is [Pop, EPA] -> [Pop, EPA, 1]
+                w_exp = w_reshaped.unsqueeze(-1)
+                is_timeout = (w_exp == -1).float() # Broadcased to all active pods? 
+                # Winner code is per ENV. So yes, if env timed out, applies to all pods?
+                # Wait, 'winners' applies to the ENV.
+                # If Env has code -1, then Blocker succeeded.
+                
+                denials = (dm_exp * is_timeout * is_b_active).sum(dim=(1, 2))
 
                 # [NEW] Blocker Collisions
                 # infos['collision_flags'] is [TotalEnvs, 4] -> [Pop, EPA, 4]
@@ -2684,11 +2725,23 @@ class PPOTrainer:
             
             # Save Checkpoint (Leader)
             if self.iteration % 50 == 0:
-                # Sync first!
-                self.sync_vectorized_to_agents()
                 # Save leader
                 leader_agent = self.population[self.leader_idx]['agent']
                 torch.save(leader_agent.state_dict(), f"data/checkpoints/model_gen{self.generation}_best.pt")
+
+    def _mutate_agent_params(self, agent, mutation_rate=0.01, mutation_scale=0.1):
+        """
+        Applies Gaussian noise to agent parameters in-place.
+        """
+        with torch.no_grad():
+            for param in agent.parameters():
+                if len(param.shape) > 0: # Skip scalars/0-dim if any
+                     # Mask: Select indices to mutate
+                     mask = torch.rand_like(param) < mutation_rate
+                     # Noise
+                     noise = torch.randn_like(param) * mutation_scale
+                     # Apply
+                     param[mask] += noise[mask]
 
 if __name__ == "__main__":
     trainer = PPOTrainer()

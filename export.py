@@ -26,7 +26,7 @@ def fuse_layer_section(W, mean, std, threshold=0.05):
     return W_new, shift
 
 def fuse_normalization_pilot(pilot, rms_stats):
-    print("Fusing Pilot Normalization...")
+    print("Fusing Pilot Normalization (Runner & Blocker)...")
     mean_s, std_s = get_ms(rms_stats['self'])
     mean_c, std_c = get_ms(rms_stats['cp'])
     
@@ -37,20 +37,23 @@ def fuse_normalization_pilot(pilot, rms_stats):
         W = layer.weight.data.cpu().numpy()
         b = layer.bias.data.cpu().numpy()
         
-        W_self = W[:, 0:15]
-        W_cp   = W[:, 15:25]
+        # [FIX] Mismatch: Model has 15 self-obs, RMS has 14.
+        # Implies 14 features normalized + 1 raw (Identity).
+        W_self_norm = W[:, 0:14]
+        W_self_raw  = W[:, 14:15]
+        W_cp        = W[:, 15:25]
         
-        W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
+        W_self_new, shift_self = fuse_layer_section(W_self_norm, mean_s, std_s)
         W_cp_new, shift_cp = fuse_layer_section(W_cp, mean_c, std_c)
         
-        W_new = np.concatenate([W_self_new, W_cp_new], axis=1)
+        W_new = np.concatenate([W_self_new, W_self_raw, W_cp_new], axis=1)
         b_new = b - shift_self - shift_cp
         
         layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
         layer.bias.data = torch.tensor(b_new, dtype=torch.float32)
 
 def fuse_normalization_commander(actor, rms_stats):
-    print("Fusing Commander Normalization...")
+    print("Fusing Commander Normalization (Backbones & Enemy Encoders)...")
     mean_s, std_s = get_ms(rms_stats['self'])
     mean_e, std_e = get_ms(rms_stats['ent'])
     
@@ -76,12 +79,14 @@ def fuse_normalization_commander(actor, rms_stats):
         W = layer.weight.data.cpu().numpy()
         b = layer.bias.data.cpu().numpy()
         
-        W_self = W[:, 0:15]
-        W_rest = W[:, 15:]
+        # [FIX] Mismatch: Model 15 self-obs, RMS 14.
+        W_self_norm = W[:, 0:14]
+        W_self_raw  = W[:, 14:15]
+        W_rest      = W[:, 15:]
         
-        W_self_new, shift_self = fuse_layer_section(W_self, mean_s, std_s)
+        W_self_new, shift_self = fuse_layer_section(W_self_norm, mean_s, std_s)
         
-        W_new = np.concatenate([W_self_new, W_rest], axis=1)
+        W_new = np.concatenate([W_self_new, W_self_raw, W_rest], axis=1)
         b_new = b - shift_self
         
         layer.weight.data = torch.tensor(W_new, dtype=torch.float32)
@@ -651,7 +656,28 @@ def export_model(model_path, output_path="submission.py", dummy=False):
             fuse_normalization_pilot(agent.actor, rms_stats)
             fuse_normalization_commander(agent.actor, rms_stats)
         else:
-            print("WARNING: No RMS stats found!")
+            # Fallback for League Agents: Try to find in original generation folder
+            # Infer generation from filename or directory?
+            # Filename: gen_68_agent_0.pt
+            import re
+            basename = os.path.basename(model_path)
+            match = re.search(r"gen_(\d+)", basename)
+            found_rms = False
+            if match:
+                gen_num = match.group(1)
+                # Search stage dirs
+                for s_id in range(6): # Stages 0 to 5
+                    fallback_path = f"data/stage_{s_id}/gen_{gen_num}/rms_stats.pt"
+                    if os.path.exists(fallback_path):
+                        print(f"RMS Fallback: Finding stats in {fallback_path}")
+                        rms_stats = torch.load(fallback_path, map_location='cpu')
+                        fuse_normalization_pilot(agent.actor, rms_stats)
+                        fuse_normalization_commander(agent.actor, rms_stats)
+                        found_rms = True
+                        break
+            
+            if not found_rms:
+                print("WARNING: No RMS stats found! (Normalization Fused as Identity/Zeros)")
             
     # Quantize Universal
     q_univ, scale_univ = quantize_weights(agent.actor)
@@ -683,22 +709,67 @@ def export_model(model_path, output_path="submission.py", dummy=False):
     print(f"Total Chars: {len(script)}")
     return output_path
 
+
+def find_best_checkpoint(mode="last_gen"):
+    league_path = "data/league.json"
+    if not os.path.exists(league_path):
+        print(f"Error: {league_path} not found.")
+        sys.exit(1)
+        
+    with open(league_path, 'r') as f:
+        data = json.load(f)
+        
+    if not data:
+        print("Error: League is empty.")
+        sys.exit(1)
+        
+    best_agent = None
+    
+    if mode == "elo":
+        # Sort by ELO descending
+        data.sort(key=lambda x: x.get('elo', 1000), reverse=True)
+        best_agent = data[0]
+        print(f"Auto-selected (Best ELO): {best_agent['id']} | ELO: {best_agent.get('elo')} | Gen: {best_agent.get('step')}")
+        
+    elif mode == "last_gen":
+        # Find max generation
+        max_step = max(x.get('step', -1) for x in data)
+        # Filter
+        last_gen = [x for x in data if x.get('step', -1) == max_step]
+        # Sort by Win Rate Descending
+        last_gen.sort(key=lambda x: x.get('metrics', {}).get('wins_ema', 0.0), reverse=True)
+        best_agent = last_gen[0]
+        rec_wins = best_agent.get('metrics', {}).get('wins_ema', 0.0)
+        print(f"Auto-selected (Best WR Last Gen {max_step}): {best_agent['id']} | WR: {rec_wins*100:.1f}%")
+
+    else:
+        # Default 'auto' -> Best Win Rate Overall? Or Last Gen?
+        # User implies 'auto' usually means 'finding best win rate'.
+        # Let's align 'auto' with 'best win rate in last gen' as it is most useful for monitoring.
+        return find_best_checkpoint("last_gen")
+        
+    return best_agent['path']
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, help="Path to .pt model")
     parser.add_argument("--out", type=str, default="submission.py")
     parser.add_argument("--dummy", action="store_true", help="Use dummy weights")
-    parser.add_argument("--auto", action="store_true", help="Automatically select best checkpoint from league.json")
+    parser.add_argument("--auto", action="store_true", help="Select best agent from Last Generation (Win Rate)")
+    parser.add_argument("--auto_last_gen", action="store_true", help="Select best agent from Last Generation (Win Rate)")
+    parser.add_argument("--auto_elo", action="store_true", help="Select best agent by ELO (Overall)")
     args = parser.parse_args()
     
-    if args.auto:
-        model_path = find_best_checkpoint()
+    if args.auto or args.auto_last_gen:
+        model_path = find_best_checkpoint("last_gen")
+    elif args.auto_elo:
+        model_path = find_best_checkpoint("elo")
     elif args.model:
         model_path = args.model
     elif args.dummy:
         model_path = ""
     else:
-        print("Error: Must specify --model or --auto or --dummy")
+        print("Error: Must specify --model or --auto/--auto_last_gen or --auto_elo or --dummy")
         sys.exit(1)
     
     export_model(model_path, args.out, args.dummy)

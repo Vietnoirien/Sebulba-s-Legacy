@@ -21,9 +21,10 @@ MIN_CHECKPOINTS = 3
 # Curriculum Stages
 STAGE_NURSERY = 0 # Learn to drive (No penalties)
 STAGE_SOLO = 1    # Time Trial (Speed focus)
-STAGE_DUEL_FUSED = 2 # Unified Duel (Running + Blocking)
-STAGE_TEAM = 3    # 2v2
-STAGE_LEAGUE = 4  # Competitive
+STAGE_DUEL_FUSED = 2 # Unified Duel (Blocker Academy)
+STAGE_RUNNER = 3     # Runner Academy (Runner Focused, Blocker Frozen)
+STAGE_TEAM = 4       # 2v2
+STAGE_LEAGUE = 5     # Competitive
 
 # Graduation Thresholds
 # Stage 0 (Nursery) -> 1 (Solo)
@@ -32,8 +33,8 @@ STAGE_NURSERY_CONSISTENCY_THRESHOLD = 500.0
 
 # Stage 1 (Solo) -> 2 (Duel)
 # Goal: Efficiency (Speed) + Consistency
-STAGE_SOLO_EFFICIENCY_THRESHOLD = 50.0
-STAGE_SOLO_CONSISTENCY_THRESHOLD = 1800.0
+STAGE_SOLO_EFFICIENCY_THRESHOLD = 40.0
+STAGE_SOLO_CONSISTENCY_THRESHOLD = 3500.0
 STAGE_SOLO_PENALTY_CONSISTENCY_THRESHOLD = 1000.0
 STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD = 55.0
 STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD = 65.0
@@ -60,11 +61,12 @@ class RewardScalingConfig:
     orientation_threshold: float = 0.5
     
     # Blocker SOTA Params
-    collision_blocker_scale: float = 50.0 # Boosted to ~500 reward per hit (User Request)
+    collision_blocker_scale: float = 2.0 # Reduced from 50.0 for Normalization (~10 pts/hit)
     intercept_progress_scale: float = 0.05 # Reduced from 1.0 to 0.05 (Target ~25 reward per step)
-    goalie_penalty: float = 0.0 # Default Disabled (User Request)
+    goalie_penalty: float = 1000.0 # Restored (User Request)
     dynamic_reward_bonus: float = 1800.0
-    velocity_denial_weight: float = 100.0 # New SOTA Reward (10k / 100 steps)
+    velocity_denial_weight: float = 0.0 # Disabled
+    zone_pressure_weight: float = 20.0 # Increased from 10.0 for Normalization
 
 @dataclass
 class TrainingConfig:
@@ -136,16 +138,13 @@ class CurriculumConfig:
     solo_penalty_efficiency_threshold: float = STAGE_SOLO_PENALTY_EFFICIENCY_THRESHOLD
     solo_penalty_exit_efficiency_threshold: float = STAGE_SOLO_PENALTY_EXIT_EFFICIENCY_THRESHOLD
     solo_dynamic_step_penalty: float = STAGE_SOLO_DYNAMIC_STEP_PENALTY
-    solo_min_win_rate: float = 0.30
+    solo_min_win_rate: float = 0.90
     
-    # Stage 2 (Duel Fused) -> 3 (Team) Graduation
-    # Requires mastery of both Running (Win Rate) and Blocking (Denial Rate)
-    # OR just high win rate?
-    # Let's demand Win Rate primarily, but tracked Denials.
+    # Stage 2 (Blocker Academy) Graduation
+    # Requires mastery of Blocking (Denial Rate & Pressure)
     duel_graduation_difficulty: float = 0.85
-    duel_graduation_win_rate: float = 0.70
     duel_graduation_checks: int = 5
-    duel_graduation_denial_rate: float = 0.05
+    duel_graduation_denial_rate: float = 0.80 # Increased from 0.05 (Blocker Academy Standard)
     # [FIX] Changed from Impact (Force) to Collision Steps (Duration)
     # Threshold: 60 steps = ~1 second of contact per episode.
     duel_graduation_collision_steps: float = 60.0
@@ -154,7 +153,11 @@ class CurriculumConfig:
     # Requires 30 hits (half graduation) to increase bot difficulty.
     duel_progression_collision_steps: float = 30.0
     
-    # Stage 3 (Team) -> 4 (League) Graduation
+    # Stage 3 (Runner) -> 4 (Team) Graduation
+    runner_graduation_win_rate: float = 0.80
+    runner_graduation_checks: int = 5
+    
+    # Stage 4 (Team) -> 5 (League) Graduation
     team_graduation_difficulty: float = 0.85
     team_graduation_win_rate: float = 0.70
     team_graduation_checks: int = 5
@@ -176,8 +179,8 @@ class CurriculumConfig:
     diff_step_decrease: float = 0.02
     diff_step_standard: float = 0.01
     diff_step_turbo: float = 0.02
-    diff_step_super_turbo: float = 0.05
-    diff_step_insane_turbo: float = 0.10
+    diff_step_super_turbo: float = 0.03
+    diff_step_insane_turbo: float = 0.05
     
     # Nursery Specifics
     nursery_timeout_steps: int = 300
@@ -201,6 +204,7 @@ RW_RANK = 13 # Rank Improvement
 RW_LAP = 14 # Lap Completion
 RW_DENIAL = 15 # Deny Enemy Progress (Blocker Only)
 RW_ZONE = 16 # Zone Control (Blocker Position relative to Intercept Point)
+RW_ZONE_PRESSURE = 17 # Pressure (Shepherding/Shadowing)
 LAP_REWARD_MULTIPLIER = 1.5
 
 DEFAULT_REWARD_WEIGHTS = {
@@ -210,7 +214,7 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_CHECKPOINT_SCALE: 50.0,
     RW_PROGRESS: 0.2, # Scaled down to prevent overpowering Checkpoint (2000) 
     RW_COLLISION_RUNNER: 0.5,
-    RW_COLLISION_BLOCKER: 10.0, # Increased from 5.0 to 10.0 (User Request: Reward More Collision)
+    RW_COLLISION_BLOCKER: 5.0, # Reduced from 10.0 to 5.0 (Normalized)
     RW_STEP_PENALTY: 10.0, # Increased to 10.0 to make Time Cost significant (Speed Incentive)
     RW_ORIENTATION: 1.0, # Reduced to soft guidance
     RW_WRONG_WAY: 10.0,
@@ -220,7 +224,8 @@ DEFAULT_REWARD_WEIGHTS = {
     RW_RANK: 500.0, # Rank Change
     RW_LAP: 2000.0, # RW_LAP (New) - Index 14 manually assigned
     RW_DENIAL: 10000.0, # Deny Reward (New) - Explicit Timeout Bonus for Blocker
-    RW_ZONE: 5.0 # Zone Control (Dense)
+    RW_ZONE: 5.0, # Zone Control (Dense)
+    RW_ZONE_PRESSURE: 20.0 # Increased from 10.0 to 20.0 (Primary Positioning Reward)
 }
 
 from typing import List, Optional

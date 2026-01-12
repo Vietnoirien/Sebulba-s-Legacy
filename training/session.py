@@ -139,6 +139,11 @@ class TrainingSession:
         if config:
             self.trainer.log(f"Applying initial configuration...")
             self.update_config(config)
+
+        # [FIX] Reset Environment Metrics on Start to prevent immediate graduation from stale data
+        if hasattr(self.trainer.env, "reset_metrics"):
+             self.trainer.env.reset_metrics()
+             self.trainer.log("Reset environment metrics for fresh session.")
             
         # Load Model Logic
         if model_name and model_name != "scratch":

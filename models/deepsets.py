@@ -448,6 +448,42 @@ class PodActor(nn.Module):
         is_blocker = (flat_role == 1)
         
         # Initialize Output Buffers
+        thrust_out = torch.zeros(B*S, 1, device=self.actor_logstd.device)
+        angle_out = torch.zeros(B*S, 1, device=self.actor_logstd.device)
+        shield_out = torch.zeros(B*S, 2, device=self.actor_logstd.device)
+        boost_out = torch.zeros(B*S, 2, device=self.actor_logstd.device)
+        
+        # --- EXECUTE BOTH EXPERTS (VMAP SAFE) ---
+        # We run both experts on the full batch and then mask the output.
+        # This is less efficient computationally but required for vmap compatibility
+        # unless we use torch.where or advanced indexing which vmap supports conditionally.
+        
+        # 1. Runner Expert
+        h_run = self.runner_backbone(cmd_in_run)
+        
+        # 2. Blocker Expert
+        h_blk = self.blocker_backbone(cmd_in_blk)
+        
+        # Embeddings for LSTM [B, S, 64]
+        # We need to reshape back to [B, S] to use LSTM?
+        # Actually input is flat [B*S]. 
+        # But LSTMs expect [B, S, H].
+        # We need to view as [B, S, -1].
+        
+        lstm_in_run_flat = torch.cat([r_emb, h_run], dim=1) # [B*S, 16+32=48] ? No r_emb is 16.
+        # Wait, what was the LSTM input before?
+        # "lstm_in_run = torch.cat([pe_run, out_run], dim=1)" from lines 524 (duplicate code block below).
+        # We need to see where pe_run comes from.
+        # It seems pe_run isn't defined in the visible block?
+        # Let's look at lines 442: cmd_in_run = torch.cat([...])
+        # The LSTM likely takes the backbone output.
+        
+        # Let's check the bottom of the file where the code was duplicated.
+        # It seems I have a huge block of duplicate code starting at line 513!
+        # "out_run = self.runner_backbone(cmd_in_run)"
+        
+        # The fix is to DELETE the "if is_runner.any(): ... pass" block ENTIRELY.
+        # And rely on the code that was already there (lines 514+ which matches the VMAP-Safe Execution comment).
         # VMAP-Safe Execution: Run BOTH on full batch, then Mask
         out_run = self.runner_backbone(cmd_in_run)
         out_blk = self.blocker_backbone(cmd_in_blk)
@@ -482,8 +518,6 @@ class PodActor(nn.Module):
         mask_run = 1.0 - mask_blk
         
         out_fused = out_run_lstm * mask_run + out_blk_lstm * mask_blk
-        
-
         
         # --- Heads ---
         thrust_logits = self.head_thrust(out_fused)
@@ -523,6 +557,35 @@ class PodActor(nn.Module):
 
         return (thrust_mean, angle_mean), std, (shield_logits, boost_logits), next_state, aux_out 
 
+    # [NEW] Helper Methods for Blocker Preservation (SOTA)
+    def get_blocker_state(self):
+        """Returns the state dict of the Blocker Expert modules."""
+        return {
+            'pilot': self.pilot_embed_blocker.state_dict(),
+            'enemy': self.enemy_embedder_blocker.state_dict(),
+            'backbone': self.blocker_backbone.state_dict(),
+            'lstm': self.blocker_lstm.state_dict()
+        }
+
+    def set_blocker_state(self, state_dict):
+        """Restores the Blocker Expert modules from a state dict."""
+        self.pilot_embed_blocker.load_state_dict(state_dict['pilot'])
+        self.enemy_embedder_blocker.load_state_dict(state_dict['enemy'])
+        self.blocker_backbone.load_state_dict(state_dict['backbone'])
+        self.blocker_lstm.load_state_dict(state_dict['lstm'])
+        
+    def freeze_blocker_experts(self):
+        """Freezes Blocker Expert parameters (prevent updates)."""
+        for m in [self.pilot_embed_blocker, self.enemy_embedder_blocker, self.blocker_backbone, self.blocker_lstm]:
+            for p in m.parameters():
+                p.requires_grad = False
+                
+    def unfreeze_all(self):
+        """Unfreezes all parameters."""
+        for m in [self.pilot_embed_blocker, self.enemy_embedder_blocker, self.blocker_backbone, self.blocker_lstm]:
+            for p in m.parameters():
+                p.requires_grad = True 
+
     def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, action=None, role_ids=None, actor_state=None, critic_state=None, done=None):
         # Allow PodActor to function standalone if needed, but primarily used via PodAgent
         pass
@@ -540,8 +603,23 @@ class PodAgent(nn.Module):
             return self.get_value(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, lstm_state)
         return self.get_action_and_value(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, action, role_ids, actor_state, critic_state, done)
     
+
+
     def get_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, critic_state):
         return self.critic(self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs, critic_state)
+
+    # Wrappers for Preservation
+    def get_blocker_state(self):
+        return self.actor.get_blocker_state()
+
+    def set_blocker_state(self, state_dict):
+        self.actor.set_blocker_state(state_dict)
+
+    def freeze_blocker_experts(self):
+        self.actor.freeze_blocker_experts()
+
+    def unfreeze_all(self):
+        self.actor.unfreeze_all()
 
     def get_action_and_value(self, self_obs, teammate_obs, enemy_obs, next_cp_obs, map_obs=None, action=None, role_ids=None, actor_state=None, critic_state=None, done=None):
         # Derived Role

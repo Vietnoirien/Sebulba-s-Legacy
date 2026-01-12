@@ -83,7 +83,7 @@ const BackgroundRenderer: React.FC = () => {
         return clone
     }, [scene])
 
-    return <primitive object={mapClone} position={[MAP_CENTER_X, -82, MAP_CENTER_Z]} />
+    return <primitive object={mapClone} position={[MAP_CENTER_X, -80, MAP_CENTER_Z]} />
 }
 
 const SingleCheckpoint: React.FC<{
