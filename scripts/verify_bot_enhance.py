@@ -153,5 +153,47 @@ def verify_bot_enhancements():
     else:
         print(">> BOT IS GATEKEEPING (Passive, Bad?)")
 
+    # 4. Scenario 3: Race to Gatekeep (Trailing)
+    print("\n[Scenario 3: Race to Gatekeep]")
+    # Runner (0) close to CP (1000, 0) relative to CP
+    # CP is at (10000, 0)
+    # Runner at (8000, 0). Dist to CP = 2000.
+    env.physics.pos[:, 0, 0] = 8000.0
+    env.physics.pos[:, 0, 1] = 0.0
+    env.physics.vel[:, 0] = 500.0 # Moving fast to CP
+    
+    # Bot (2) Trailing at (5000, 2000). Dist to CP ~ 5300.
+    # Bot is LATE. Should race to Gate (CP), not Runner.
+    env.physics.pos[:, 2, 0] = 5000.0
+    env.physics.pos[:, 2, 1] = 2000.0
+    env.physics.angle[:, 2] = 0.0
+    
+    env.step(actions, None)
+    
+    # Check Bot Direction
+    bot_angle = env.physics.angle[0, 2].item()
+    bot_pos = env.physics.pos[0, 2]
+    
+    # Vector to Gatekeeper (CP approx)
+    vec_to_cp = cp_pos - bot_pos
+    angle_to_cp = torch.rad2deg(torch.atan2(vec_to_cp[1], vec_to_cp[0])).item()
+    
+    # Vector to Runner (Intercept)
+    vec_to_runner = env.physics.pos[0, 0] - bot_pos
+    angle_to_runner = torch.rad2deg(torch.atan2(vec_to_runner[1], vec_to_runner[0])).item()
+    
+    print(f"Bot Angle: {bot_angle:.1f} deg")
+    print(f"Angle to CP (Gate): {angle_to_cp:.1f} deg")
+    print(f"Angle to Runner (Chase): {angle_to_runner:.1f} deg")
+    
+    diff_gate = abs(bot_angle - angle_to_cp)
+    diff_runner = abs(bot_angle - angle_to_runner)
+    
+    # Should be closer to Gate
+    if diff_gate < diff_runner:
+        print(">> BOT IS RACING TO GATE (Correct: Avoiding trailing chase)")
+    else:
+        print(">> BOT IS CHASING RUNNER (Incorrect: Tailgating)")
+
 if __name__ == "__main__":
     verify_bot_enhancements()

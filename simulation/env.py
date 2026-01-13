@@ -708,39 +708,85 @@ class PodRacerEnv:
                 div_dist = dist_runner_to_cp.unsqueeze(1) + 1e-6
                 dir_runner_to_cp = vec_runner_to_cp / div_dist
 
-                # --- NEW ACTIVE INTERCEPT LOGIC ---
+                # --- NEW ACTIVE INTERCEPT & GATEKEEP LOGIC ---
                 curr_difficulty = self.bot_difficulty
                 
-                # 1. Gatekeeper Logic (Red Zone or Low Difficulty)
-                # Tighter guard at high difficulty
+                # 1. Calculate ideal "Gatekeeper Position" (Defense Point)
+                # Tighter guard at high difficulty.
+                # If behind, we race here.
                 offset_val_base = 2500.0 - (2000.0 * curr_difficulty) # 2500 -> 500
                 gatekeeper_pos = cp_pos - (dir_runner_to_cp * offset_val_base)
 
-                # 2. Active Intercept Logic (Open Field & High Difficulty)
+                # 2. Race Condition: Are we "Behind"?
+                # Compare Distance to Gatekeeper Point.
+                # Bot Dist vs Runner Dist (to CP). 
+                # Actually, check if we can intercept.
+                
+                dist_bot_to_gate = torch.norm(gatekeeper_pos - bot_pos, dim=1)
+                
+                # If Bot is significantly further from CP than Runner, or behind Runner's vector?
+                # Simple Heuristic: If we are further from Gatekeeper Point than Runner is from CP (roughly).
+                # Or project positions.
+                
+                # Let's use dot product to check if we are "Behind" the runner relative to CP?
+                # Vector Runner->CP. Vector Bot->CP.
+                # If dot(RunnerToCP, BotToCP) is negative? No.
+                
+                # Better: "Race Mode" if dist_bot_to_gate > dist_runner_to_cp * 0.8
+                # Meaning we are not confidently closer to the defense point.
+                # If we are strictly closer, we can afford to intercept.
+                # If we are far, we must SPRINT to the gate.
+                
+                # [STRATEGY]: "Race to Gatekeep"
+                # If we are not fast enough to intercept, go to gate.
+                # Threshold: If Bot Dist > Runner Dist - 500.0 (Buffer), we are late.
+                is_late_to_gate = (dist_bot_to_gate > (dist_runner_to_cp - 1000.0))
+                
+                # 3. Active Intercept (Only if NOT late)
                 # Predict where runner will be.
                 agent_vel = self.physics.vel[batch_indices, target_idx]
                 bot_vel = self.physics.vel[:, bot_id]
                 
-                # Scale prediction horizon with difficulty
-                # Low diff = 0.0 (Reactive). High diff = 1.0 (Predictive).
                 pred_scale = curr_difficulty
                 intercept_pos_active = self._get_front_intercept_pos(bot_pos, agent_pos, agent_vel * pred_scale, bot_vel)
                 
-                # 3. Zone Logic
-                # If Runner is far from CP (> 3000), use Active Intercept.
-                # If Runner is close (< 3000), fall back to Gatekeeper to avoid getting juked.
-                # Also blend based on difficulty: Low difficulty bots stay Gatekeeper more.
+                # 4. Target Selection
+                # Priority:
+                # A. Emergency Ram (Close to CP or Agent)
+                # B. Race to Gate (If Late)
+                # C. Active Intercept (If Early/Open Field)
                 
-                use_active_intercept = (dist_runner_to_cp > 3000.0) & (torch.rand(self.num_envs, device=self.device) < (curr_difficulty * 1.2)) # Chance to use active increases with diff
-                
-                blocker_lead_pos = torch.where(use_active_intercept.unsqueeze(1), intercept_pos_active, gatekeeper_pos)
-
-                # Emergency Ram: If Agent is close to CP (<2000), target Agent directly
-                # Or if we are very close to agent (Opportunistic Ram)
+                # A. Emergency
                 dist_to_agent = torch.norm(agent_pos - bot_pos, dim=1)
                 
-                close_mask = (dist_runner_to_cp < 2000.0) | (dist_to_agent < 1500.0)
-                blocker_target = torch.where(close_mask.unsqueeze(1), agent_pos, blocker_lead_pos)
+                # [FIX]: Tighter Emergency Range (800u) and IGNORE Runner's distance to CP.
+                # Use Gatekeeper logic to guard CP instead of charging blindly.
+                close_mask = (dist_to_agent < 800.0)
+                
+                # B. Gatekeep vs Intercept
+                # If late -> Gatekeeper Pos.
+                # If early -> Intercept Pos (Try to kill them early).
+                # Also blend random chance for variation.
+                
+                # [STRATEGY UPDATE]: Prefer Gatekeeping to avoid "high speed miss".
+                # Force Gatekeep if:
+                # 1. Runner is in "Red Zone" (< 4000 units to CP). Guard the goal!
+                # 2. We are Late/Behind.
+                # 3. Random chance (Low Diff).
+                
+                runner_in_red_zone = (dist_runner_to_cp < 4000.0)
+                
+                # Logic: Gatekeep if RedZone OR Late OR (LowDiff check)
+                prob_gatekeep = 1.0 - (curr_difficulty * 0.5) # Diff 1.0 -> 50% chance to gatekeep even in open field
+                random_gatekeep = (torch.rand(self.num_envs, device=self.device) < prob_gatekeep)
+                
+                should_gatekeep = runner_in_red_zone | is_late_to_gate | random_gatekeep
+                use_active_intercept = ~should_gatekeep
+                
+                base_target = torch.where(should_gatekeep.unsqueeze(1), gatekeeper_pos, intercept_pos_active)
+                
+                # Apply Emergency Override
+                blocker_target = torch.where(close_mask.unsqueeze(1), agent_pos, base_target)
 
                 # C. SELECT TARGET based on Role
                 # is_bot_runner: [B] -> [B, 1]
@@ -791,24 +837,50 @@ class PodRacerEnv:
                 is_close_enough = dist_to_target < 4000.0 # Increased range for pursuit
                 
                 # Ram Mask: Aligned AND Close AND Blocker
+                # AND Target must be Agent (Emergency) OR Active Intercept.
+                # If Target is Gatekeeper, do NOT Ram (we want to Park).
+                
+                # Check if target is agent-like?
+                # We can check 'should_gatekeep' flag.
+                # If should_gatekeep is True AND close_mask is False, then Target is Gate. -> NO RAM.
+                # If close_mask is True, Target is Agent -> RAM.
+                # If use_active_intercept is True, Target is Agent -> RAM.
+                
+                # So: Ram allowed if (close_mask OR use_active_intercept).
+                allow_ram = close_mask | use_active_intercept
+                
                 is_blocker = ~is_bot_runner
                 
-                ram_mask = is_aligned & is_close_enough & is_blocker
+                ram_mask = is_aligned & is_close_enough & is_blocker & allow_ram
                 
                 # Add 20-30 thrust
                 thrust_val = torch.where(ram_mask, thrust_val + self.bot_config.ramming_speed_scale, thrust_val)
                 
-                # [FIX] Bot Stabilization: Slow down near checkpoints to avoid "Orbiting"
-                # ONLY if Runner (navigating to CP) OR Gatekeeper (Holding position)
+                # [FIX] Bot Stabilization: Parking / Braking Logic
                 # If Ramming/Active Intercept, NO BRAKES.
+                # If Gatekeeping (Racing to Gate) or Runner (Racing to Checkpoint):
+                # We need to stop when we arrive to avoid overshooting.
                 
                 should_brake = is_bot_runner | ( (~use_active_intercept) & (~ram_mask) )
                 
-                # Slow down logic
-                slow_down_mask = (dist_to_target < 1500.0) & should_brake
-                thrust_val = torch.where(slow_down_mask, thrust_val * 0.8, thrust_val)
-                very_close_mask = (dist_to_target < 600.0) & should_brake
-                thrust_val = torch.where(very_close_mask, thrust_val * 0.5, thrust_val)
+                # New Logic: "Aggressive Parking"
+                # If dist < 800, CUT engine (0.0).
+                # If dist < 2000, Linear Ramp Down.
+                # If speed is high (>500) and dist is low (<1500), maybe brake harder?
+                # For now, just thrust modulation.
+                
+                # Ramp: 2500 -> 600.
+                # Factor 1.0 at 2500. Factor 0.0 at 600.
+                brake_factor = (dist_to_target - 600.0) / 1900.0
+                brake_factor = torch.clamp(brake_factor, 0.0, 1.0)
+                
+                # Apply Braking
+                thrust_val = torch.where(should_brake, thrust_val * brake_factor, thrust_val)
+                
+                # Absolute Stop if very close (and should brake)
+                # To prevent jitter at 0 distance
+                stop_mask = (dist_to_target < 600.0) & should_brake
+                thrust_val = torch.where(stop_mask, torch.zeros_like(thrust_val), thrust_val)
                 
                 act_thrust[:, bot_id] = thrust_val 
                 
