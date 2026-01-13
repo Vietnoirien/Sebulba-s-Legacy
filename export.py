@@ -417,8 +417,8 @@ class N:
                 dy_b=phb[1]+sum(o[j]*phw[16+j] for j in range(16))
                 
                 # Select Prediction based on Role (rv)
-                # rv==0: Runner, rv==1: Blocker
-                if rv == 0:
+                # rv==1: Runner, rv==0: Blocker
+                if rv == 1:
                      dx, dy = dx_r, dy_r
                 else:
                      dx, dy = dx_b, dy_b
@@ -453,7 +453,7 @@ class N:
         hw_s,hb_s=self.gw(64),self.gw(2); hw_b,hb_b=self.gw(64),self.gw(2)
         
         # Execution Gating
-        if rv==0: # Runner
+        if rv==1: # Runner
              x_run = s+t_lat+e_ctx_run+re+me
              cb = run_mlp(x_run, rw1, rb1, rw2, rb2)
              # Concat for LSTM: pe_run(32) + cb(32) -> 64
@@ -488,6 +488,9 @@ def solve():
     except: C=3
     cps=[list(map(int,input().split())) for _ in range(C)]
     lps,pnc,to,scd,avl=[0]*4,[1]*4,[100]*4,[0]*4,[True,True]
+    # Role State: [Agent=Runner, Mate=Blocker, Bot1=Runner, Bot2=Blocker]
+    is_run=[True, False, True, False]; role_lock=[0]*4
+    
     while True:
         pds=[]
         try:
@@ -506,16 +509,41 @@ def solve():
                 to[i]=100
             else: to[i]-=1
             pnc[i]=p['n']; pds[i]['l']=lps[i]; pds[i]['to']=to[i]
+        
+        # Scoring (Monotonic Progress: Laps -> CPs -> Dist)
         scrs=[]
         for i in range(4):
-            p=pds[i]; cp=cps[p['n']] if p['n']<len(cps) else cps[0]
-            d=math.sqrt((p['x']-cp[0])**2+(p['y']-cp[1])**2); ec=C if p['n']==0 else p['n']
-            scrs.append(lps[i]*50000+ec*500+(20000-d)/20)
+            p=pds[i]
+            # NextCP 1-based logic: 1 is start target.
+            # If p['n']==1 (Target 1), passed 0 in this lap.
+            # If p['n']==2 (Target 2), passed 1.
+            # If p['n']==0 (Target Finish), passed C-1.
+            passed_lap = (p['n'] - 1) % C
+            total_cps = lps[i]*C + passed_lap
+            
+            # Dist to Target
+            t_idx = p['n'] if p['n'] < len(cps) else 0
+            cp = cps[t_idx]
+            d = math.sqrt((p['x']-cp[0])**2+(p['y']-cp[1])**2)
+            
+            # Score: High weight to CPs
+            scrs.append(total_cps*1000000 - d)
+
+        # Hysteresis & Role Update
         run=[False]*4
-        if scrs[0]>=scrs[1]: run[0]=True
-        else: run[1]=True
-        if scrs[2]>=scrs[3]: run[2]=True
-        else: run[3]=True
+        # Team 0
+        r0 = (scrs[0] >= scrs[1])
+        if role_lock[0] > 0: role_lock[0] -= 1
+        elif is_run[0] != r0:
+             is_run[0]=r0; is_run[1]=not r0; role_lock[0]=10; role_lock[1]=10
+        # Team 1
+        r2 = (scrs[2] >= scrs[3])
+        if role_lock[2] > 0: role_lock[2] -= 1
+        elif is_run[2] != r2:
+             is_run[2]=r2; is_run[3]=not r2; role_lock[2]=10; role_lock[3]=10
+             
+        run = is_run
+
         for i in range(2):
             p=pds[i]; vf,vr=tl(p['vx'],p['vy'],p['a']); fvf,fvr=vf*SV,vr*SV
             tar=cps[p['n']]; gx,gy=tar[0]-p['x'],tar[1]-p['y']; tf,tr=tl(gx,gy,p['a'])
@@ -543,7 +571,7 @@ def solve():
                 ornk=0
                 for s in scrs:
                     if s>scrs[j]: ornk+=1
-                ft=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dst,mt,0.0,otf*SP,otr*SP,orn,ornk/3.0,o['to']/100.0]
+                ft=[dpf*SP,dpr*SP,dvf*SV,dvr*SV,math.cos(rr),math.sin(rr),dst,mt,o['s']/3.0,otf*SP,otr*SP,orn,ornk/3.0,o['to']/100.0]
                 if o['tm']==p['tm']: ot.extend(ft)
                 else: 
                      oe.append(ft)
@@ -573,49 +601,9 @@ def solve():
             
             rl_th=int(r_th*100); rl_ang=r_ang*18.0; rl_sh=(r_sh==1)
             c_ang=pds[i]['a']; r_abs=c_ang+rl_ang; bst=(rl_th,r_abs,rl_sh,False)
-            cands=[(rl_th,r_abs,rl_sh)]
-            if not rl_sh:
-                for da in [0,3,-3,6,-6,12,-12]: cands.append((100,r_abs+da,False)); cands.append((0,r_abs,False))
-            bsc=-9e9
-            
-            # GHOSTS
-            ghost_map={}
-            pred_idx=0
-            for j in range(4):
-                 if i==j: continue
-                 if pds[j]['tm']==pds[i]['tm']: continue
-                 else:
-                     if pred_idx < len(preds):
-                          ghost_map[j] = preds[pred_idx]
-                          pred_idx+=1
-            
-            for th,ang,sh in cands:
-                sp=[x.copy() for x in pds]; acts=[[0,0,0]]*4; acts[i]=[th,ang-sp[i]['a'],sh]
-                
-                # Apply Ghost Trajectories
-                for j in ghost_map:
-                     dx, dy = ghost_map[j]
-                     ra = math.radians(p['a'])
-                     rc, rs = math.cos(ra), math.sin(ra)
-                     pdx, pdy = dx/SP, dy/SP
-                     gdx = pdx*rc - pdy*rs
-                     gdy = pdx*rs + pdy*rc
-                     sp[j]['vx'] = gdx
-                     sp[j]['vy'] = gdy
-                     acts[j] = [0,0,0] # Freeze accel
-                
-                fp=sim(sp,cps,acts)[i]
-                sc=0; cpi=fp['n']; cpp=cps[cpi]; dst=math.sqrt((fp['x']-cpp[0])**2+(fp['y']-cpp[1])**2)
-                sc+=(fp['n']+fp['l']*len(cps))*50000-dst
-                if run[i]:
-                     dx,dy=cpp[0]-fp['x'],cpp[1]-fp['y']; ta=math.degrees(math.atan2(dy,dx))
-                     da=abs(ta-fp['a']); 
-                     while da>180: da=360-da
-                     sc-=da*10
-                else: da=abs(ang-rl_ang); sc-=da*50
-                if fp['x']<400 or fp['x']>15600 or fp['y']<400 or fp['y']>8600: sc-=100000
-                if sc>bsc: bsc=sc; bst=(th,ang,sh,(r_bo==1))
-            fth,fang,fsh,fbo=bst
+            # [FIX] Disable Local Search to prevent interference with Model Policy
+            # Just use model outputs directly
+            fth,fang,fsh,fbo = int(r_th*100), pds[i]['a']+r_ang*18.0, r_sh==1, r_bo==1
             tx=int(p['x']+1e4*math.cos(math.radians(fang))); ty=int(p['y']+1e4*math.sin(math.radians(fang)))
             pw=str(int(fth))
             if fsh and scd[i]==0: pw="SHIELD"; scd[i]=4
@@ -737,7 +725,7 @@ def find_best_checkpoint(mode="last_gen"):
         # Filter
         last_gen = [x for x in data if x.get('step', -1) == max_step]
         # Sort by Win Rate Descending
-        last_gen.sort(key=lambda x: x.get('metrics', {}).get('wins_ema', 0.0), reverse=True)
+        last_gen.sort(key=lambda x: (x.get('metrics', {}) or {}).get('wins_ema') or 0.0, reverse=True)
         best_agent = last_gen[0]
         rec_wins = best_agent.get('metrics', {}).get('wins_ema', 0.0)
         print(f"Auto-selected (Best WR Last Gen {max_step}): {best_agent['id']} | WR: {rec_wins*100:.1f}%")

@@ -490,6 +490,18 @@ class PodRacerEnv:
         
         total_score = (cps * 1000.0) + dist_score
         
+        # [FIX] Add Hysteresis Bonus to encourage role stability in Team Stage
+        # Prevents rapid flipping due to small distance noise, which causes "Goalie Penalty" loop.
+        # Bonus 0.1 corresponds to ~2000 units distance advantage.
+        hysteresis_bonus = 0.1
+        
+        # Determine incumbent runner from previous step
+        # Cast to float for addition
+        incumbent_bonus = self.is_runner[env_ids].float() * hysteresis_bonus
+        
+        # Add bonus to scores
+        total_score = total_score + incumbent_bonus
+        
         # Compare Team 0: Pod 0 vs 1
         s0 = total_score[:, 0]
         s1 = total_score[:, 1]
@@ -696,17 +708,39 @@ class PodRacerEnv:
                 div_dist = dist_runner_to_cp.unsqueeze(1) + 1e-6
                 dir_runner_to_cp = vec_runner_to_cp / div_dist
 
-                # Project Bot Position? No, project "Intercept Point"
-                # "Gatekeeper": 1500u in front of CP
-                # [FIX]: Scale Offset with Difficulty (High Diff = Tighter Guard = Smaller Offset)
-                # Diff 0 -> 2500, Diff 1 -> 500
-                diff_factor = self.bot_difficulty
-                offset_val = 2500.0 - (2000.0 * diff_factor) # Linear from 2500 to 500
-                intercept_pos = cp_pos - (dir_runner_to_cp * offset_val)
+                # --- NEW ACTIVE INTERCEPT LOGIC ---
+                curr_difficulty = self.bot_difficulty
+                
+                # 1. Gatekeeper Logic (Red Zone or Low Difficulty)
+                # Tighter guard at high difficulty
+                offset_val_base = 2500.0 - (2000.0 * curr_difficulty) # 2500 -> 500
+                gatekeeper_pos = cp_pos - (dir_runner_to_cp * offset_val_base)
+
+                # 2. Active Intercept Logic (Open Field & High Difficulty)
+                # Predict where runner will be.
+                agent_vel = self.physics.vel[batch_indices, target_idx]
+                bot_vel = self.physics.vel[:, bot_id]
+                
+                # Scale prediction horizon with difficulty
+                # Low diff = 0.0 (Reactive). High diff = 1.0 (Predictive).
+                pred_scale = curr_difficulty
+                intercept_pos_active = self._get_front_intercept_pos(bot_pos, agent_pos, agent_vel * pred_scale, bot_vel)
+                
+                # 3. Zone Logic
+                # If Runner is far from CP (> 3000), use Active Intercept.
+                # If Runner is close (< 3000), fall back to Gatekeeper to avoid getting juked.
+                # Also blend based on difficulty: Low difficulty bots stay Gatekeeper more.
+                
+                use_active_intercept = (dist_runner_to_cp > 3000.0) & (torch.rand(self.num_envs, device=self.device) < (curr_difficulty * 1.2)) # Chance to use active increases with diff
+                
+                blocker_lead_pos = torch.where(use_active_intercept.unsqueeze(1), intercept_pos_active, gatekeeper_pos)
 
                 # Emergency Ram: If Agent is close to CP (<2000), target Agent directly
-                close_mask = (dist_runner_to_cp < 2000.0).unsqueeze(1) # [B, 1]
-                blocker_target = torch.where(close_mask, agent_pos, intercept_pos)
+                # Or if we are very close to agent (Opportunistic Ram)
+                dist_to_agent = torch.norm(agent_pos - bot_pos, dim=1)
+                
+                close_mask = (dist_runner_to_cp < 2000.0) | (dist_to_agent < 1500.0)
+                blocker_target = torch.where(close_mask.unsqueeze(1), agent_pos, blocker_lead_pos)
 
                 # C. SELECT TARGET based on Role
                 # is_bot_runner: [B] -> [B, 1]
@@ -724,9 +758,8 @@ class PodRacerEnv:
 
                 # --- Dynamic Difficulty Scaling ---
                 
-                # --- Dynamic Difficulty Scaling ---
                 # 1. Steering Noise
-                curr_difficulty = self.bot_difficulty
+                # curr_difficulty loaded above
                 noise_scale = (1.0 - curr_difficulty) * self.bot_config.difficulty_noise_scale
                 
                 noise = (torch.rand(self.num_envs, device=self.device) * 2.0 - 1.0) * noise_scale
@@ -751,18 +784,13 @@ class PodRacerEnv:
                 thrust_val = self.bot_config.thrust_base + (self.bot_config.thrust_scale * curr_difficulty)
                 
                 # [FIX] Ramming Speed: If aiming at target (Runner) and close, BOOST thrust
-                # blocker_target vs runner_target?
-                # We want to know if we are in "Ramming Mode".
-                # If we are blocker, and target is runner (or intercept point close to runner), and aligned.
-                # [FIX] Ramming Speed: If aiming at target (Runner) and close, BOOST thrust
                 # We apply this if we are a Blocker (not is_bot_runner)
                 
                 # Check alignment
-                is_aligned = torch.abs(delta) < 20.0
-                is_close_enough = dist_to_target < 4000.0
+                is_aligned = torch.abs(delta) < 20.0 # generous alignment
+                is_close_enough = dist_to_target < 4000.0 # Increased range for pursuit
                 
                 # Ram Mask: Aligned AND Close AND Blocker
-                # is_bot_runner is [B] boolean (0 or 1)
                 is_blocker = ~is_bot_runner
                 
                 ram_mask = is_aligned & is_close_enough & is_blocker
@@ -771,18 +799,37 @@ class PodRacerEnv:
                 thrust_val = torch.where(ram_mask, thrust_val + self.bot_config.ramming_speed_scale, thrust_val)
                 
                 # [FIX] Bot Stabilization: Slow down near checkpoints to avoid "Orbiting"
-                # If too fast, the bot cannot turn sharply enough to hit the radius.
-                # [FIXED] Bot Stabilization: Less aggressive slow down
-                # Using generic 'dist_to_target' 
-                slow_down_mask = (dist_to_target < 1500.0)
+                # ONLY if Runner (navigating to CP) OR Gatekeeper (Holding position)
+                # If Ramming/Active Intercept, NO BRAKES.
+                
+                should_brake = is_bot_runner | ( (~use_active_intercept) & (~ram_mask) )
+                
+                # Slow down logic
+                slow_down_mask = (dist_to_target < 1500.0) & should_brake
                 thrust_val = torch.where(slow_down_mask, thrust_val * 0.8, thrust_val)
-                very_close_mask = (dist_to_target < 600.0)
+                very_close_mask = (dist_to_target < 600.0) & should_brake
                 thrust_val = torch.where(very_close_mask, thrust_val * 0.5, thrust_val)
                 
                 act_thrust[:, bot_id] = thrust_val 
                 
                 act_shield[:, bot_id] = False
-                act_boost[:, bot_id] = False
+                
+                # [FIX] BOOST LOGIC
+                # Only in STAGE > TEAM (Stage 4+)
+                # We check curriculum_stage. Stage 4 = STAGE_TEAM.
+                can_boost = (self.curriculum_stage >= STAGE_TEAM)
+                
+                # Boost if:
+                # 1. Ramming (Aligned, Close, Blocker)
+                # 2. Catch up (Aligned, Far, Runner/Blocker)
+                # 3. High Difficulty (> 0.5)
+                
+                want_boost = (ram_mask | (is_aligned & (dist_to_target > 5000.0))) & (curr_difficulty > 0.5)
+                
+                if can_boost:
+                    act_boost[:, bot_id] = want_boost
+                else:
+                    act_boost[:, bot_id] = False
         
         # Track Previous Position for Continuous Collision Detection (CCD)
         prev_pos = self.physics.pos.clone()
@@ -1962,6 +2009,9 @@ class PodRacerEnv:
         # --- FINAL BLENDING ---
         # Hybrid Reward:
         # R_total = R_indiv + Blend(R_team, spirit)
+        if self.curriculum_stage >= STAGE_TEAM:
+             pass
+        
         final_rewards = rewards_indiv + rewards_team
         
         return final_rewards, self.dones.clone(), infos

@@ -56,8 +56,8 @@ class TestTeamSpiritAndBlocker(unittest.TestCase):
         # Action: 0 (No op). Shape [B, 4, 4] (Throttle, Steer, Shield, Boost)
         actions = torch.zeros((2, 4, 4), device=self.device)
         
-        # Create Dummy Reward Weights [2, 16] (assuming 16 reward types)
-        reward_weights = torch.ones((2, 16), device=self.device)
+        # Create Dummy Reward Weights [2, 20] (Cover all indices)
+        reward_weights = torch.ones((2, 20), device=self.device)
         # Set RW_CHECKPOINT (index 2 usually) to a known high value
         reward_weights[:, 2] = 500.0
         
@@ -75,39 +75,44 @@ class TestTeamSpiritAndBlocker(unittest.TestCase):
         self.assertLess(abs(blocker_rew), 10.0, "Blocker should get ~0 reward (only small penalties/noise)")
         
     def test_team_spirit_annealing(self):
-        """Verify Team Spirit calculates correctly based on Evolution Steps."""
+        """Verify Team Spirit calculates correctly based on Evolution Steps and Difficulty Config."""
         # Mock Trainer
         class MockTrainer:
             def __init__(self):
                 self.team_spirit = 0.0 # Start
                 self.population = [{'ema_wins': 0.0}]
                 self.leader_idx = 0
-                self.env = type('obj', (object,), {'curriculum_stage': STAGE_TEAM})
+                self.env = type('obj', (object,), {'curriculum_stage': STAGE_TEAM, 'bot_difficulty': 0.5})()
+                
+            def log(self, msg):
+                pass
                 
         trainer = MockTrainer()
         manager = CurriculumManager(self.curr_config)
         manager.current_stage_id = STAGE_TEAM
         
-        # 1. Verify NO Change on regular update (Iteration)
-        spirit = manager.update_team_spirit(trainer)
-        print(f"Iter check -> Spirit {spirit}")
-        self.assertAlmostEqual(spirit, 0.0, msg="Should NOT auto-increment on update_team_spirit")
-        
-        # 2. Verify +0.01 on Evolution Step
+        # 1. Verify NO Change if Difficulty < Threshold (0.75)
+        trainer.env.bot_difficulty = 0.5
         manager.on_evolution_step(trainer)
-        print(f"Evol 1 -> Spirit {trainer.team_spirit}")
-        self.assertAlmostEqual(trainer.team_spirit, 0.01, msg="Should increment by 0.01 on evolution")
+        print(f"Diff 0.5 (Low) -> Spirit {trainer.team_spirit}")
+        self.assertEqual(trainer.team_spirit, 0.0, msg="Should NOT anneal if difficulty is low")
+        
+        # 2. Verify Change if Difficulty >= Threshold
+        trainer.env.bot_difficulty = 0.75
+        manager.on_evolution_step(trainer)
+        print(f"Diff 0.75 (Threshold) -> Spirit {trainer.team_spirit}")
+        self.assertAlmostEqual(trainer.team_spirit, 0.002, msg="Should increment by 0.002 (Config Default)")
         
         # 3. Verify Accumulation
         manager.on_evolution_step(trainer)
         print(f"Evol 2 -> Spirit {trainer.team_spirit}")
-        self.assertAlmostEqual(trainer.team_spirit, 0.02)
+        self.assertAlmostEqual(trainer.team_spirit, 0.004)
         
         # 4. Saturation Test
-        trainer.team_spirit = 0.995
+        trainer.team_spirit = 0.999
         manager.on_evolution_step(trainer)
-        print(f"Evol X (0.995) -> Spirit {trainer.team_spirit}")
-        self.assertAlmostEqual(trainer.team_spirit, 1.0)
+        print(f"Evol X (0.999) -> Spirit {trainer.team_spirit}")
+        self.assertAlmostEqual(trainer.team_spirit, 1.0) # Cap at 1.0
         
         manager.on_evolution_step(trainer)
         print(f"Evol Y (1.0) -> Spirit {trainer.team_spirit}")

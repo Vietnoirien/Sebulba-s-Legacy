@@ -520,6 +520,7 @@ class TrainingSession:
                 if agent_id in self.trainer.pareto_indices:
                     is_pareto = True
 
+
             payload = {
                 "type": "step",
                 "step": step,

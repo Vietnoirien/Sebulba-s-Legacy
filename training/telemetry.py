@@ -163,7 +163,13 @@ class TelemetryWorker(mp.Process):
             p_thrust = float(actions[i, 0]) * 100.0 if actions is not None else 0.0
             p_shield = float(actions[i, 2]) if actions is not None else 0.0
             p_boost = float(actions[i, 3]) if actions is not None else 0.0
-            p_reward = float(rewards[team]) if rewards is not None else 0.0
+
+            
+            # [FIX] Use pod index 'i' instead of 'team' index. 
+            # Check bounds because 'rewards' size depends on active agents (e.g. Stage 1 has len=1)
+            p_reward = 0.0
+            if rewards is not None and i < len(rewards):
+                p_reward = float(rewards[i])
             
             p_collision = 0.0
             if coll_flags is not None:

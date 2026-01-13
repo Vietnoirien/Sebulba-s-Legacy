@@ -412,7 +412,7 @@ class TeamStage(Stage):
         # Team Mode requires more time for complex strategies (Blocking/Coop) to emerge
         # and for the agent to stabilize its coordination policy.
         # 2 Iterations is too fast (aggressive culling). Increasing to 5.
-        return 4
+        return 5
 
     def get_active_pods(self) -> List[int]:
         return [0, 1]

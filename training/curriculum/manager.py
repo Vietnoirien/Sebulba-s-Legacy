@@ -153,15 +153,25 @@ class CurriculumManager:
     def on_evolution_step(self, trainer):
         """
         Called when population evolution occurs.
-        Increments team_spirit by 0.01 (Standard) or 0.05 (Turbo if Difficulty Maxed).
+        Increments team_spirit based on config.
         """
-        if self.current_stage_id >= STAGE_TEAM:
-            # Dynamic Annealing
-            # If Bot Difficulty is Maxed (Ready for Graduation), speed up Spirit Annealing
-            grad_diff = self.config.team_graduation_difficulty
-            if trainer.env.bot_difficulty >= grad_diff:
-                 step = 0.05 # Turbo Spirit: 20 evolutions -> 100%
-            else:
-                 step = 0.01 # Standard Spirit: 100 evolutions -> 100%
+        if self.current_stage_id == STAGE_TEAM:
+            # Check difficulty threshold
+            # Only anneal if difficulty is high enough (Competent Opponents)
+            min_diff = getattr(self.config, 'team_spirit_min_difficulty', 0.75)
             
-            trainer.team_spirit = min(1.0, trainer.team_spirit + step)
+            if trainer.env.bot_difficulty >= min_diff:
+                step = getattr(self.config, 'team_spirit_anneal_rate', 0.002)
+                
+                # Check for completion
+                if trainer.team_spirit < 1.0:
+                    new_spirit = min(1.0, trainer.team_spirit + step)
+                    if new_spirit != trainer.team_spirit:
+                         trainer.team_spirit = new_spirit
+                         # Log occasionally? Or just let it happen silently to reduce spam.
+                         # Maybe log every 0.1 increment?
+                         if int(new_spirit * 10) > int((new_spirit - step) * 10):
+                             trainer.log(f"Team Spirit Annealing: {trainer.team_spirit:.2f} (Rate {step})")
+            else:
+                # Optional: Log if stuck? No, silent is better.
+                pass

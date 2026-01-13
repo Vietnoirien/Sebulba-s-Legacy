@@ -1008,6 +1008,9 @@ class PPOTrainer:
              best_guy = max(candidates, key=lambda i: self.population[i].get('ema_wins', 0.0) if self.population[i].get('ema_wins') is not None else 0.0)
              
         self.leader_idx = self.population[best_guy]['id']
+        
+        # [FIX] Trigger Curriculum Evolution Step (e.g. Team Spirit Annealing)
+        self.curriculum.on_evolution_step(self)
 
     def broadcast_blocker_weights(self, source_agent_id: int):
         """
@@ -1226,7 +1229,7 @@ class PPOTrainer:
         
         self.log(border)
         self.log(f" ITERATION {self.iteration} | Gen {self.generation} | Step {global_step} | SPS {sps} | Iter: {iter_str} | Total: {total_str}")
-        self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f} | Spirit: {self.team_spirit:.2f} | Step Pen: {curr_step_pen:.1f}")
+        self.log(f" Stage: {self.env.curriculum_stage} | Difficulty: {self.env.bot_difficulty:.2f} | Tau: {current_tau:.2f} | Spirit: {self.team_spirit:.4f} | Step Pen: {curr_step_pen:.1f}")
         self.log("-" * 80)
         self.log(f" {'Metric':<15} | {'Leader':<10} | {'Pop Avg':<10} | {'Best Agt':<10}")
         self.log("-" * 80)

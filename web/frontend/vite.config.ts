@@ -5,4 +5,10 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   assetsInclude: ['**/*.glb', '**/*.obj', '**/*.mtl'],
+  server: {
+    watch: {
+      usePolling: true,
+      ignored: ['**/node_modules/**', '**/.git/**', '**/dist/**'],
+    },
+  },
 })

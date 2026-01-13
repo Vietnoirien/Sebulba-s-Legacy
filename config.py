@@ -175,6 +175,10 @@ class CurriculumConfig:
     wr_progression_super_turbo: float = 0.70 # +0.05
     wr_progression_insane_turbo: float = 0.85 # +0.1
     
+    # Team Spirit Annealing
+    team_spirit_anneal_rate: float = 0.002 # Default 0.002 (~1.28M steps transition)
+    team_spirit_min_difficulty: float = 0.75 # Minimum difficulty to start annealing spirit
+    
     # Difficulty Steps
     diff_step_decrease: float = 0.02
     diff_step_standard: float = 0.01

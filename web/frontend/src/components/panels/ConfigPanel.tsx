@@ -36,7 +36,7 @@ export const ConfigPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useLocalStorage<'stages' | 'rewards' | 'training' | 'presets'>('spt2_config_activeTab_v2', 'stages')
 
     // --- State ---
-    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v23', {
+    const [rewards, setRewards] = useLocalStorage('spt2_config_rewards_v24', {
         weights: {
             [RW.WIN]: 10000.0,
             [RW.LOSS]: 2000.0,
@@ -57,8 +57,7 @@ export const ConfigPanel: React.FC = () => {
             [RW.ZONE]: 5.0,
             [RW.ZONE_PRESSURE]: 20.0 // Primary Positioning Reward
         },
-        tau: 0.0,
-        team_spirit: 0.0
+        tau: 0.0
     })
 
     const [rewardScaling, setRewardScaling] = useLocalStorage('spt2_config_rewardScaling_v8', {
@@ -467,8 +466,6 @@ export const ConfigPanel: React.FC = () => {
                                 onChange={(e) => setWeight(RW.ZONE, parseFloat(e.target.value))} />
                             <Slider label="ZONE PRESSURE (GUIDANCE)" min={0} max={100} step={1.0} value={rewards.weights[RW.ZONE_PRESSURE] || 20.0}
                                 onChange={(e) => setWeight(RW.ZONE_PRESSURE, parseFloat(e.target.value))} />
-                            <Slider label="TEAM SPIRIT" min={0} max={1} step={0.05} value={rewards.team_spirit}
-                                onChange={(e) => setRewards(prev => ({ ...prev, team_spirit: parseFloat(e.target.value) }))} />
                         </div>
 
                         {/* Advanced Scaling */}
